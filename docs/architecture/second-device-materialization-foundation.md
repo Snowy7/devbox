@@ -99,6 +99,6 @@ Remaining Phase 1 work includes:
 - hosted metadata service and server-side cursor reconciliation
 - real R2/S3 credentials and final object layout
 - production pairing UX, recovery, and rotation
-- conflict-as-divergent-snapshot compare/merge flows
+- automatic conflict merge, sync refusal integration, and user-facing conflict flows
 - minimal tray/Electron continuation UI
 - explicit path-scoped secret allow/template/envelope policy

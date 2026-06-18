@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 devbox-auth = { path = "../devbox-auth" }
+devbox-conflict = { path = "../devbox-conflict" }
 devbox-core = { path = "../devbox-core" }
 devbox-materialize = { path = "../devbox-materialize" }
 devbox-snapshot = { path = "../devbox-snapshot" }

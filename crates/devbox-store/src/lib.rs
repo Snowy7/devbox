@@ -8,12 +8,13 @@ use devbox_auth::{
     revoke_trusted_device, AuthSession, DeviceProjectCursor, DeviceTrustRecord, KeyEnvelope,
     PairingApproval, PairingInvitation,
 };
+use devbox_conflict::{ConflictSummary, PathComparisonState};
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision, ProjectId};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -31,6 +32,8 @@ const SUMMARY_TABLES: &[&str] = &[
     "key_envelopes",
     "revocation_markers",
     "device_project_cursors",
+    "conflicts",
+    "conflict_rows",
     "policies",
     "policy_evaluations",
     "restore_attempts",
@@ -44,6 +47,7 @@ pub enum StoreError {
     InvalidSnapshotDraft(String),
     InvalidStoredValue(String),
     DuplicateSnapshotId(String),
+    InvalidConflictStatus(String),
     PairingInvitationAlreadyClaimed(String),
 }
 
@@ -59,6 +63,7 @@ impl fmt::Display for StoreError {
             Self::InvalidSnapshotDraft(message) => f.write_str(message),
             Self::InvalidStoredValue(message) => f.write_str(message),
             Self::DuplicateSnapshotId(id) => write!(f, "snapshot already exists: {id}"),
+            Self::InvalidConflictStatus(status) => write!(f, "invalid conflict status: {status}"),
             Self::PairingInvitationAlreadyClaimed(id) => {
                 write!(f, "pairing invitation is already claimed or missing: {id}")
             }
@@ -75,6 +80,7 @@ impl std::error::Error for StoreError {
             | Self::InvalidSnapshotDraft(_)
             | Self::InvalidStoredValue(_)
             | Self::DuplicateSnapshotId(_)
+            | Self::InvalidConflictStatus(_)
             | Self::PairingInvitationAlreadyClaimed(_) => None,
         }
     }
@@ -157,6 +163,11 @@ impl Store {
         if version < 6 {
             self.conn
                 .execute_batch(MIGRATION_6_PAIRING_INVITATION_SINGLE_USE)?;
+        }
+
+        if version < 7 {
+            self.conn
+                .execute_batch(MIGRATION_7_CONFLICT_DIVERGENT_SNAPSHOTS)?;
         }
 
         Ok(())
@@ -1213,6 +1224,301 @@ impl Store {
         Ok(changed)
     }
 
+    pub fn persist_conflict(
+        &mut self,
+        conflict: &NewConflict<'_>,
+        rows: &[NewConflictRow<'_>],
+    ) -> StoreResult<ConflictWithRows> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO conflicts (
+                id,
+                project_id,
+                base_snapshot_id,
+                base_snapshot_key,
+                local_snapshot_id,
+                incoming_snapshot_id,
+                status,
+                created_at,
+                row_count,
+                same_count,
+                local_only_count,
+                incoming_only_count,
+                local_deleted_count,
+                incoming_deleted_count,
+                both_modified_same_count,
+                both_modified_different_count,
+                policy_excluded_count,
+                policy_deferred_count,
+                policy_blocked_count,
+                unsupported_count
+            )
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19
+            )
+            "#,
+            params![
+                conflict.id,
+                conflict.project_id,
+                conflict.base_snapshot_id,
+                conflict.base_snapshot_id.unwrap_or("-"),
+                conflict.local_snapshot_id,
+                conflict.incoming_snapshot_id,
+                conflict.created_at,
+                conflict.summary.total() as u64,
+                conflict.summary.same() as u64,
+                conflict.summary.local_only() as u64,
+                conflict.summary.incoming_only() as u64,
+                conflict.summary.local_deleted() as u64,
+                conflict.summary.incoming_deleted() as u64,
+                conflict.summary.both_modified_same() as u64,
+                conflict.summary.both_modified_different() as u64,
+                conflict.summary.policy_excluded() as u64,
+                conflict.summary.policy_deferred() as u64,
+                conflict.summary.policy_blocked() as u64,
+                conflict.summary.unsupported() as u64,
+            ],
+        )?;
+
+        for (index, row) in rows.iter().enumerate() {
+            tx.execute(
+                r#"
+                INSERT OR IGNORE INTO conflict_rows (
+                    conflict_id,
+                    row_index,
+                    path,
+                    state,
+                    entry_kind,
+                    base_blob_id,
+                    local_blob_id,
+                    incoming_blob_id,
+                    base_size_bytes,
+                    local_size_bytes,
+                    incoming_size_bytes,
+                    local_policy_decision,
+                    local_policy_reason,
+                    incoming_policy_decision,
+                    incoming_policy_reason
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                "#,
+                params![
+                    conflict.id,
+                    index as u64,
+                    path_to_store_string(row.path),
+                    row.state.as_str(),
+                    kind_to_store(row.entry_kind),
+                    row.base_blob_id.map(BlobId::as_str),
+                    row.local_blob_id.map(BlobId::as_str),
+                    row.incoming_blob_id.map(BlobId::as_str),
+                    row.base_size_bytes,
+                    row.local_size_bytes,
+                    row.incoming_size_bytes,
+                    row.local_policy_decision
+                        .map(policy_to_store)
+                        .map(|value| value.0),
+                    row.local_policy_decision
+                        .and_then(|policy| policy_to_store(policy).1),
+                    row.incoming_policy_decision
+                        .map(policy_to_store)
+                        .map(|value| value.0),
+                    row.incoming_policy_decision
+                        .and_then(|policy| policy_to_store(policy).1),
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        self.conflict_with_rows(conflict.id)?.ok_or_else(|| {
+            StoreError::InvalidMigrationState("persisted conflict is missing".into())
+        })
+    }
+
+    pub fn list_conflicts(&self, project_id: Option<&str>) -> StoreResult<Vec<ConflictRecord>> {
+        let mut statement = if project_id.is_some() {
+            self.conn.prepare(
+                r#"
+                SELECT
+                    id,
+                    project_id,
+                    base_snapshot_id,
+                    local_snapshot_id,
+                    incoming_snapshot_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    row_count,
+                    same_count,
+                    local_only_count,
+                    incoming_only_count,
+                    local_deleted_count,
+                    incoming_deleted_count,
+                    both_modified_same_count,
+                    both_modified_different_count,
+                    policy_excluded_count,
+                    policy_deferred_count,
+                    policy_blocked_count,
+                    unsupported_count
+                FROM conflicts
+                WHERE project_id = ?1
+                ORDER BY created_at DESC, id ASC
+                "#,
+            )?
+        } else {
+            self.conn.prepare(
+                r#"
+                SELECT
+                    id,
+                    project_id,
+                    base_snapshot_id,
+                    local_snapshot_id,
+                    incoming_snapshot_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    row_count,
+                    same_count,
+                    local_only_count,
+                    incoming_only_count,
+                    local_deleted_count,
+                    incoming_deleted_count,
+                    both_modified_same_count,
+                    both_modified_different_count,
+                    policy_excluded_count,
+                    policy_deferred_count,
+                    policy_blocked_count,
+                    unsupported_count
+                FROM conflicts
+                ORDER BY created_at DESC, id ASC
+                "#,
+            )?
+        };
+
+        let rows = match project_id {
+            Some(project_id) => statement
+                .query_map(params![project_id], conflict_record_from_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => statement
+                .query_map([], conflict_record_from_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        Ok(rows)
+    }
+
+    pub fn conflict_with_rows(&self, id: &str) -> StoreResult<Option<ConflictWithRows>> {
+        let Some(conflict) = self.conflict(id)? else {
+            return Ok(None);
+        };
+        let rows = self.conflict_rows(id)?;
+
+        Ok(Some(ConflictWithRows { conflict, rows }))
+    }
+
+    pub fn update_conflict_status(
+        &self,
+        id: &str,
+        status: ConflictStatus,
+        updated_at: &str,
+    ) -> StoreResult<Option<ConflictRecord>> {
+        let changed = self.conn.execute(
+            r#"
+            UPDATE conflicts
+            SET status = ?1,
+                updated_at = ?2
+            WHERE id = ?3
+            "#,
+            params![status.as_str(), updated_at, id],
+        )?;
+
+        if changed == 0 {
+            return Ok(None);
+        }
+
+        self.conflict(id)
+    }
+
+    fn conflict(&self, id: &str) -> StoreResult<Option<ConflictRecord>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    project_id,
+                    base_snapshot_id,
+                    local_snapshot_id,
+                    incoming_snapshot_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    row_count,
+                    same_count,
+                    local_only_count,
+                    incoming_only_count,
+                    local_deleted_count,
+                    incoming_deleted_count,
+                    both_modified_same_count,
+                    both_modified_different_count,
+                    policy_excluded_count,
+                    policy_deferred_count,
+                    policy_blocked_count,
+                    unsupported_count
+                FROM conflicts
+                WHERE id = ?1
+                "#,
+                params![id],
+                conflict_record_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    fn conflict_rows(&self, id: &str) -> StoreResult<Vec<ConflictRowRecord>> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT
+                path,
+                state,
+                entry_kind,
+                base_blob_id,
+                local_blob_id,
+                incoming_blob_id,
+                base_size_bytes,
+                local_size_bytes,
+                incoming_size_bytes,
+                local_policy_decision,
+                local_policy_reason,
+                incoming_policy_decision,
+                incoming_policy_reason
+            FROM conflict_rows
+            WHERE conflict_id = ?1
+            ORDER BY row_index ASC, path ASC
+            "#,
+        )?;
+
+        let rows = statement.query_map(params![id], |row| {
+            Ok(RawConflictRowRecord {
+                relative_path: PathBuf::from(row.get::<_, String>(0)?),
+                state: row.get(1)?,
+                entry_kind: row.get(2)?,
+                base_blob_id: row.get(3)?,
+                local_blob_id: row.get(4)?,
+                incoming_blob_id: row.get(5)?,
+                base_size_bytes: row.get(6)?,
+                local_size_bytes: row.get(7)?,
+                incoming_size_bytes: row.get(8)?,
+                local_policy_decision: row.get(9)?,
+                local_policy_reason: row.get(10)?,
+                incoming_policy_decision: row.get(11)?,
+                incoming_policy_reason: row.get(12)?,
+            })
+        })?;
+
+        rows.map(|row| ConflictRowRecord::try_from(row?)).collect()
+    }
+
     fn manifest_entries(&self, snapshot_id: &str) -> StoreResult<Vec<ManifestEntryRecord>> {
         let mut statement = self.conn.prepare(
             r#"
@@ -1433,6 +1739,94 @@ pub struct PendingLocalChangeRecord {
     pub detected_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictStatus {
+    Open,
+    Resolved,
+    Dismissed,
+}
+
+impl ConflictStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Resolved => "resolved",
+            Self::Dismissed => "dismissed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewConflict<'a> {
+    pub id: &'a str,
+    pub project_id: &'a str,
+    pub base_snapshot_id: Option<&'a str>,
+    pub local_snapshot_id: &'a str,
+    pub incoming_snapshot_id: &'a str,
+    pub summary: &'a ConflictSummary,
+    pub created_at: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewConflictRow<'a> {
+    pub path: &'a Path,
+    pub state: PathComparisonState,
+    pub entry_kind: &'a ManifestEntryKind,
+    pub base_blob_id: Option<&'a BlobId>,
+    pub local_blob_id: Option<&'a BlobId>,
+    pub incoming_blob_id: Option<&'a BlobId>,
+    pub base_size_bytes: Option<u64>,
+    pub local_size_bytes: Option<u64>,
+    pub incoming_size_bytes: Option<u64>,
+    pub local_policy_decision: Option<&'a PolicyDecision>,
+    pub incoming_policy_decision: Option<&'a PolicyDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictWithRows {
+    pub conflict: ConflictRecord,
+    pub rows: Vec<ConflictRowRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictRecord {
+    pub id: String,
+    pub project_id: String,
+    pub base_snapshot_id: Option<String>,
+    pub local_snapshot_id: String,
+    pub incoming_snapshot_id: String,
+    pub status: ConflictStatus,
+    pub created_at: String,
+    pub updated_at: String,
+    pub row_count: u64,
+    pub same_count: u64,
+    pub local_only_count: u64,
+    pub incoming_only_count: u64,
+    pub local_deleted_count: u64,
+    pub incoming_deleted_count: u64,
+    pub both_modified_same_count: u64,
+    pub both_modified_different_count: u64,
+    pub policy_excluded_count: u64,
+    pub policy_deferred_count: u64,
+    pub policy_blocked_count: u64,
+    pub unsupported_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictRowRecord {
+    pub relative_path: PathBuf,
+    pub state: PathComparisonState,
+    pub entry_kind: ManifestEntryKind,
+    pub base_blob_id: Option<BlobId>,
+    pub local_blob_id: Option<BlobId>,
+    pub incoming_blob_id: Option<BlobId>,
+    pub base_size_bytes: Option<u64>,
+    pub local_size_bytes: Option<u64>,
+    pub incoming_size_bytes: Option<u64>,
+    pub local_policy_decision: Option<PolicyDecision>,
+    pub incoming_policy_decision: Option<PolicyDecision>,
+}
+
 #[derive(Debug)]
 struct RawManifestEntryRecord {
     relative_path: PathBuf,
@@ -1458,6 +1852,61 @@ struct RawPendingLocalChangeRecord {
     size_bytes: u64,
     status: String,
     detected_at: String,
+}
+
+#[derive(Debug)]
+struct RawConflictRowRecord {
+    relative_path: PathBuf,
+    state: String,
+    entry_kind: String,
+    base_blob_id: Option<String>,
+    local_blob_id: Option<String>,
+    incoming_blob_id: Option<String>,
+    base_size_bytes: Option<u64>,
+    local_size_bytes: Option<u64>,
+    incoming_size_bytes: Option<u64>,
+    local_policy_decision: Option<String>,
+    local_policy_reason: Option<String>,
+    incoming_policy_decision: Option<String>,
+    incoming_policy_reason: Option<String>,
+}
+
+impl TryFrom<RawConflictRowRecord> for ConflictRowRecord {
+    type Error = StoreError;
+
+    fn try_from(record: RawConflictRowRecord) -> StoreResult<Self> {
+        Ok(Self {
+            relative_path: record.relative_path,
+            state: comparison_state_from_store(&record.state)?,
+            entry_kind: kind_from_store(&record.entry_kind)?,
+            base_blob_id: record
+                .base_blob_id
+                .map(BlobId::from_blake3_hex)
+                .transpose()
+                .map_err(|error| invalid_domain_value("base blob id", error))?,
+            local_blob_id: record
+                .local_blob_id
+                .map(BlobId::from_blake3_hex)
+                .transpose()
+                .map_err(|error| invalid_domain_value("local blob id", error))?,
+            incoming_blob_id: record
+                .incoming_blob_id
+                .map(BlobId::from_blake3_hex)
+                .transpose()
+                .map_err(|error| invalid_domain_value("incoming blob id", error))?,
+            base_size_bytes: record.base_size_bytes,
+            local_size_bytes: record.local_size_bytes,
+            incoming_size_bytes: record.incoming_size_bytes,
+            local_policy_decision: optional_policy_from_store(
+                record.local_policy_decision,
+                record.local_policy_reason,
+            )?,
+            incoming_policy_decision: optional_policy_from_store(
+                record.incoming_policy_decision,
+                record.incoming_policy_reason,
+            )?,
+        })
+    }
 }
 
 impl TryFrom<RawPendingLocalChangeRecord> for PendingLocalChangeRecord {
@@ -1517,6 +1966,38 @@ pub fn path_to_store_string(path: &Path) -> String {
     } else {
         parts.join("/")
     }
+}
+
+fn conflict_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRecord> {
+    let status: String = row.get(5)?;
+    Ok(ConflictRecord {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        base_snapshot_id: row.get(2)?,
+        local_snapshot_id: row.get(3)?,
+        incoming_snapshot_id: row.get(4)?,
+        status: conflict_status_from_store(&status).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        row_count: row.get(8)?,
+        same_count: row.get(9)?,
+        local_only_count: row.get(10)?,
+        incoming_only_count: row.get(11)?,
+        local_deleted_count: row.get(12)?,
+        incoming_deleted_count: row.get(13)?,
+        both_modified_same_count: row.get(14)?,
+        both_modified_different_count: row.get(15)?,
+        policy_excluded_count: row.get(16)?,
+        policy_deferred_count: row.get(17)?,
+        policy_blocked_count: row.get(18)?,
+        unsupported_count: row.get(19)?,
+    })
 }
 
 fn random_prefixed_id(prefix: &str) -> StoreResult<String> {
@@ -1579,6 +2060,34 @@ fn change_kind_from_store(value: &str) -> StoreResult<LocalChangeKind> {
     }
 }
 
+fn conflict_status_from_store(value: &str) -> StoreResult<ConflictStatus> {
+    match value {
+        "open" => Ok(ConflictStatus::Open),
+        "resolved" => Ok(ConflictStatus::Resolved),
+        "dismissed" => Ok(ConflictStatus::Dismissed),
+        _ => Err(StoreError::InvalidConflictStatus(value.to_string())),
+    }
+}
+
+fn comparison_state_from_store(value: &str) -> StoreResult<PathComparisonState> {
+    match value {
+        "same" => Ok(PathComparisonState::Same),
+        "local-only" => Ok(PathComparisonState::LocalOnly),
+        "incoming-only" => Ok(PathComparisonState::IncomingOnly),
+        "local-deleted" => Ok(PathComparisonState::LocalDeleted),
+        "incoming-deleted" => Ok(PathComparisonState::IncomingDeleted),
+        "both-modified-same" => Ok(PathComparisonState::BothModifiedSame),
+        "both-modified-different" => Ok(PathComparisonState::BothModifiedDifferent),
+        "policy-excluded" => Ok(PathComparisonState::PolicyExcluded),
+        "policy-deferred" => Ok(PathComparisonState::PolicyDeferred),
+        "policy-blocked" => Ok(PathComparisonState::PolicyBlocked),
+        "unsupported" => Ok(PathComparisonState::Unsupported),
+        _ => Err(StoreError::InvalidStoredValue(format!(
+            "unknown conflict comparison state: {value}"
+        ))),
+    }
+}
+
 fn policy_to_store(policy: &PolicyDecision) -> (&'static str, Option<&str>) {
     match policy {
         PolicyDecision::Include => ("include", None),
@@ -1587,6 +2096,15 @@ fn policy_to_store(policy: &PolicyDecision) -> (&'static str, Option<&str>) {
             ("requires_user_decision", Some(reason.as_str()))
         }
     }
+}
+
+fn optional_policy_from_store(
+    decision: Option<String>,
+    reason: Option<String>,
+) -> StoreResult<Option<PolicyDecision>> {
+    decision
+        .map(|decision| policy_from_store(decision, reason))
+        .transpose()
 }
 
 fn policy_from_store(decision: String, reason: Option<String>) -> StoreResult<PolicyDecision> {
@@ -1952,6 +2470,90 @@ INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (6, 'pairing_invitation_single_use');
 
 PRAGMA user_version = 6;
+
+COMMIT;
+"#;
+
+const MIGRATION_7_CONFLICT_DIVERGENT_SNAPSHOTS: &str = r#"
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS conflicts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    base_snapshot_id TEXT REFERENCES snapshots(id) ON DELETE RESTRICT,
+    base_snapshot_key TEXT NOT NULL,
+    local_snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE RESTRICT,
+    incoming_snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'dismissed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    row_count INTEGER NOT NULL DEFAULT 0 CHECK (row_count >= 0),
+    same_count INTEGER NOT NULL DEFAULT 0 CHECK (same_count >= 0),
+    local_only_count INTEGER NOT NULL DEFAULT 0 CHECK (local_only_count >= 0),
+    incoming_only_count INTEGER NOT NULL DEFAULT 0 CHECK (incoming_only_count >= 0),
+    local_deleted_count INTEGER NOT NULL DEFAULT 0 CHECK (local_deleted_count >= 0),
+    incoming_deleted_count INTEGER NOT NULL DEFAULT 0 CHECK (incoming_deleted_count >= 0),
+    both_modified_same_count INTEGER NOT NULL DEFAULT 0 CHECK (both_modified_same_count >= 0),
+    both_modified_different_count INTEGER NOT NULL DEFAULT 0 CHECK (both_modified_different_count >= 0),
+    policy_excluded_count INTEGER NOT NULL DEFAULT 0 CHECK (policy_excluded_count >= 0),
+    policy_deferred_count INTEGER NOT NULL DEFAULT 0 CHECK (policy_deferred_count >= 0),
+    policy_blocked_count INTEGER NOT NULL DEFAULT 0 CHECK (policy_blocked_count >= 0),
+    unsupported_count INTEGER NOT NULL DEFAULT 0 CHECK (unsupported_count >= 0),
+    UNIQUE (project_id, base_snapshot_key, local_snapshot_id, incoming_snapshot_id)
+);
+
+CREATE TABLE IF NOT EXISTS conflict_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id TEXT NOT NULL REFERENCES conflicts(id) ON DELETE CASCADE,
+    row_index INTEGER NOT NULL CHECK (row_index >= 0),
+    path TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'same',
+            'local-only',
+            'incoming-only',
+            'local-deleted',
+            'incoming-deleted',
+            'both-modified-same',
+            'both-modified-different',
+            'policy-excluded',
+            'policy-deferred',
+            'policy-blocked',
+            'unsupported'
+        )
+    ),
+    entry_kind TEXT NOT NULL CHECK (entry_kind IN ('file', 'directory', 'symlink', 'unsupported')),
+    base_blob_id TEXT REFERENCES blobs(id) ON DELETE SET NULL,
+    local_blob_id TEXT REFERENCES blobs(id) ON DELETE SET NULL,
+    incoming_blob_id TEXT REFERENCES blobs(id) ON DELETE SET NULL,
+    base_size_bytes INTEGER CHECK (base_size_bytes IS NULL OR base_size_bytes >= 0),
+    local_size_bytes INTEGER CHECK (local_size_bytes IS NULL OR local_size_bytes >= 0),
+    incoming_size_bytes INTEGER CHECK (incoming_size_bytes IS NULL OR incoming_size_bytes >= 0),
+    local_policy_decision TEXT CHECK (
+        local_policy_decision IS NULL
+        OR local_policy_decision IN ('include', 'exclude', 'requires_user_decision')
+    ),
+    local_policy_reason TEXT,
+    incoming_policy_decision TEXT CHECK (
+        incoming_policy_decision IS NULL
+        OR incoming_policy_decision IN ('include', 'exclude', 'requires_user_decision')
+    ),
+    incoming_policy_reason TEXT,
+    UNIQUE (conflict_id, row_index),
+    UNIQUE (conflict_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conflicts_project_status_created
+    ON conflicts(project_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_conflicts_snapshots
+    ON conflicts(local_snapshot_id, incoming_snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_conflict_rows_conflict_path
+    ON conflict_rows(conflict_id, path);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (7, 'conflict_divergent_snapshot_foundation');
+
+PRAGMA user_version = 7;
 
 COMMIT;
 "#;
@@ -2374,6 +2976,196 @@ mod tests {
         assert_eq!(loaded.updated_at, "2026-06-18T10:01:00Z");
         let summary = store.schema_summary().expect("summary reads");
         assert_eq!(count(&summary, "device_project_cursors"), 1);
+    }
+
+    #[test]
+    fn conflict_records_persist_idempotently_with_deterministic_rows() {
+        let mut store = migrated_store();
+        let include = PolicyDecision::Include;
+        let base_blob = blob_id_for(b"base");
+        let local_blob = blob_id_for(b"local");
+        let incoming_blob = blob_id_for(b"incoming");
+        let base_path = Path::new("app.txt");
+        store
+            .persist_draft_snapshot(&draft(
+                "snapshot-base",
+                &[NewSnapshotManifestEntry {
+                    relative_path: base_path,
+                    kind: ManifestEntryKind::File,
+                    size_bytes: 4,
+                    blob_id: Some(&base_blob),
+                    object_ref: Some("blobs/b3/base"),
+                    policy_decision: &include,
+                }],
+            ))
+            .expect("base persists");
+        store
+            .persist_draft_snapshot(&draft(
+                "snapshot-local",
+                &[NewSnapshotManifestEntry {
+                    relative_path: base_path,
+                    kind: ManifestEntryKind::File,
+                    size_bytes: 5,
+                    blob_id: Some(&local_blob),
+                    object_ref: Some("blobs/b3/local"),
+                    policy_decision: &include,
+                }],
+            ))
+            .expect("local persists");
+        store
+            .persist_draft_snapshot(&draft(
+                "snapshot-incoming",
+                &[NewSnapshotManifestEntry {
+                    relative_path: base_path,
+                    kind: ManifestEntryKind::File,
+                    size_bytes: 8,
+                    blob_id: Some(&incoming_blob),
+                    object_ref: Some("blobs/b3/incoming"),
+                    policy_decision: &include,
+                }],
+            ))
+            .expect("incoming persists");
+
+        let summary = ConflictSummary::from_rows(&[]);
+        let row = NewConflictRow {
+            path: base_path,
+            state: PathComparisonState::BothModifiedDifferent,
+            entry_kind: &ManifestEntryKind::File,
+            base_blob_id: Some(&base_blob),
+            local_blob_id: Some(&local_blob),
+            incoming_blob_id: Some(&incoming_blob),
+            base_size_bytes: Some(4),
+            local_size_bytes: Some(5),
+            incoming_size_bytes: Some(8),
+            local_policy_decision: Some(&include),
+            incoming_policy_decision: Some(&include),
+        };
+        let conflict = NewConflict {
+            id: "conflict-1",
+            project_id: "project-1",
+            base_snapshot_id: Some("snapshot-base"),
+            local_snapshot_id: "snapshot-local",
+            incoming_snapshot_id: "snapshot-incoming",
+            summary: &summary,
+            created_at: "2026-06-18T10:10:00Z",
+        };
+
+        let first = store
+            .persist_conflict(&conflict, std::slice::from_ref(&row))
+            .expect("conflict persists");
+        let second = store
+            .persist_conflict(&conflict, std::slice::from_ref(&row))
+            .expect("duplicate create returns existing conflict");
+
+        assert_eq!(first.conflict.id, "conflict-1");
+        assert_eq!(second.conflict.id, "conflict-1");
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(second.rows.len(), 1);
+        assert_eq!(
+            second.rows[0].state,
+            PathComparisonState::BothModifiedDifferent
+        );
+        let listed = store
+            .list_conflicts(Some("project-1"))
+            .expect("conflicts list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, ConflictStatus::Open);
+
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "conflicts"), 1);
+        assert_eq!(count(&summary, "conflict_rows"), 1);
+    }
+
+    #[test]
+    fn conflict_status_transitions_are_small_and_explicit() {
+        let mut store = migrated_store();
+        let include = PolicyDecision::Include;
+        let blob = blob_id_for(b"same");
+        let path = Path::new("README.md");
+        let entries = [NewSnapshotManifestEntry {
+            relative_path: path,
+            kind: ManifestEntryKind::File,
+            size_bytes: 4,
+            blob_id: Some(&blob),
+            object_ref: Some("blobs/b3/same"),
+            policy_decision: &include,
+        }];
+        store
+            .persist_draft_snapshot(&draft("snapshot-local", &entries))
+            .expect("local persists");
+        store
+            .persist_draft_snapshot(&draft("snapshot-incoming", &entries))
+            .expect("incoming persists");
+        let summary = ConflictSummary::from_rows(&[]);
+        store
+            .persist_conflict(
+                &NewConflict {
+                    id: "conflict-status",
+                    project_id: "project-1",
+                    base_snapshot_id: None,
+                    local_snapshot_id: "snapshot-local",
+                    incoming_snapshot_id: "snapshot-incoming",
+                    summary: &summary,
+                    created_at: "2026-06-18T10:10:00Z",
+                },
+                &[],
+            )
+            .expect("conflict persists");
+
+        let resolved = store
+            .update_conflict_status(
+                "conflict-status",
+                ConflictStatus::Resolved,
+                "2026-06-18T10:11:00Z",
+            )
+            .expect("status updates")
+            .expect("conflict exists");
+
+        assert_eq!(resolved.status, ConflictStatus::Resolved);
+        assert_eq!(resolved.updated_at, "2026-06-18T10:11:00Z");
+        assert!(store
+            .update_conflict_status(
+                "missing-conflict",
+                ConflictStatus::Dismissed,
+                "2026-06-18T10:12:00Z",
+            )
+            .expect("missing status update is handled")
+            .is_none());
+    }
+
+    #[test]
+    fn conflict_foreign_keys_reject_missing_snapshots() {
+        let mut store = migrated_store();
+        store
+            .insert_project(&NewProject {
+                id: "project-1",
+                root_path: "/workspace/devbox",
+                kind: "Rust",
+                display_name: "devbox",
+                discovered_at: "2026-06-18T10:00:00Z",
+            })
+            .expect("project inserts");
+        let summary = ConflictSummary::from_rows(&[]);
+        let result = store.persist_conflict(
+            &NewConflict {
+                id: "conflict-missing-snapshots",
+                project_id: "project-1",
+                base_snapshot_id: None,
+                local_snapshot_id: "missing-local",
+                incoming_snapshot_id: "missing-incoming",
+                summary: &summary,
+                created_at: "2026-06-18T10:10:00Z",
+            },
+            &[],
+        );
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                error,
+                _
+            ))) if error.code == rusqlite::ErrorCode::ConstraintViolation
+        ));
     }
 
     #[test]

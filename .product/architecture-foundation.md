@@ -73,8 +73,10 @@ Current Phase 1 foundation status:
   local filesystem remote and apply it safely with the existing restore engine
 - local high-confidence secret detection blocks detected files before blob-cache writes and local
   publish paths
+- local conflict records compare divergent snapshots with path-level metadata rows and persist them
+  in SQLite without source bytes
 - real cloud authentication, hosted metadata, real object-storage credentials, production pairing UX,
-  explicit secret allow policy, and conflict resolution remain later Phase 1 work
+  explicit secret allow policy, automatic merge, and conflict UI remain later Phase 1 work
 
 ## Content Addressing
 

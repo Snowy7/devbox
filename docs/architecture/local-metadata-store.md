@@ -65,7 +65,7 @@ The existing `restore_attempts` table is still reserved for a later operation lo
 
 ## Migration Rules
 
-`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `6`.
+`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `7`.
 
 The initial migration creates:
 
@@ -112,6 +112,16 @@ Schema version `6` adds a unique invitation claim index for `trusted_devices.inv
 store also claims a pairing invitation inside the approval transaction with `status = 'pending'` so
 the same invitation cannot approve two devices.
 
+Schema version `7` adds local divergent-snapshot conflict metadata:
+
+- `conflicts`
+- `conflict_rows`
+
+These tables store readable path-level comparison metadata for local conflict records. They persist
+snapshot ids, status, summary counts, blob ids, sizes, policy decisions, and redacted policy reasons,
+but not source file bytes. Conflict creation is idempotent for the same project/base/local/incoming
+tuple.
+
 ## Deferred
 
 This boundary does not implement:
@@ -119,6 +129,7 @@ This boundary does not implement:
 - production cloud authentication, hosted sign-in, account ownership proof, or production pairing UX
 - backend account/device cursors
 - hosted second-device materialization metadata or server-side conflict resolution
+- automatic merge or conflict UI
 - compression
 - packfiles
 - cache eviction or garbage collection
