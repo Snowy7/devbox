@@ -4,6 +4,10 @@ use devbox_auth::{
 };
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision};
+use devbox_materialize::{
+    import_snapshot, materialize_snapshot, publish_snapshot, ImportSnapshotRequest,
+    MaterializationRequest, PublishSnapshotRequest,
+};
 use devbox_snapshot::{
     preflight_cache_root, preflight_db_path, scan_local_change_feed, LocalChangeFeedScanOptions,
     RestoreMaterializer, RestorePlan, RestoreSkippedEntry, RestoreTargetStatus, RestoreWrite,
@@ -18,7 +22,7 @@ use devbox_sync::{
     download_blob_to_cache, encrypted_blob_object_key, upload_blob_from_cache,
     LocalFilesystemBlobProvider, ObjectKey, SyncKey,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -212,6 +216,26 @@ struct SyncBlobArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncSnapshotArgs {
+    db_path: String,
+    cache_root: String,
+    remote_root: String,
+    snapshot_id: String,
+    mock_key_source_db: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncMaterializeArgs {
+    db_path: String,
+    cache_root: String,
+    remote_root: String,
+    target: String,
+    snapshot_id: String,
+    mock_key_source_db: Option<String>,
+    apply: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SyncCursorArgs {
     db_path: String,
     project_id: String,
@@ -328,6 +352,36 @@ fn run_devices(args: &[String]) -> ExitCode {
 
 fn run_sync(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
+        Some("publish-snapshot") => match parse_sync_snapshot_args(&args[1..], false)
+            .and_then(|args| sync_publish_snapshot(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_sync_usage();
+                ExitCode::from(1)
+            }
+        },
+        Some("import-snapshot") => match parse_sync_snapshot_args(&args[1..], true)
+            .and_then(|args| sync_import_snapshot(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_sync_usage();
+                ExitCode::from(1)
+            }
+        },
+        Some("materialize") => match parse_sync_materialize_args(&args[1..])
+            .and_then(|args| sync_materialize(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_sync_usage();
+                ExitCode::from(1)
+            }
+        },
         Some("upload") => match parse_sync_blob_args(&args[1..])
             .and_then(|args| sync_upload(&args).map_err(|error| error.to_string()))
         {
@@ -376,7 +430,9 @@ fn run_sync(args: &[String]) -> ExitCode {
             }
         },
         _ => {
-            eprintln!("devbox: sync requires upload, download, or cursor");
+            eprintln!(
+                "devbox: sync requires publish-snapshot, import-snapshot, materialize, upload, download, or cursor"
+            );
             print_sync_usage();
             ExitCode::from(2)
         }
@@ -628,6 +684,166 @@ fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
             .ok_or_else(|| "sync requires --remote <REMOTE_DIR>".to_string())?,
         blob_id: blob_id.ok_or_else(|| "sync requires a blob id".to_string())?,
         object_key,
+    })
+}
+
+fn parse_sync_snapshot_args(
+    args: &[String],
+    allow_mock_key_source: bool,
+) -> Result<SyncSnapshotArgs, String> {
+    let mut db_path = None;
+    let mut cache_root = None;
+    let mut remote_root = None;
+    let mut snapshot_id = None;
+    let mut mock_key_source_db = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--cache" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--cache requires a path".to_string())?;
+                cache_root = Some(value.clone());
+            }
+            "--remote" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--remote requires a directory".to_string())?;
+                remote_root = Some(value.clone());
+            }
+            "--mock-key-source-db" if allow_mock_key_source => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--mock-key-source-db requires a path".to_string())?;
+                mock_key_source_db = Some(value.clone());
+            }
+            "--mock-key-source-db" => {
+                return Err(
+                    "--mock-key-source-db is only accepted for import/materialize".to_string(),
+                );
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown sync snapshot option '{value}'"));
+            }
+            value => {
+                if snapshot_id.replace(value.to_string()).is_some() {
+                    return Err("sync snapshot commands accept exactly one snapshot id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(SyncSnapshotArgs {
+        db_path: db_path.ok_or_else(|| "sync snapshot requires --db <DB_PATH>".to_string())?,
+        cache_root: cache_root
+            .ok_or_else(|| "sync snapshot requires --cache <CACHE_ROOT>".to_string())?,
+        remote_root: remote_root
+            .ok_or_else(|| "sync snapshot requires --remote <REMOTE_DIR>".to_string())?,
+        snapshot_id: snapshot_id
+            .ok_or_else(|| "sync snapshot requires a snapshot id".to_string())?,
+        mock_key_source_db,
+    })
+}
+
+fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, String> {
+    let mut db_path = None;
+    let mut cache_root = None;
+    let mut remote_root = None;
+    let mut target = None;
+    let mut snapshot_id = None;
+    let mut mock_key_source_db = None;
+    let mut apply = false;
+    let mut mode_seen = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--cache" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--cache requires a path".to_string())?;
+                cache_root = Some(value.clone());
+            }
+            "--remote" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--remote requires a directory".to_string())?;
+                remote_root = Some(value.clone());
+            }
+            "--to" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--to requires a target directory".to_string())?;
+                target = Some(value.clone());
+            }
+            "--mock-key-source-db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--mock-key-source-db requires a path".to_string())?;
+                mock_key_source_db = Some(value.clone());
+            }
+            "--apply" => {
+                if mode_seen {
+                    return Err("choose only one of --dry-run or --apply".to_string());
+                }
+                mode_seen = true;
+                apply = true;
+            }
+            "--dry-run" => {
+                if mode_seen {
+                    return Err("choose only one of --dry-run or --apply".to_string());
+                }
+                mode_seen = true;
+                apply = false;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown sync materialize option '{value}'"));
+            }
+            value => {
+                if snapshot_id.replace(value.to_string()).is_some() {
+                    return Err("sync materialize accepts exactly one snapshot id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(SyncMaterializeArgs {
+        db_path: db_path.ok_or_else(|| "sync materialize requires --db <DB_PATH>".to_string())?,
+        cache_root: cache_root
+            .ok_or_else(|| "sync materialize requires --cache <CACHE_ROOT>".to_string())?,
+        remote_root: remote_root
+            .ok_or_else(|| "sync materialize requires --remote <REMOTE_DIR>".to_string())?,
+        target: target.ok_or_else(|| "sync materialize requires --to <TARGET_DIR>".to_string())?,
+        snapshot_id: snapshot_id
+            .ok_or_else(|| "sync materialize requires a snapshot id".to_string())?,
+        mock_key_source_db,
+        apply,
     })
 }
 
@@ -1094,6 +1310,136 @@ fn sync_download(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> 
     println!("Remote provider: local filesystem");
     println!("Remote root: {}", provider.root().display());
     println!("Cloud authentication: not configured");
+
+    Ok(())
+}
+
+fn sync_publish_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let published = publish_snapshot(
+        &PublishSnapshotRequest {
+            db_path: PathBuf::from(&args.db_path),
+            cache_root: PathBuf::from(&args.cache_root),
+            snapshot_id: args.snapshot_id.clone(),
+        },
+        &provider,
+    )?;
+
+    println!("Sync publish snapshot: encrypted local/mock bundle");
+    println!("Account id: {}", published.account_id);
+    println!("Device id: {}", published.device_id);
+    println!("Project id: {}", published.project_id);
+    println!("Snapshot id: {}", published.snapshot_id);
+    println!("Manifest object key: {}", published.manifest_object_key);
+    println!(
+        "Manifest plaintext bytes: {}",
+        published.manifest_plaintext_bytes
+    );
+    println!("Manifest remote bytes: {}", published.manifest_remote_bytes);
+    println!("Manifest uploaded: {}", published.manifest_uploaded);
+    println!("Included blob count: {}", published.blob_count);
+    println!("Uploaded blob count: {}", published.uploaded_blob_count);
+    println!("Plaintext blob bytes: {}", published.plaintext_blob_bytes);
+    println!("Remote blob bytes: {}", published.remote_blob_bytes);
+    println!("Remote provider: local filesystem");
+    println!("Remote root: {}", provider.root().display());
+    println!(
+        "Boundary: local/mock second-device foundation; production backend/R2/UI not configured"
+    );
+
+    Ok(())
+}
+
+fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let imported = import_snapshot(
+        &ImportSnapshotRequest {
+            db_path: PathBuf::from(&args.db_path),
+            cache_root: PathBuf::from(&args.cache_root),
+            key_source_db_path: args.mock_key_source_db.as_ref().map(PathBuf::from),
+            snapshot_id: args.snapshot_id.clone(),
+        },
+        &provider,
+    )?;
+
+    println!("Sync import snapshot: decrypted into local/mock second context");
+    println!("Source account id: {}", imported.source_account_id);
+    println!("Receiver account id: {}", imported.receiver_account_id);
+    println!("Receiver device id: {}", imported.receiver_device_id);
+    println!("Project id: {}", imported.project_id);
+    println!("Snapshot id: {}", imported.snapshot_id);
+    println!("Manifest object key: {}", imported.manifest_object_key);
+    println!("Snapshot inserted: {}", imported.snapshot_inserted);
+    println!("Included blob count: {}", imported.blob_count);
+    println!("Downloaded blob count: {}", imported.downloaded_blob_count);
+    println!("Plaintext blob bytes: {}", imported.plaintext_blob_bytes);
+    println!("Remote blob bytes: {}", imported.remote_blob_bytes);
+    println!("Cursor value: {}", imported.cursor_value);
+    println!("Cursor updated at: {}", imported.cursor_updated_at);
+    println!("Remote provider: local filesystem");
+    println!("Remote root: {}", provider.root().display());
+    if args.mock_key_source_db.is_some() {
+        println!(
+            "Trust bootstrap: local/mock --mock-key-source-db used; raw keys were not printed"
+        );
+    } else {
+        println!("Trust bootstrap: receiver local identity key");
+    }
+    println!(
+        "Boundary: local/mock second-device foundation; production backend/R2/UI not configured"
+    );
+
+    Ok(())
+}
+
+fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let outcome = materialize_snapshot(
+        &MaterializationRequest {
+            db_path: PathBuf::from(&args.db_path),
+            cache_root: PathBuf::from(&args.cache_root),
+            key_source_db_path: args.mock_key_source_db.as_ref().map(PathBuf::from),
+            snapshot_id: args.snapshot_id.clone(),
+            target: PathBuf::from(&args.target),
+            apply: args.apply,
+        },
+        &provider,
+    )?;
+
+    println!("Sync materialize snapshot");
+    println!("Mode: {}", if args.apply { "apply" } else { "dry-run" });
+    println!("Source account id: {}", outcome.import.source_account_id);
+    println!(
+        "Receiver account id: {}",
+        outcome.import.receiver_account_id
+    );
+    println!("Receiver device id: {}", outcome.import.receiver_device_id);
+    println!("Project id: {}", outcome.import.project_id);
+    println!("Snapshot id: {}", outcome.import.snapshot_id);
+    println!("Snapshot inserted: {}", outcome.import.snapshot_inserted);
+    println!("Target: {}", outcome.target.display());
+    println!("Target status: {}", outcome.target_status);
+    println!("Apply allowed: {}", outcome.apply_allowed);
+    println!("Applied: {}", outcome.applied);
+    println!("Directories to create: {}", outcome.plan.dirs_to_create);
+    println!("Files to write: {}", outcome.plan.files_to_write);
+    println!("Skipped entries: {}", outcome.plan.skipped_entries);
+    println!("Missing blobs: {}", outcome.plan.missing_blobs);
+    println!("Bytes to write: {}", outcome.plan.bytes_to_write);
+    println!("Cursor value: {}", outcome.import.cursor_value);
+    println!("Cursor updated at: {}", outcome.import.cursor_updated_at);
+    println!("Remote provider: local filesystem");
+    println!("Remote root: {}", provider.root().display());
+    if args.mock_key_source_db.is_some() {
+        println!(
+            "Trust bootstrap: local/mock --mock-key-source-db used; raw keys were not printed"
+        );
+    } else {
+        println!("Trust bootstrap: receiver local identity key");
+    }
+    println!(
+        "Boundary: local/mock second-device foundation; production backend/R2/UI not configured"
+    );
 
     Ok(())
 }
@@ -1703,6 +2049,15 @@ fn print_changes_usage() {
 
 fn print_sync_usage() {
     eprintln!("Usage:");
+    eprintln!(
+        "  devbox sync publish-snapshot --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> <SNAPSHOT_ID>"
+    );
+    eprintln!(
+        "  devbox sync import-snapshot --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> [--mock-key-source-db <PUBLISHER_DB>] <SNAPSHOT_ID>"
+    );
+    eprintln!(
+        "  devbox sync materialize --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> --to <TARGET_DIR> [--mock-key-source-db <PUBLISHER_DB>] <SNAPSHOT_ID> [--dry-run|--apply]"
+    );
     eprintln!(
         "  devbox sync upload --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> <BLOB_ID> [--object-key <KEY>]"
     );

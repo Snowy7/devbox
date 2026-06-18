@@ -69,8 +69,10 @@ Current Phase 1 foundation status:
 - encrypted immutable blob upload/download works through a local filesystem provider
 - local/mock auth session, pairing invitation approval, key envelopes, device revocation, and
   device/project cursor primitives exist in SQLite
+- local/mock second-device materialization can publish/import an encrypted snapshot bundle through a
+  local filesystem remote and apply it safely with the existing restore engine
 - real cloud authentication, hosted metadata, real object-storage credentials, production pairing UX,
-  and second-device materialization remain later Phase 1 work
+  and conflict resolution remain later Phase 1 work
 
 ## Content Addressing
 

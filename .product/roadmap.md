@@ -53,6 +53,8 @@ Completed foundations:
 - encrypted remote blob transport through a local filesystem provider
 - local/mock auth session, pairing invitation, approved-device trust, key envelope, revocation, and
   cursor primitives
+- local/mock second-device materialization through an encrypted local filesystem remote, including
+  publish/import, receiving cursor update, and safe restore-engine apply
 
 Remaining auth and pairing work:
 
@@ -60,7 +62,7 @@ Remaining auth and pairing work:
 - hosted metadata service and server-side device/project cursors
 - production pairing UX, recovery, and rotation flows
 - real cloud object credentials
-- second-device materialization and conflict flows
+- conflict-as-divergent-snapshot compare/merge flows
 
 Exit criteria:
 

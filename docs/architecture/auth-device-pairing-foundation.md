@@ -71,7 +71,8 @@ devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID>
 ```
 
 Existing commands such as `devbox init`, `devbox devices list`, `devbox sync upload/download`,
-`devbox snapshot`, and `devbox snapshot restore` continue to work.
+`devbox sync publish-snapshot/import-snapshot/materialize`, `devbox snapshot`, and
+`devbox snapshot restore` continue to work.
 
 ## Deferred
 
@@ -81,5 +82,5 @@ Remaining Phase 1 work includes:
 - hosted metadata API and server-side cursors
 - real cloud object storage credentials
 - production pairing UX and recovery
-- second-device project materialization
+- production second-device project materialization UX
 - conflict-as-divergent-snapshot flows

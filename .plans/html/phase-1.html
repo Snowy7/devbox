@@ -57,6 +57,7 @@
             <ul class="checklist">
               <li>Local watcher feeds the pending operation log after debounced filesystem events.</li>
               <li>Upload queue, retry, resume, and backoff.</li>
+              <li>Local/mock publish, import, and materialize foundation through encrypted local remote.</li>
               <li>Download and materialization queue.</li>
               <li>Device cursor reconciliation.</li>
               <li>Conflict-as-divergent-snapshot handling.</li>
@@ -91,7 +92,8 @@
           <li>The account/device model remains multi-device-capable even though one installation has one current local device.</li>
           <li>Encrypted blob upload and download work through a local filesystem remote provider without cloud credentials.</li>
           <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
-          <li>Production cloud authentication, hosted metadata, real R2/S3 credentials, production pairing UX, and second-device materialization remain later Phase 1 work.</li>
+          <li>Local/mock second-device materialization now proves encrypted publish/import, receiving cursor update, and safe restore-engine apply.</li>
+          <li>Production cloud authentication, hosted metadata, real R2/S3 credentials, production pairing UX, and conflict resolution remain later Phase 1 work.</li>
         </ul>
       </section>
 
