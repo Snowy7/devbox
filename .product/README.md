@@ -1,6 +1,6 @@
 # Devbox Product Folder
 
-Last updated: 2026-06-18
+Last updated: 2026-06-19
 
 This folder is the working product foundation for a developer-native "Dropbox for Code" that can later expand into team workspaces, agent workspaces, and a better Git-compatible source-control layer.
 
@@ -45,11 +45,11 @@ This pack uses public evidence and explicit assumptions. The Data Analytics user
 
 ## Immediate Next Step
 
-Build a prototype that proves one narrow promise:
+The private-alpha MVP control/safety surface now exists over the local-first foundations. The next
+product step is alpha validation of one narrow promise:
 
 1. Install on desktop.
 2. Select a code folder.
 3. Install on laptop.
 4. Open one project.
 5. The exact working state is present, restorable, and safe.
-

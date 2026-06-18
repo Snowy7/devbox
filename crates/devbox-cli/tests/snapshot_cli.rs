@@ -1059,9 +1059,15 @@ fn conflicts_compare_list_show_and_resolve_divergent_snapshots() {
         "--db",
         fixture.db_path(),
         &conflict_id,
+        "--manual-resolution",
+        "keep-both",
+        "--confirm-no-auto-apply",
     ]);
     assert_success(&resolve);
-    assert!(stdout(&resolve).contains("Status: resolved"));
+    let resolve_stdout = stdout(&resolve);
+    assert!(resolve_stdout.contains("Status: resolved"));
+    assert!(resolve_stdout.contains("Manual resolution: keep-both"));
+    assert!(resolve_stdout.contains("Automatic apply: not performed"));
 }
 
 #[test]
