@@ -1,13 +1,16 @@
 # Local Change Feed Foundation
 
-This slice moves Devbox from persisted manual snapshots toward a local answer to "what changed?"
+This foundation moves Devbox from persisted manual snapshots toward a local answer to "what
+changed?" The daemon watcher now calls the same shared scan orchestration after debounced filesystem
+events; the persisted feed remains local-only.
 
 ## Boundary
 
-The change feed is local-only. `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>`
-builds the current snapshot draft with the existing scanner, policy, manifest, BLAKE3 blob cache,
-and SQLite store foundations. It then compares included regular files against the latest persisted
-snapshot for the same local project id and replaces that project's pending change rows in SQLite.
+The change feed is local-only. `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT>
+<PROJECT_ROOT>` and `devbox-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>` both
+build the current snapshot draft with the existing scanner, policy, manifest, BLAKE3 blob cache, and
+SQLite store foundations. They then compare included regular files against the latest persisted
+snapshot for the same local project id and replace that project's pending change rows in SQLite.
 
 No source files are mutated by the scan. The scan may read files and write content-addressed blobs
 to the local cache so current file content has a stable identity.
@@ -36,7 +39,8 @@ available, current blob id when available, byte count, and detection timestamp.
 
 The existing broad `operations` table remains available for future workflow lifecycle records. The
 new table is intentionally narrower: it is the daemon/cloud-sync input queue for pending local file
-changes, not a general task log.
+changes, not a general task log. The watcher only feeds this queue; it does not make pending rows
+durable cloud operations.
 
 ## Safety
 
@@ -45,13 +49,13 @@ database path must not live inside the project being scanned. Generated dependen
 excluded by policy and are not treated as sync operations. Symlinks and unsupported filesystem nodes
 remain deferred and are never persisted as uploadable file changes.
 
-The scan does not write cloud objects, delete user files, restore files, or mutate source trees.
+The scan and watcher do not write cloud objects, delete user files, restore files, or mutate source
+trees.
 
 ## Deferred Work
 
 This foundation deliberately does not implement:
 
-- long-running filesystem watching
 - cloud upload/download, R2/S3, encryption, compression, packfiles, or garbage collection
 - conflict detection or resolution
 - cross-device sync

@@ -11,3 +11,9 @@ name = "devbox-daemon"
 path = "src/main.rs"
 
 [dependencies]
+devbox-snapshot = { path = "../devbox-snapshot" }
+notify = "6"
+
+[dev-dependencies]
+rusqlite = "0.31"
+tempfile = "3"

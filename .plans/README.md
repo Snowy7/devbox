@@ -12,6 +12,6 @@ This folder turns the product strategy into implementation phases:
 
 The MVP rule is simple: earn trust before expanding into teams, agents, or a Git replacement.
 
-Current bridge slice: after the snapshot/restore foundation, add a durable local change feed /
-operation log that compares the workspace with the latest snapshot. Long-running watchers and cloud
-sync remain Phase 1 work.
+Current bridge slice: after the snapshot/restore and manual change-feed foundation, add a local
+long-running watcher that feeds the same pending operation log after debounced filesystem events.
+Cloud sync remains later Phase 1 work.
