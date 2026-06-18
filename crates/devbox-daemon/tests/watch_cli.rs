@@ -60,6 +60,44 @@ fn watch_once_rejects_in_project_cache_and_db_without_leftovers() {
     assert!(!in_project_db.exists());
 }
 
+#[test]
+fn watch_rejects_in_project_cache_and_db_before_idle_without_leftovers() {
+    let fixture = WatchFixture::new();
+    fixture.write("README.md", "hello\n");
+    let in_project_cache = fixture.project.join(".devbox-cache");
+    let in_project_db = fixture.project.join("devbox.sqlite3");
+
+    let rejected_cache = run_devbox_daemon([
+        "watch",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        path_str(&in_project_cache),
+        "--exit-after-idle-ms",
+        "1",
+        fixture.project_path(),
+    ]);
+    assert_failure(&rejected_cache);
+    assert!(stderr(&rejected_cache).contains("blob%20cache%20root"));
+    assert!(!stdout(&rejected_cache).contains("watch status=start"));
+    assert!(!in_project_cache.exists());
+
+    let rejected_db = run_devbox_daemon([
+        "watch",
+        "--db",
+        path_str(&in_project_db),
+        "--cache",
+        fixture.cache_path(),
+        "--exit-after-idle-ms",
+        "1",
+        fixture.project_path(),
+    ]);
+    assert_failure(&rejected_db);
+    assert!(stderr(&rejected_db).contains("metadata%20database%20path"));
+    assert!(!stdout(&rejected_db).contains("watch status=start"));
+    assert!(!in_project_db.exists());
+}
+
 struct WatchFixture {
     _dir: tempfile::TempDir,
     project: std::path::PathBuf,

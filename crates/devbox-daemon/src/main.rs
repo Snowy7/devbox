@@ -1,4 +1,7 @@
-use devbox_snapshot::{scan_local_change_feed, LocalChangeFeedScan, LocalChangeFeedScanOptions};
+use devbox_snapshot::{
+    preflight_cache_root, preflight_db_path, scan_local_change_feed, LocalChangeFeedScan,
+    LocalChangeFeedScanOptions,
+};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -134,6 +137,10 @@ fn parse_usize_flag(flag: &str, value: &str) -> Result<usize, String> {
 }
 
 fn run_watch(args: WatchArgs) -> Result<(), String> {
+    preflight_cache_root(&args.cache_root, &args.project_root)
+        .map_err(|error| error.to_string())?;
+    preflight_db_path(&args.db_path, &args.project_root).map_err(|error| error.to_string())?;
+
     println!(
         "watch status=start db={} cache={} project={} debounce_ms={} once={} max_scans={}",
         script_value(&args.db_path.display().to_string()),
