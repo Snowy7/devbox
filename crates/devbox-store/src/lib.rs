@@ -4,12 +4,16 @@ mod blob_cache;
 
 pub use blob_cache::{BlobCache, BlobCacheError, BlobCacheResult, BlobRef};
 
+use devbox_auth::{
+    revoke_trusted_device, AuthSession, DeviceProjectCursor, DeviceTrustRecord, KeyEnvelope,
+    PairingApproval, PairingInvitation,
+};
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision, ProjectId};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -21,6 +25,12 @@ const SUMMARY_TABLES: &[&str] = &[
     "pending_local_changes",
     "local_accounts",
     "local_devices",
+    "auth_sessions",
+    "pairing_invitations",
+    "trusted_devices",
+    "key_envelopes",
+    "revocation_markers",
+    "device_project_cursors",
     "policies",
     "policy_evaluations",
     "restore_attempts",
@@ -34,6 +44,7 @@ pub enum StoreError {
     InvalidSnapshotDraft(String),
     InvalidStoredValue(String),
     DuplicateSnapshotId(String),
+    PairingInvitationAlreadyClaimed(String),
 }
 
 impl fmt::Display for StoreError {
@@ -48,6 +59,9 @@ impl fmt::Display for StoreError {
             Self::InvalidSnapshotDraft(message) => f.write_str(message),
             Self::InvalidStoredValue(message) => f.write_str(message),
             Self::DuplicateSnapshotId(id) => write!(f, "snapshot already exists: {id}"),
+            Self::PairingInvitationAlreadyClaimed(id) => {
+                write!(f, "pairing invitation is already claimed or missing: {id}")
+            }
         }
     }
 }
@@ -60,7 +74,8 @@ impl std::error::Error for StoreError {
             | Self::InvalidMigrationState(_)
             | Self::InvalidSnapshotDraft(_)
             | Self::InvalidStoredValue(_)
-            | Self::DuplicateSnapshotId(_) => None,
+            | Self::DuplicateSnapshotId(_)
+            | Self::PairingInvitationAlreadyClaimed(_) => None,
         }
     }
 }
@@ -133,6 +148,15 @@ impl Store {
 
         if version < 4 {
             self.conn.execute_batch(MIGRATION_4_LOCAL_IDENTITY)?;
+        }
+
+        if version < 5 {
+            self.conn.execute_batch(MIGRATION_5_AUTH_DEVICE_PAIRING)?;
+        }
+
+        if version < 6 {
+            self.conn
+                .execute_batch(MIGRATION_6_PAIRING_INVITATION_SINGLE_USE)?;
         }
 
         Ok(())
@@ -409,6 +433,393 @@ impl Store {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn upsert_auth_session(&self, session: &AuthSession) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO auth_sessions (
+                account_id,
+                provider_kind,
+                subject,
+                session_state,
+                proof_issued_at,
+                last_refreshed_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(account_id) DO UPDATE SET
+                provider_kind = excluded.provider_kind,
+                subject = excluded.subject,
+                session_state = excluded.session_state,
+                proof_issued_at = excluded.proof_issued_at,
+                last_refreshed_at = excluded.last_refreshed_at
+            "#,
+            params![
+                session.account_id,
+                session.provider_kind,
+                session.subject,
+                session.session_state,
+                session.proof_issued_at,
+                session.last_refreshed_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn auth_session(&self, account_id: &str) -> StoreResult<Option<AuthSession>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    account_id,
+                    provider_kind,
+                    subject,
+                    session_state,
+                    proof_issued_at,
+                    last_refreshed_at
+                FROM auth_sessions
+                WHERE account_id = ?1
+                "#,
+                params![account_id],
+                |row| {
+                    Ok(AuthSession {
+                        account_id: row.get(0)?,
+                        provider_kind: row.get(1)?,
+                        subject: row.get(2)?,
+                        session_state: row.get(3)?,
+                        proof_issued_at: row.get(4)?,
+                        last_refreshed_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn insert_pairing_invitation(&self, invitation: &PairingInvitation) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO pairing_invitations (
+                id,
+                account_id,
+                inviter_device_id,
+                secret_hash_hex,
+                status,
+                created_at,
+                expires_at_unix,
+                approved_device_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                invitation.id,
+                invitation.account_id,
+                invitation.inviter_device_id,
+                invitation.secret_hash_hex,
+                invitation.status,
+                invitation.created_at,
+                invitation.expires_at_unix,
+                invitation.approved_device_id,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn pairing_invitation(&self, id: &str) -> StoreResult<Option<PairingInvitation>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    account_id,
+                    inviter_device_id,
+                    secret_hash_hex,
+                    status,
+                    created_at,
+                    expires_at_unix,
+                    approved_device_id
+                FROM pairing_invitations
+                WHERE id = ?1
+                "#,
+                params![id],
+                |row| {
+                    Ok(PairingInvitation {
+                        id: row.get(0)?,
+                        account_id: row.get(1)?,
+                        inviter_device_id: row.get(2)?,
+                        secret_hash_hex: row.get(3)?,
+                        status: row.get(4)?,
+                        created_at: row.get(5)?,
+                        expires_at_unix: row.get(6)?,
+                        approved_device_id: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn persist_pairing_approval(&mut self, approval: &PairingApproval) -> StoreResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO local_devices (
+                id,
+                account_id,
+                display_name,
+                device_key_hex,
+                is_local,
+                created_at,
+                last_seen_at
+            )
+            VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)
+            "#,
+            params![
+                approval.device.device_id,
+                approval.device.account_id,
+                approval.device.display_name,
+                approval.device.device_key_hex,
+                approval.device.approved_at,
+            ],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO key_envelopes (
+                id,
+                account_id,
+                device_id,
+                key_ref,
+                ciphertext_hex,
+                created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                approval.envelope.id,
+                approval.envelope.account_id,
+                approval.envelope.device_id,
+                approval.envelope.key_ref,
+                approval.envelope.ciphertext_hex,
+                approval.envelope.created_at,
+            ],
+        )?;
+        let claimed = tx.execute(
+            r#"
+            UPDATE pairing_invitations
+            SET status = 'approved',
+                approved_device_id = ?1
+            WHERE id = ?2 AND status = 'pending'
+            "#,
+            params![approval.device.device_id, approval.device.invitation_id],
+        )?;
+        if claimed != 1 {
+            return Err(StoreError::PairingInvitationAlreadyClaimed(
+                approval.device.invitation_id.clone(),
+            ));
+        }
+        tx.execute(
+            r#"
+            INSERT INTO trusted_devices (
+                device_id,
+                account_id,
+                invitation_id,
+                trust_state,
+                approved_at,
+                revoked_at,
+                key_envelope_id
+            )
+            VALUES (?1, ?2, ?3, 'approved', ?4, NULL, ?5)
+            "#,
+            params![
+                approval.device.device_id,
+                approval.device.account_id,
+                approval.device.invitation_id,
+                approval.device.approved_at,
+                approval.envelope.id,
+            ],
+        )?;
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    pub fn key_envelope_for_device(&self, device_id: &str) -> StoreResult<Option<KeyEnvelope>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    account_id,
+                    device_id,
+                    key_ref,
+                    ciphertext_hex,
+                    created_at
+                FROM key_envelopes
+                WHERE device_id = ?1
+                ORDER BY created_at DESC, id ASC
+                LIMIT 1
+                "#,
+                params![device_id],
+                |row| {
+                    Ok(KeyEnvelope {
+                        id: row.get(0)?,
+                        account_id: row.get(1)?,
+                        device_id: row.get(2)?,
+                        key_ref: row.get(3)?,
+                        ciphertext_hex: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_device_trust(&self) -> StoreResult<Vec<DeviceTrustRecord>> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT
+                d.id,
+                d.account_id,
+                d.display_name,
+                d.is_local,
+                COALESCE(t.trust_state, CASE WHEN d.is_local = 1 THEN 'current-local' ELSE 'known' END),
+                t.approved_at,
+                t.revoked_at,
+                d.last_seen_at
+            FROM local_devices d
+            LEFT JOIN trusted_devices t ON t.device_id = d.id
+            ORDER BY d.is_local DESC, d.created_at ASC, d.id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            let is_local: u8 = row.get(3)?;
+            Ok(DeviceTrustRecord {
+                device_id: row.get(0)?,
+                account_id: row.get(1)?,
+                display_name: row.get(2)?,
+                is_local: is_local == 1,
+                trust_state: row.get(4)?,
+                approved_at: row.get(5)?,
+                revoked_at: row.get(6)?,
+                last_seen_at: row.get(7)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn device_trust(&self, device_id: &str) -> StoreResult<Option<DeviceTrustRecord>> {
+        Ok(self
+            .list_device_trust()?
+            .into_iter()
+            .find(|device| device.device_id == device_id))
+    }
+
+    pub fn revoke_device(
+        &mut self,
+        device_id: &str,
+        reason: Option<&str>,
+        revoked_at: &str,
+    ) -> StoreResult<DeviceTrustRecord> {
+        let device = self.device_trust(device_id)?.ok_or_else(|| {
+            StoreError::InvalidStoredValue(format!("device not found: {device_id}"))
+        })?;
+        if device.is_local {
+            return Err(StoreError::InvalidStoredValue(
+                "refusing to revoke the current local device in local/mock auth".to_string(),
+            ));
+        }
+        revoke_trusted_device(&device)
+            .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+
+        let marker_id = random_prefixed_id("revocation")?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            UPDATE trusted_devices
+            SET trust_state = 'revoked',
+                revoked_at = ?1
+            WHERE device_id = ?2
+            "#,
+            params![revoked_at, device_id],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO revocation_markers (
+                id,
+                account_id,
+                device_id,
+                revoked_at,
+                reason
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![marker_id, device.account_id, device_id, revoked_at, reason,],
+        )?;
+        tx.commit()?;
+
+        self.device_trust(device_id)?.ok_or_else(|| {
+            StoreError::InvalidMigrationState("revoked device disappeared".to_string())
+        })
+    }
+
+    pub fn upsert_device_project_cursor(&self, cursor: &DeviceProjectCursor) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO device_project_cursors (
+                account_id,
+                device_id,
+                project_id,
+                cursor_value,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(account_id, device_id, project_id) DO UPDATE SET
+                cursor_value = excluded.cursor_value,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                cursor.account_id,
+                cursor.device_id,
+                cursor.project_id,
+                cursor.cursor_value,
+                cursor.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn device_project_cursor(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        project_id: &str,
+    ) -> StoreResult<Option<DeviceProjectCursor>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT account_id, device_id, project_id, cursor_value, updated_at
+                FROM device_project_cursors
+                WHERE account_id = ?1 AND device_id = ?2 AND project_id = ?3
+                "#,
+                params![account_id, device_id, project_id],
+                |row| {
+                    Ok(DeviceProjectCursor {
+                        account_id: row.get(0)?,
+                        device_id: row.get(1)?,
+                        project_id: row.get(2)?,
+                        cursor_value: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
             .map_err(StoreError::from)
     }
 
@@ -1452,6 +1863,99 @@ PRAGMA user_version = 4;
 COMMIT;
 "#;
 
+const MIGRATION_5_AUTH_DEVICE_PAIRING: &str = r#"
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    account_id TEXT PRIMARY KEY REFERENCES local_accounts(id) ON DELETE CASCADE,
+    provider_kind TEXT NOT NULL CHECK (provider_kind IN ('local-mock')),
+    subject TEXT NOT NULL,
+    session_state TEXT NOT NULL CHECK (session_state IN ('active')),
+    proof_issued_at TEXT NOT NULL,
+    last_refreshed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pairing_invitations (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    inviter_device_id TEXT NOT NULL REFERENCES local_devices(id) ON DELETE CASCADE,
+    secret_hash_hex TEXT NOT NULL CHECK (length(secret_hash_hex) = 64),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved')),
+    created_at TEXT NOT NULL,
+    expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+    approved_device_id TEXT REFERENCES local_devices(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS key_envelopes (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES local_devices(id) ON DELETE CASCADE,
+    key_ref TEXT NOT NULL,
+    ciphertext_hex TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (device_id, key_ref)
+);
+
+CREATE TABLE IF NOT EXISTS trusted_devices (
+    device_id TEXT PRIMARY KEY REFERENCES local_devices(id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    invitation_id TEXT NOT NULL REFERENCES pairing_invitations(id) ON DELETE RESTRICT,
+    trust_state TEXT NOT NULL CHECK (trust_state IN ('approved', 'revoked')),
+    approved_at TEXT NOT NULL,
+    revoked_at TEXT,
+    key_envelope_id TEXT NOT NULL REFERENCES key_envelopes(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS revocation_markers (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES local_devices(id) ON DELETE CASCADE,
+    revoked_at TEXT NOT NULL,
+    reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS device_project_cursors (
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES local_devices(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    cursor_value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, device_id, project_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pairing_invitations_account_status
+    ON pairing_invitations(account_id, status);
+CREATE INDEX IF NOT EXISTS idx_key_envelopes_account_device
+    ON key_envelopes(account_id, device_id);
+CREATE INDEX IF NOT EXISTS idx_trusted_devices_account_state
+    ON trusted_devices(account_id, trust_state);
+CREATE INDEX IF NOT EXISTS idx_revocation_markers_account_device
+    ON revocation_markers(account_id, device_id);
+CREATE INDEX IF NOT EXISTS idx_device_project_cursors_device_project
+    ON device_project_cursors(device_id, project_id);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (5, 'auth_device_pairing_foundation');
+
+PRAGMA user_version = 5;
+
+COMMIT;
+"#;
+
+const MIGRATION_6_PAIRING_INVITATION_SINGLE_USE: &str = r#"
+BEGIN;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trusted_devices_invitation_unique
+    ON trusted_devices(invitation_id);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (6, 'pairing_invitation_single_use');
+
+PRAGMA user_version = 6;
+
+COMMIT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1596,6 +2100,280 @@ mod tests {
         assert!(devices
             .iter()
             .any(|device| device.display_name == "Travel laptop" && !device.is_local));
+    }
+
+    #[test]
+    fn mock_auth_session_is_idempotent() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let view = local_identity_view(&identity);
+        let first = devbox_auth::mock_login(&view, "2026-06-18T10:00:00Z");
+        let second = devbox_auth::mock_login(&view, "2026-06-18T10:01:00Z");
+
+        store
+            .upsert_auth_session(&first)
+            .expect("first session persists");
+        store
+            .upsert_auth_session(&second)
+            .expect("second session updates");
+
+        let loaded = store
+            .auth_session(&identity.account_id)
+            .expect("session reads")
+            .expect("session exists");
+        assert_eq!(loaded.provider_kind, "local-mock");
+        assert_eq!(loaded.last_refreshed_at, "2026-06-18T10:01:00Z");
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "auth_sessions"), 1);
+    }
+
+    #[test]
+    fn pairing_lifecycle_approves_many_devices_and_creates_envelopes() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let view = local_identity_view(&identity);
+
+        let mut approved_device_ids = Vec::new();
+        for (index, name) in ["Laptop", "Build box", "Travel kit"].iter().enumerate() {
+            let draft =
+                devbox_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
+                    .expect("invitation creates");
+            store
+                .insert_pairing_invitation(&draft.invitation)
+                .expect("invitation persists");
+            let loaded = store
+                .pairing_invitation(&draft.invitation.id)
+                .expect("invitation reads")
+                .expect("invitation exists");
+            let approval = devbox_auth::approve_pairing_invitation(
+                &view,
+                &loaded,
+                &draft.token,
+                name,
+                "2026-06-18T10:01:00Z",
+                101 + index as i64,
+            )
+            .expect("approval creates");
+            store
+                .persist_pairing_approval(&approval)
+                .expect("approval persists");
+
+            let envelope = store
+                .key_envelope_for_device(&approval.device.device_id)
+                .expect("envelope reads")
+                .expect("envelope exists");
+            let opened = devbox_auth::open_key_envelope(
+                &envelope,
+                &approval.device.device_key_hex,
+                &approval.device.device_id,
+            )
+            .expect("envelope decrypts");
+            assert_eq!(opened, identity.sync_key_hex);
+            approved_device_ids.push(approval.device.device_id);
+        }
+
+        let trust = store.list_device_trust().expect("trust lists");
+        assert_eq!(trust.len(), 4);
+        assert_eq!(trust.iter().filter(|device| device.is_local).count(), 1);
+        assert_eq!(
+            trust
+                .iter()
+                .filter(|device| device.trust_state == "approved")
+                .count(),
+            3
+        );
+        for id in approved_device_ids {
+            assert!(trust.iter().any(|device| device.device_id == id));
+        }
+    }
+
+    #[test]
+    fn pairing_invitation_can_only_be_persisted_once() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let view = local_identity_view(&identity);
+        let draft = devbox_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
+            .expect("invitation creates");
+        store
+            .insert_pairing_invitation(&draft.invitation)
+            .expect("invitation persists");
+        let loaded = store
+            .pairing_invitation(&draft.invitation.id)
+            .expect("invitation reads")
+            .expect("invitation exists");
+        let first = devbox_auth::approve_pairing_invitation(
+            &view,
+            &loaded,
+            &draft.token,
+            "Laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        )
+        .expect("first approval creates");
+        let second = devbox_auth::approve_pairing_invitation(
+            &view,
+            &loaded,
+            &draft.token,
+            "Second laptop",
+            "2026-06-18T10:01:01Z",
+            102,
+        )
+        .expect("second approval object can be derived from stale pending state");
+
+        store
+            .persist_pairing_approval(&first)
+            .expect("first approval persists");
+        let error = store
+            .persist_pairing_approval(&second)
+            .expect_err("second approval cannot claim invitation");
+
+        assert!(matches!(
+            error,
+            StoreError::PairingInvitationAlreadyClaimed(id) if id == draft.invitation.id
+        ));
+        let trust = store.list_device_trust().expect("trust lists");
+        assert_eq!(
+            trust
+                .iter()
+                .filter(|device| device.trust_state == "approved")
+                .count(),
+            1
+        );
+        assert!(store
+            .device_trust(&second.device.device_id)
+            .expect("second device lookup works")
+            .is_none());
+        assert_eq!(
+            store
+                .pairing_invitation(&draft.invitation.id)
+                .expect("invitation reads")
+                .expect("invitation exists")
+                .approved_device_id
+                .as_deref(),
+            Some(first.device.device_id.as_str())
+        );
+    }
+
+    #[test]
+    fn malformed_expired_and_reused_invitations_fail_before_store_update() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let view = local_identity_view(&identity);
+        let draft = devbox_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 1)
+            .expect("invitation creates");
+        store
+            .insert_pairing_invitation(&draft.invitation)
+            .expect("invitation persists");
+        assert!(devbox_auth::PairingInvitationToken::parse("bad-token").is_err());
+
+        let loaded = store
+            .pairing_invitation(&draft.invitation.id)
+            .expect("invitation reads")
+            .expect("invitation exists");
+        let expired = devbox_auth::approve_pairing_invitation(
+            &view,
+            &loaded,
+            &draft.token,
+            "Laptop",
+            "2026-06-18T10:00:02Z",
+            102,
+        );
+        assert!(matches!(
+            expired,
+            Err(devbox_auth::AuthError::InvitationExpired { .. })
+        ));
+        assert_eq!(
+            store
+                .pairing_invitation(&draft.invitation.id)
+                .expect("invitation reads")
+                .expect("invitation exists")
+                .status,
+            "pending"
+        );
+    }
+
+    #[test]
+    fn device_revocation_marks_trust_state_once() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let approval = approve_test_device(&mut store, &identity, "Laptop");
+
+        let revoked = store
+            .revoke_device(
+                &approval.device.device_id,
+                Some("manual test"),
+                "2026-06-18T10:02:00Z",
+            )
+            .expect("device revokes");
+        assert_eq!(revoked.trust_state, "revoked");
+        assert_eq!(revoked.revoked_at.as_deref(), Some("2026-06-18T10:02:00Z"));
+
+        let second = store.revoke_device(
+            &approval.device.device_id,
+            Some("again"),
+            "2026-06-18T10:03:00Z",
+        );
+        assert!(matches!(second, Err(StoreError::InvalidStoredValue(_))));
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "revocation_markers"), 1);
+    }
+
+    #[test]
+    fn device_project_cursor_upserts_and_reads() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let first = DeviceProjectCursor {
+            account_id: identity.account_id.clone(),
+            device_id: identity.device_id.clone(),
+            project_id: "project-1".to_string(),
+            cursor_value: "snapshot-a".to_string(),
+            updated_at: "2026-06-18T10:00:00Z".to_string(),
+        };
+        let second = DeviceProjectCursor {
+            cursor_value: "snapshot-b".to_string(),
+            updated_at: "2026-06-18T10:01:00Z".to_string(),
+            ..first.clone()
+        };
+
+        store
+            .upsert_device_project_cursor(&first)
+            .expect("first cursor persists");
+        store
+            .upsert_device_project_cursor(&second)
+            .expect("second cursor updates");
+        let loaded = store
+            .device_project_cursor(&identity.account_id, &identity.device_id, "project-1")
+            .expect("cursor reads")
+            .expect("cursor exists");
+
+        assert_eq!(loaded.cursor_value, "snapshot-b");
+        assert_eq!(loaded.updated_at, "2026-06-18T10:01:00Z");
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "device_project_cursors"), 1);
     }
 
     #[test]
@@ -1989,6 +2767,41 @@ mod tests {
     fn blob_id_for(content: &[u8]) -> BlobId {
         BlobId::from_blake3_hex(blake3::hash(content).to_hex().to_string())
             .expect("BLAKE3 returns valid blob ids")
+    }
+
+    fn local_identity_view(identity: &LocalIdentityRecord) -> devbox_auth::LocalIdentityView {
+        devbox_auth::LocalIdentityView {
+            account_id: identity.account_id.clone(),
+            device_id: identity.device_id.clone(),
+            device_name: identity.device_name.clone(),
+            sync_key_hex: identity.sync_key_hex.clone(),
+        }
+    }
+
+    fn approve_test_device(
+        store: &mut Store,
+        identity: &LocalIdentityRecord,
+        name: &str,
+    ) -> PairingApproval {
+        let view = local_identity_view(identity);
+        let draft = devbox_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
+            .expect("invitation creates");
+        store
+            .insert_pairing_invitation(&draft.invitation)
+            .expect("invitation persists");
+        let approval = devbox_auth::approve_pairing_invitation(
+            &view,
+            &draft.invitation,
+            &draft.token,
+            name,
+            "2026-06-18T10:01:00Z",
+            101,
+        )
+        .expect("approval creates");
+        store
+            .persist_pairing_approval(&approval)
+            .expect("approval persists");
+        approval
     }
 
     fn count(summary: &SchemaSummary, table: &str) -> u64 {

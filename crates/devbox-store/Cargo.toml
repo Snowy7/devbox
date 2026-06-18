@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 blake3 = "1"
+devbox-auth = { path = "../devbox-auth" }
 devbox-core = { path = "../devbox-core" }
 getrandom = "0.2"
 rusqlite = { version = "0.31", features = ["bundled"] }

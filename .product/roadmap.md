@@ -51,12 +51,15 @@ Completed foundations:
 - local watcher daemon feeding the pending operation log
 - local account/current-device identity and key material
 - encrypted remote blob transport through a local filesystem provider
+- local/mock auth session, pairing invitation, approved-device trust, key envelope, revocation, and
+  cursor primitives
 
 Remaining auth and pairing work:
 
-- sign-in and account ownership proof
-- device approval, key exchange/envelopes, and revocation
-- server-side device/project cursors and hosted metadata
+- production sign-in and account ownership proof
+- hosted metadata service and server-side device/project cursors
+- production pairing UX, recovery, and rotation flows
+- real cloud object credentials
 - second-device materialization and conflict flows
 
 Exit criteria:

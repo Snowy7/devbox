@@ -65,7 +65,7 @@ The existing `restore_attempts` table is still reserved for a later operation lo
 
 ## Migration Rules
 
-`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `4`.
+`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `6`.
 
 The initial migration creates:
 
@@ -95,12 +95,29 @@ This is local-only identity for encrypted sync foundations, not cloud authentica
 installation has one current local device (`is_local = 1`), but the account/device schema allows
 many known non-local devices under the same account for later pairing and approval work.
 
+Schema version `5` adds local/mock auth and device-pairing metadata:
+
+- `auth_sessions`
+- `pairing_invitations`
+- `trusted_devices`
+- `key_envelopes`
+- `revocation_markers`
+- `device_project_cursors`
+
+These tables are local client state for the trusted personal alpha foundation. They model auth
+session summaries, pairing records, trusted-device metadata, encrypted key envelope references,
+revocation markers, and local cursor checkpoints without adding hosted backend behavior.
+
+Schema version `6` adds a unique invitation claim index for `trusted_devices.invitation_id`. The
+store also claims a pairing invitation inside the approval transaction with `status = 'pending'` so
+the same invitation cannot approve two devices.
+
 ## Deferred
 
 This boundary does not implement:
 
-- cloud authentication, sign-in, account ownership proof, or device approval
-- device revocation or backend account/device cursors
+- production cloud authentication, hosted sign-in, account ownership proof, or production pairing UX
+- backend account/device cursors
 - compression
 - packfiles
 - cache eviction or garbage collection

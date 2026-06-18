@@ -164,9 +164,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "devbox-auth"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+]
+
+[[package]]
 name = "devbox-cli"
 version = "0.1.0"
 dependencies = [
+ "devbox-auth",
  "devbox-core",
  "devbox-snapshot",
  "devbox-store",
@@ -211,6 +221,7 @@ name = "devbox-store"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "devbox-auth",
  "devbox-core",
  "getrandom 0.2.17",
  "rusqlite",
