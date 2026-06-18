@@ -67,8 +67,10 @@ Current Phase 1 foundation status:
 - local watcher feeds the pending operation log
 - local account/current-device identity exists in SQLite
 - encrypted immutable blob upload/download works through a local filesystem provider
-- real cloud authentication, device approval, key envelopes, revocation, and server-side cursors are
-  the next auth/device-pairing slice
+- local/mock auth session, pairing invitation approval, key envelopes, device revocation, and
+  device/project cursor primitives exist in SQLite
+- real cloud authentication, hosted metadata, real object-storage credentials, production pairing UX,
+  and second-device materialization remain later Phase 1 work
 
 ## Content Addressing
 

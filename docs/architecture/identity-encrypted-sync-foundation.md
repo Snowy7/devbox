@@ -17,14 +17,16 @@ revocation, recovery, pairing UX, server-side project cursors, or a hosted metad
 identity row means this installation can encrypt and address Devbox sync objects; it does not mean
 the user is authenticated to any cloud service.
 
-The next auth and pairing slice should add:
+The auth and pairing foundation slice adds local/mock primitives for:
 
-- sign-in and durable account identity
+- local/mock account session state
 - device approval and trust establishment
-- key exchange and key envelopes for approved devices
-- revocation and rotation semantics
-- server-side device and project cursors
-- backend metadata for accounts, devices, projects, manifests, and sync state
+- encrypted key envelopes for approved devices
+- revocation markers
+- local device/project cursors
+
+Production sign-in, durable hosted account ownership proof, server-side device/project cursors,
+backend metadata, recovery, and second-device materialization remain later Phase 1 work.
 
 ## Local Identity Model
 

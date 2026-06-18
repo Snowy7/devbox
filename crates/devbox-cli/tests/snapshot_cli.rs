@@ -144,6 +144,118 @@ fn init_is_idempotent_and_devices_list_current_local_device() {
 }
 
 #[test]
+fn auth_device_pairing_and_cursor_smoke_use_local_mock_metadata() {
+    let fixture = SnapshotCliFixture::new();
+
+    assert_success(&run_devbox([
+        "init",
+        "--db",
+        fixture.db_path(),
+        "--device-name",
+        "Desk",
+    ]));
+
+    let login = run_devbox(["auth", "mock-login", "--db", fixture.db_path()]);
+    assert_success(&login);
+    let login_stdout = stdout(&login);
+    assert!(login_stdout.contains("Mock auth session active"));
+    assert!(login_stdout.contains("Provider: local-mock"));
+    assert!(login_stdout.contains("Production authentication: not configured"));
+    assert!(!login_stdout.contains("sync_key"));
+    assert!(!login_stdout.contains("device_key"));
+
+    let status = run_devbox(["auth", "status", "--db", fixture.db_path()]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("Auth boundary: local/mock"));
+    assert!(status_stdout.contains("Session state: active"));
+
+    let invite = run_devbox([
+        "devices",
+        "invite",
+        "--db",
+        fixture.db_path(),
+        "--ttl-seconds",
+        "600",
+    ]);
+    assert_success(&invite);
+    let invite_stdout = stdout(&invite);
+    assert!(invite_stdout.contains("Pairing invitation created"));
+    assert!(invite_stdout.contains("Provider: local/mock metadata"));
+    let token = prefixed_value(&invite_stdout, "Pairing token: ");
+
+    let approve = run_devbox([
+        "devices",
+        "approve",
+        "--db",
+        fixture.db_path(),
+        "--token",
+        &token,
+        "--device-name",
+        "Travel laptop",
+    ]);
+    assert_success(&approve);
+    let approve_stdout = stdout(&approve);
+    assert!(approve_stdout.contains("Device approved"));
+    assert!(approve_stdout.contains("Device name: Travel laptop"));
+    assert!(approve_stdout.contains("Trust state: approved"));
+    assert!(approve_stdout.contains("Key envelope stored: true"));
+    assert!(!approve_stdout.contains("sync_key"));
+    assert!(!approve_stdout.contains("device_key"));
+    let approved_device_id = prefixed_value(&approve_stdout, "Device id: ");
+
+    let devices = run_devbox(["devices", "list", "--db", fixture.db_path()]);
+    assert_success(&devices);
+    let devices_stdout = stdout(&devices);
+    assert!(devices_stdout.contains("Trust state"));
+    assert!(devices_stdout.contains("\ttrue\tDesk\tcurrent-local\t"));
+    assert!(devices_stdout.contains("\tfalse\tTravel laptop\tapproved\t"));
+
+    let revoke = run_devbox([
+        "devices",
+        "revoke",
+        "--db",
+        fixture.db_path(),
+        &approved_device_id,
+        "--reason",
+        "manual smoke",
+    ]);
+    assert_success(&revoke);
+    let revoke_stdout = stdout(&revoke);
+    assert!(revoke_stdout.contains("Device revoked"));
+    assert!(revoke_stdout.contains("Trust state: revoked"));
+
+    let project_id = "project-smoke";
+    let cursor_set = run_devbox([
+        "sync",
+        "cursor",
+        "set",
+        "--db",
+        fixture.db_path(),
+        "--project",
+        project_id,
+        "--value",
+        "snapshot-123",
+    ]);
+    assert_success(&cursor_set);
+    assert!(stdout(&cursor_set).contains("Sync cursor updated"));
+
+    let cursor_get = run_devbox([
+        "sync",
+        "cursor",
+        "get",
+        "--db",
+        fixture.db_path(),
+        "--project",
+        project_id,
+    ]);
+    assert_success(&cursor_get);
+    let cursor_get_stdout = stdout(&cursor_get);
+    assert!(cursor_get_stdout.contains("Cursor value: snapshot-123"));
+    assert!(cursor_get_stdout.contains("Provider: local/mock metadata"));
+}
+
+#[test]
 fn sync_upload_and_download_encrypts_remote_object_bytes() {
     let fixture = SnapshotCliFixture::new();
     let plaintext = "hello encrypted sync foundation\n";

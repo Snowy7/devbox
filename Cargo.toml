@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/devbox-auth",
     "crates/devbox-cli",
     "crates/devbox-core",
     "crates/devbox-daemon",

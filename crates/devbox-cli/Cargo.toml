@@ -11,6 +11,7 @@ name = "devbox"
 path = "src/main.rs"
 
 [dependencies]
+devbox-auth = { path = "../devbox-auth" }
 devbox-core = { path = "../devbox-core" }
 devbox-snapshot = { path = "../devbox-snapshot" }
 devbox-store = { path = "../devbox-store" }

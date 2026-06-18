@@ -1,3 +1,7 @@
+use devbox_auth::{
+    approve_pairing_invitation, create_pairing_invitation, mock_login, now_unix_seconds,
+    DeviceProjectCursor, DeviceTrustRecord, LocalIdentityView, PairingInvitationToken,
+};
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision};
 use devbox_snapshot::{
@@ -6,8 +10,8 @@ use devbox_snapshot::{
     SnapshotManifestBuilder,
 };
 use devbox_store::{
-    local_project_id, path_to_store_string, BlobCache, DeviceRecord, EnsureLocalIdentityOptions,
-    LocalChangeKind, ManifestEntryRecord, NewProject, NewSnapshot, NewSnapshotDraft,
+    local_project_id, path_to_store_string, BlobCache, EnsureLocalIdentityOptions, LocalChangeKind,
+    LocalIdentityRecord, ManifestEntryRecord, NewProject, NewSnapshot, NewSnapshotDraft,
     NewSnapshotManifestEntry, PendingLocalChangeRecord, PersistedSnapshot, Store,
 };
 use devbox_sync::{
@@ -29,6 +33,7 @@ fn main() -> ExitCode {
         }
         Some("scan") => run_scan(&args[1..]),
         Some("init") => run_init(&args[1..]),
+        Some("auth") => run_auth(&args[1..]),
         Some("devices") => run_devices(&args[1..]),
         Some("sync") => run_sync(&args[1..]),
         Some("status") => run_status(&args[1..]),
@@ -173,12 +178,45 @@ struct InitArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DbOnlyArgs {
+    db_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceInviteArgs {
+    db_path: String,
+    ttl_seconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceApproveArgs {
+    db_path: String,
+    token: String,
+    device_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceRevokeArgs {
+    db_path: String,
+    device_id: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SyncBlobArgs {
     db_path: String,
     cache_root: String,
     remote_root: String,
     blob_id: String,
     object_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncCursorArgs {
+    db_path: String,
+    project_id: String,
+    device_id: Option<String>,
+    value: Option<String>,
 }
 
 fn run_init(args: &[String]) -> ExitCode {
@@ -190,6 +228,40 @@ fn run_init(args: &[String]) -> ExitCode {
             eprintln!("devbox: {error}");
             eprintln!("Usage: devbox init --db <DB_PATH> [--device-name <NAME>]");
             ExitCode::from(1)
+        }
+    }
+}
+
+fn run_auth(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("mock-login") | Some("login-dev") => {
+            match parse_db_only_args(&args[1..], "auth mock-login")
+                .and_then(|args| auth_mock_login(&args).map_err(|error| error.to_string()))
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    eprintln!("Usage: devbox auth mock-login --db <DB_PATH>");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("status") => match parse_db_only_args(&args[1..], "auth status")
+            .and_then(|args| auth_status(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox auth status --db <DB_PATH>");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("devbox: auth requires mock-login or status");
+            eprintln!("Usage:");
+            eprintln!("  devbox auth mock-login --db <DB_PATH>");
+            eprintln!("  devbox auth status --db <DB_PATH>");
+            ExitCode::from(2)
         }
     }
 }
@@ -206,9 +278,49 @@ fn run_devices(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("invite") => match parse_device_invite_args(&args[1..])
+            .and_then(|args| devices_invite(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]");
+                ExitCode::from(1)
+            }
+        },
+        Some("approve") => match parse_device_approve_args(&args[1..])
+            .and_then(|args| devices_approve(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!(
+                    "Usage: devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>"
+                );
+                ExitCode::from(1)
+            }
+        },
+        Some("revoke") => match parse_device_revoke_args(&args[1..])
+            .and_then(|args| devices_revoke(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!(
+                    "Usage: devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]"
+                );
+                ExitCode::from(1)
+            }
+        },
         _ => {
-            eprintln!("devbox: devices requires list");
-            eprintln!("Usage: devbox devices list --db <DB_PATH>");
+            eprintln!("devbox: devices requires list, invite, approve, or revoke");
+            eprintln!("Usage:");
+            eprintln!("  devbox devices list --db <DB_PATH>");
+            eprintln!("  devbox devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]");
+            eprintln!(
+                "  devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>"
+            );
+            eprintln!("  devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]");
             ExitCode::from(2)
         }
     }
@@ -236,8 +348,35 @@ fn run_sync(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("cursor") => match args.get(1).map(String::as_str) {
+            Some("get") => match parse_sync_cursor_args(&args[2..], false)
+                .and_then(|args| sync_cursor_get(&args).map_err(|error| error.to_string()))
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_sync_usage();
+                    ExitCode::from(1)
+                }
+            },
+            Some("set") => match parse_sync_cursor_args(&args[2..], true)
+                .and_then(|args| sync_cursor_set(&args).map_err(|error| error.to_string()))
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_sync_usage();
+                    ExitCode::from(1)
+                }
+            },
+            _ => {
+                eprintln!("devbox: sync cursor requires get or set");
+                print_sync_usage();
+                ExitCode::from(2)
+            }
+        },
         _ => {
-            eprintln!("devbox: sync requires upload or download");
+            eprintln!("devbox: sync requires upload, download, or cursor");
             print_sync_usage();
             ExitCode::from(2)
         }
@@ -288,6 +427,147 @@ fn parse_devices_list_args(args: &[String]) -> Result<String, String> {
         return Err("devices list requires --db <DB_PATH>".to_string());
     }
     Ok(db_path.clone())
+}
+
+fn parse_db_only_args(args: &[String], command: &str) -> Result<DbOnlyArgs, String> {
+    let [flag, db_path] = args else {
+        return Err(format!("{command} requires --db <DB_PATH>"));
+    };
+    if flag != "--db" {
+        return Err(format!("{command} requires --db <DB_PATH>"));
+    }
+    Ok(DbOnlyArgs {
+        db_path: db_path.clone(),
+    })
+}
+
+fn parse_device_invite_args(args: &[String]) -> Result<DeviceInviteArgs, String> {
+    let mut db_path = None;
+    let mut ttl_seconds = 600_i64;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--ttl-seconds" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--ttl-seconds requires a positive integer".to_string())?;
+                ttl_seconds = value
+                    .parse::<i64>()
+                    .map_err(|_| "--ttl-seconds requires a positive integer".to_string())?;
+                if ttl_seconds <= 0 {
+                    return Err("--ttl-seconds requires a positive integer".to_string());
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices invite option '{value}'"));
+            }
+            _ => return Err("devices invite accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(DeviceInviteArgs {
+        db_path: db_path.ok_or_else(|| "devices invite requires --db <DB_PATH>".to_string())?,
+        ttl_seconds,
+    })
+}
+
+fn parse_device_approve_args(args: &[String]) -> Result<DeviceApproveArgs, String> {
+    let mut db_path = None;
+    let mut token = None;
+    let mut device_name = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--token" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--token requires an invitation token".to_string())?;
+                token = Some(value.clone());
+            }
+            "--device-name" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--device-name requires a name".to_string())?;
+                device_name = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices approve option '{value}'"));
+            }
+            _ => return Err("devices approve accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(DeviceApproveArgs {
+        db_path: db_path.ok_or_else(|| "devices approve requires --db <DB_PATH>".to_string())?,
+        token: token.ok_or_else(|| "devices approve requires --token <TOKEN>".to_string())?,
+        device_name: device_name
+            .ok_or_else(|| "devices approve requires --device-name <NAME>".to_string())?,
+    })
+}
+
+fn parse_device_revoke_args(args: &[String]) -> Result<DeviceRevokeArgs, String> {
+    let mut db_path = None;
+    let mut reason = None;
+    let mut device_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--reason" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--reason requires text".to_string())?;
+                reason = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices revoke option '{value}'"));
+            }
+            value => {
+                if device_id.replace(value.to_string()).is_some() {
+                    return Err("devices revoke accepts exactly one device id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(DeviceRevokeArgs {
+        db_path: db_path.ok_or_else(|| "devices revoke requires --db <DB_PATH>".to_string())?,
+        device_id: device_id.ok_or_else(|| "devices revoke requires a device id".to_string())?,
+        reason,
+    })
 }
 
 fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
@@ -348,6 +628,65 @@ fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
             .ok_or_else(|| "sync requires --remote <REMOTE_DIR>".to_string())?,
         blob_id: blob_id.ok_or_else(|| "sync requires a blob id".to_string())?,
         object_key,
+    })
+}
+
+fn parse_sync_cursor_args(args: &[String], requires_value: bool) -> Result<SyncCursorArgs, String> {
+    let mut db_path = None;
+    let mut project_id = None;
+    let mut device_id = None;
+    let mut value = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let arg = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(arg.clone());
+            }
+            "--project" => {
+                index += 1;
+                let arg = args
+                    .get(index)
+                    .ok_or_else(|| "--project requires an id".to_string())?;
+                project_id = Some(arg.clone());
+            }
+            "--device" => {
+                index += 1;
+                let arg = args
+                    .get(index)
+                    .ok_or_else(|| "--device requires an id".to_string())?;
+                device_id = Some(arg.clone());
+            }
+            "--value" => {
+                index += 1;
+                let arg = args
+                    .get(index)
+                    .ok_or_else(|| "--value requires a cursor value".to_string())?;
+                value = Some(arg.clone());
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("unknown sync cursor option '{arg}'"));
+            }
+            _ => return Err("sync cursor accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    if requires_value && value.is_none() {
+        return Err("sync cursor set requires --value <CURSOR>".to_string());
+    }
+
+    Ok(SyncCursorArgs {
+        db_path: db_path.ok_or_else(|| "sync cursor requires --db <DB_PATH>".to_string())?,
+        project_id: project_id
+            .ok_or_else(|| "sync cursor requires --project <PROJECT_ID>".to_string())?,
+        device_id,
+        value,
     })
 }
 
@@ -567,12 +906,142 @@ fn init_identity(args: &InitArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn devices_list(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_existing_metadata_store(db_path)?;
     store.apply_migrations()?;
-    let devices = store.list_devices()?;
+    let devices = store.list_device_trust()?;
 
-    println!("Device id\tAccount id\tCurrent local\tName\tLast seen at\tCreated at");
+    println!("Device id\tAccount id\tCurrent local\tName\tTrust state\tApproved at\tRevoked at\tLast seen at");
     for device in &devices {
-        print_device(device);
+        print_device_trust(device);
     }
+
+    Ok(())
+}
+
+fn auth_mock_login(args: &DbOnlyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let now = store.current_timestamp()?;
+    let session = mock_login(&identity_view(&identity), &now);
+    store.upsert_auth_session(&session)?;
+
+    println!("Mock auth session active");
+    println!("Account id: {}", session.account_id);
+    println!("Provider: {}", session.provider_kind);
+    println!("Subject: {}", session.subject);
+    println!("Session state: {}", session.session_state);
+    println!("Last refreshed at: {}", session.last_refreshed_at);
+    println!("Production authentication: not configured");
+    println!("Raw secrets: not printed");
+
+    Ok(())
+}
+
+fn auth_status(args: &DbOnlyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let session = store.auth_session(&identity.account_id)?;
+
+    println!("Auth boundary: local/mock");
+    println!("Account id: {}", identity.account_id);
+    println!("Current device id: {}", identity.device_id);
+    match session {
+        Some(session) => {
+            println!("Session state: {}", session.session_state);
+            println!("Provider: {}", session.provider_kind);
+            println!("Subject: {}", session.subject);
+            println!("Last refreshed at: {}", session.last_refreshed_at);
+        }
+        None => {
+            println!("Session state: missing");
+            println!("Provider: none");
+        }
+    }
+    println!("Production authentication: not configured");
+
+    Ok(())
+}
+
+fn devices_invite(args: &DeviceInviteArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let now = store.current_timestamp()?;
+    let draft = create_pairing_invitation(
+        &identity_view(&identity),
+        &now,
+        now_unix_seconds(),
+        args.ttl_seconds,
+    )?;
+    store.insert_pairing_invitation(&draft.invitation)?;
+
+    println!("Pairing invitation created");
+    println!("Invitation id: {}", draft.invitation.id);
+    println!("Account id: {}", draft.invitation.account_id);
+    println!("Inviter device id: {}", draft.invitation.inviter_device_id);
+    println!("Status: {}", draft.invitation.status);
+    println!("Expires at unix: {}", draft.invitation.expires_at_unix);
+    println!("Pairing token: {}", draft.token.expose_for_cli());
+    println!("Provider: local/mock metadata");
+    println!("Raw account/device keys: not printed");
+
+    Ok(())
+}
+
+fn devices_approve(args: &DeviceApproveArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let token = PairingInvitationToken::parse(&args.token)?;
+    let invitation = store
+        .pairing_invitation(&token.id)?
+        .ok_or_else(|| format!("pairing invitation not found: {}", token.id))?;
+    let now = store.current_timestamp()?;
+    let approval = approve_pairing_invitation(
+        &identity_view(&identity),
+        &invitation,
+        &token,
+        &args.device_name,
+        &now,
+        now_unix_seconds(),
+    )?;
+    store.persist_pairing_approval(&approval)?;
+
+    println!("Device approved");
+    println!("Device id: {}", approval.device.device_id);
+    println!("Device name: {}", approval.device.display_name);
+    println!("Account id: {}", approval.device.account_id);
+    println!("Invitation id: {}", approval.device.invitation_id);
+    println!("Trust state: approved");
+    println!("Key envelope stored: true");
+    println!("Raw account/device keys: not printed");
+
+    Ok(())
+}
+
+fn devices_revoke(args: &DeviceRevokeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let revoked_at = store.current_timestamp()?;
+    let revoked = store.revoke_device(&args.device_id, args.reason.as_deref(), &revoked_at)?;
+
+    println!("Device revoked");
+    println!("Device id: {}", revoked.device_id);
+    println!("Account id: {}", revoked.account_id);
+    println!("Trust state: {}", revoked.trust_state);
+    println!(
+        "Revoked at: {}",
+        revoked.revoked_at.as_deref().unwrap_or("-")
+    );
+    println!("Provider: local/mock metadata");
 
     Ok(())
 }
@@ -625,6 +1094,66 @@ fn sync_download(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> 
     println!("Remote provider: local filesystem");
     println!("Remote root: {}", provider.root().display());
     println!("Cloud authentication: not configured");
+
+    Ok(())
+}
+
+fn sync_cursor_get(args: &SyncCursorArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let device_id = args.device_id.as_deref().unwrap_or(&identity.device_id);
+    let cursor = store.device_project_cursor(&identity.account_id, device_id, &args.project_id)?;
+
+    println!("Sync cursor");
+    println!("Account id: {}", identity.account_id);
+    println!("Device id: {device_id}");
+    println!("Project id: {}", args.project_id);
+    match cursor {
+        Some(cursor) => {
+            println!("Cursor value: {}", cursor.cursor_value);
+            println!("Updated at: {}", cursor.updated_at);
+        }
+        None => {
+            println!("Cursor value: -");
+            println!("Updated at: -");
+        }
+    }
+    println!("Provider: local/mock metadata");
+
+    Ok(())
+}
+
+fn sync_cursor_set(args: &SyncCursorArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let device_id = args.device_id.clone().unwrap_or(identity.device_id.clone());
+    let value = args
+        .value
+        .as_ref()
+        .ok_or("sync cursor set requires --value <CURSOR>")?;
+    let now = store.current_timestamp()?;
+    let cursor = DeviceProjectCursor {
+        account_id: identity.account_id.clone(),
+        device_id,
+        project_id: args.project_id.clone(),
+        cursor_value: value.clone(),
+        updated_at: now,
+    };
+    store.upsert_device_project_cursor(&cursor)?;
+
+    println!("Sync cursor updated");
+    println!("Account id: {}", cursor.account_id);
+    println!("Device id: {}", cursor.device_id);
+    println!("Project id: {}", cursor.project_id);
+    println!("Cursor value: {}", cursor.cursor_value);
+    println!("Updated at: {}", cursor.updated_at);
+    println!("Provider: local/mock metadata");
 
     Ok(())
 }
@@ -840,16 +1369,27 @@ fn print_pending_change(change: &PendingLocalChangeRecord) {
     );
 }
 
-fn print_device(device: &DeviceRecord) {
+fn print_device_trust(device: &DeviceTrustRecord) {
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}",
-        device.id,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        device.device_id,
         device.account_id,
         device.is_local,
         device.display_name,
+        device.trust_state,
+        device.approved_at.as_deref().unwrap_or("-"),
+        device.revoked_at.as_deref().unwrap_or("-"),
         device.last_seen_at,
-        device.created_at
     );
+}
+
+fn identity_view(identity: &LocalIdentityRecord) -> LocalIdentityView {
+    LocalIdentityView {
+        account_id: identity.account_id.clone(),
+        device_id: identity.device_id.clone(),
+        device_name: identity.device_name.clone(),
+        sync_key_hex: identity.sync_key_hex.clone(),
+    }
 }
 
 fn local_change_kind_name(kind: &LocalChangeKind) -> &'static str {
@@ -1169,6 +1709,12 @@ fn print_sync_usage() {
     eprintln!(
         "  devbox sync download --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> <BLOB_ID> [--object-key <KEY>]"
     );
+    eprintln!(
+        "  devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID> [--device <DEVICE_ID>]"
+    );
+    eprintln!(
+        "  devbox sync cursor set --db <DB_PATH> --project <PROJECT_ID> --value <CURSOR> [--device <DEVICE_ID>]"
+    );
 }
 
 fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::error::Error>> {
@@ -1290,8 +1836,9 @@ fn print_help() {
     println!("Commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
     println!("  init       Initialize local account and current-device identity");
-    println!("  devices    List known local account devices");
-    println!("  sync       Upload and download encrypted blobs through a local remote provider");
+    println!("  auth       Manage local/mock auth session status");
+    println!("  devices    List, invite, approve, and revoke local/mock trusted devices");
+    println!("  sync       Upload/download encrypted blobs and manage local cursors");
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  changes    Scan, list, and clear the pending local change feed");
     println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
