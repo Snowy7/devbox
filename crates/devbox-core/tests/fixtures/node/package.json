@@ -1,0 +1,1 @@
+{"scripts":{"test":"node --test"},"dependencies":{"left-pad":"1.3.0"}}

@@ -6,9 +6,9 @@ This repository now has the first PR-sized technical skeleton for Devbox. It is 
 
 The Rust workspace is rooted at `Cargo.toml` and contains four crates:
 
-- `crates/devbox-core`: shared domain types for projects, snapshots, blobs, manifests, and policy decisions.
+- `crates/devbox-core`: shared domain types for projects, snapshots, blobs, manifests, policy decisions, and read-only project scanning.
 - `crates/devbox-daemon`: placeholder daemon binary that will own filesystem watching, snapshot creation, restore, and local metadata writes.
-- `crates/devbox-cli`: placeholder `devbox` CLI binary with `--version` and the future commands `scan`, `snapshot`, `status`, `restore`, and `explain`.
+- `crates/devbox-cli`: `devbox` CLI binary with `--version`, read-only `scan <path>`, and placeholders for the future commands `snapshot`, `status`, `restore`, and `explain`.
 - `crates/devbox-git`: placeholder Git adapter boundary. Git repositories must be inspected and reconstructed through a dedicated adapter rather than by syncing `.git` as ordinary files.
 
 ## Desktop Boundary
@@ -46,5 +46,7 @@ This slice does not implement:
 - sync
 - Electron runtime wiring
 - local Postgres or MinIO services
+
+The next scanner slice is documented in [Project Scanner and Policy Foundation](project-scanner-policy.md).
 
 Those pieces should land in later vertical slices with focused tests around each correctness boundary.
