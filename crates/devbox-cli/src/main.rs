@@ -1,5 +1,7 @@
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::PolicyDecision;
+use devbox_snapshot::SnapshotManifestBuilder;
+use devbox_store::BlobCache;
 use devbox_store::Store;
 use std::path::Path;
 use std::process::ExitCode;
@@ -16,7 +18,8 @@ fn main() -> ExitCode {
         }
         Some("scan") => run_scan(&args[1..]),
         Some("status") => run_status(&args[1..]),
-        Some("snapshot" | "restore" | "explain") => {
+        Some("snapshot") => run_snapshot(&args[1..]),
+        Some("restore" | "explain") => {
             println!("devbox: command placeholder; daemon integration is not implemented yet");
             ExitCode::SUCCESS
         }
@@ -30,6 +33,45 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn run_snapshot(args: &[String]) -> ExitCode {
+    match args {
+        [cache_flag, cache_root, dry_run_flag, path]
+            if cache_flag == "--cache" && dry_run_flag == "--dry-run" =>
+        {
+            match snapshot_dry_run(cache_root, path) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        _ => {
+            eprintln!("devbox: snapshot currently supports only dry-run manifest creation");
+            eprintln!("Usage: devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn snapshot_dry_run(cache_root: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cache = BlobCache::open(cache_root)?;
+    let snapshot = SnapshotManifestBuilder::new(cache).build_draft(path)?;
+    let summary = snapshot.summary();
+
+    println!("Snapshot root: {}", snapshot.root().display());
+    println!("Draft snapshot id: {}", snapshot.id());
+    println!("Manifest entries: {}", summary.total_entries());
+    println!("Included files: {}", summary.included_files());
+    println!("Included directories: {}", summary.included_directories());
+    println!("Included symlinks: {}", summary.included_symlinks());
+    println!("Policy exclusions: {}", summary.excluded_entries());
+    println!("Included file bytes: {}", summary.total_file_bytes());
+    println!("SQLite persistence: deferred");
+
+    Ok(())
 }
 
 fn run_status(args: &[String]) -> ExitCode {
@@ -141,7 +183,7 @@ fn print_help() {
     println!();
     println!("Commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
-    println!("  snapshot   Placeholder for local snapshot creation");
+    println!("  snapshot   Build a dry-run snapshot manifest and local blob-cache objects");
     println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
     println!("  restore    Placeholder for snapshot restore");
     println!("  explain    Placeholder for policy and sync explanations");

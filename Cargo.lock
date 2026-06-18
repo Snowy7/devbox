@@ -82,6 +82,7 @@ name = "devbox-cli"
 version = "0.1.0"
 dependencies = [
  "devbox-core",
+ "devbox-snapshot",
  "devbox-store",
 ]
 
@@ -98,6 +99,16 @@ name = "devbox-git"
 version = "0.1.0"
 dependencies = [
  "devbox-core",
+]
+
+[[package]]
+name = "devbox-snapshot"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "devbox-core",
+ "devbox-store",
+ "tempfile",
 ]
 
 [[package]]

@@ -54,10 +54,9 @@ The initial migration creates:
 
 This boundary does not implement:
 
-- snapshot manifest creation
 - recording blob metadata rows automatically during cache writes
-- manifest construction
 - snapshot creation
+- translating draft snapshot manifests into SQLite rows
 - restore planning or materialization
 - filesystem watching
 - cloud sync

@@ -48,8 +48,8 @@ The scanner intentionally does not implement:
 - `.gitignore` parsing
 - user, project, or team policy overrides
 - secret detection
-- file hashing or content-addressed object writes
-- snapshot manifests
+- file hashing or content-addressed object writes, except through the later snapshot builder
+- SQLite-backed snapshot manifest persistence
 - SQLite storage
 - filesystem watching
 - Git state capture beyond excluding `.git`
