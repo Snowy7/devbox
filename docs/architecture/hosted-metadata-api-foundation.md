@@ -90,6 +90,19 @@ for device, project, snapshot, cursor, and managed lease scoping. Mock-dev mode 
 header/body identity mismatches so tests and local sync flows stay explicit. Session-auth mode does
 not trust caller-supplied account ids in request bodies.
 
+The hosted alpha API can mint those sessions through one-time invite login:
+
+```text
+GET /ready
+POST /v1/auth/alpha/login
+GET /v1/auth/session
+DELETE /v1/auth/session
+```
+
+The server binary defaults to account-session auth only. Mock-dev headers are accepted only when
+`--allow-mock-auth` or `DEVBOX_ALLOW_MOCK_AUTH=true` is set. Alpha invite rows store only the invite
+code hash; login returns the raw session token once, and the session table stores only its hash.
+
 The service rejects obvious secret-bearing request material and its public CLI check prints a
 sanitized endpoint, not raw input, keys, or object credentials.
 
@@ -101,6 +114,10 @@ precondition errors rather than raw SQLite messages.
 
 `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]` validates
 the local metadata service configuration without making a network request.
+
+`devbox metadata alpha-invite create --db <METADATA_DB> --email <EMAIL>|--domain <DOMAIN>` creates
+a one-time invite in the hosted metadata SQLite DB. `devbox auth hosted-login --api <URL> --email
+<EMAIL> --invite-code-env <ENV>` exchanges it for a bearer session token.
 
 The local/mock publish, import, and materialize flows can now opt into an in-process mock-dev SQLite
 metadata store. That wiring registers published snapshot metadata, discovers manifest object keys by
@@ -124,7 +141,7 @@ models or cursor compare-and-set contract.
 
 Remaining Phase 1 work includes:
 
-- live OAuth/OIDC sign-in and hosted account ownership proof verification
+- OAuth/OIDC sign-in and hosted provider proof verification beyond one-time alpha invites
 - live managed R2/S3 credential provisioning and rotation against provider APIs
 - production pairing UX and live recovery/rotation flows
 - automatic conflict merge/apply resolution and user-facing conflict UI

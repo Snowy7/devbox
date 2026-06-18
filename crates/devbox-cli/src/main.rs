@@ -1,9 +1,10 @@
 use devbox_auth::{
     approve_pairing_invitation, create_account_ownership_proof, create_account_session,
-    create_device_rotation_intent, create_pairing_invitation, create_recovery_grant, mock_login,
-    now_unix_seconds, revoke_account_session, validate_account_session, AccountOwnershipProofInput,
-    DeviceProjectCursor, DeviceRotationIntent, DeviceRotationIntentInput, DeviceTrustRecord,
-    LocalIdentityView, PairingInvitationToken, RecoveryGrant,
+    create_device_rotation_intent, create_pairing_invitation, create_recovery_grant,
+    generate_alpha_invite_code, mock_login, now_unix_seconds, revoke_account_session,
+    validate_account_session, AccountOwnershipProofInput, DeviceProjectCursor,
+    DeviceRotationIntent, DeviceRotationIntentInput, DeviceTrustRecord, LocalIdentityView,
+    PairingInvitationToken, RecoveryGrant,
 };
 use devbox_conflict::{
     compare_snapshots, path_to_conflict_string, ComparableEntry, ComparableSnapshot,
@@ -19,9 +20,10 @@ use devbox_materialize::{
 };
 use devbox_metadata::{
     active_managed_object_credential_lease_for_session, authenticate_account_session,
-    redacted_managed_object_remote_config, ManagedObjectCapability,
-    ManagedObjectCredentialLeaseRequest, ManagedObjectProviderKind, MetadataAuthMode,
-    MetadataServiceConfig, MetadataStore, SqliteMetadataStore,
+    create_alpha_invite_request, redacted_managed_object_remote_config, AlphaLoginResponse,
+    AuthSessionResponse, ManagedObjectCapability, ManagedObjectCredentialLeaseRequest,
+    ManagedObjectProviderKind, MetadataAuthMode, MetadataServiceConfig, MetadataStore,
+    SqliteMetadataStore,
 };
 use devbox_snapshot::{
     is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
@@ -40,6 +42,7 @@ use devbox_sync::{
     LocalFilesystemBlobProvider, ObjectKey, RemoteBlobProvider, S3CompatibleBlobProvider,
     S3CompatibleConfig, S3CredentialsSource, S3RedactedConfig, SyncKey,
 };
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -387,6 +390,20 @@ struct AuthProofCheckArgs {
     session_token: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct AuthHostedLoginArgs {
+    api: String,
+    email: String,
+    invite_code: Option<String>,
+    invite_code_env: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AuthHostedSessionArgs {
+    api: String,
+    session_token_env: String,
+}
+
 impl std::fmt::Debug for AuthMockVerifiedBootstrapArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthMockVerifiedBootstrapArgs")
@@ -408,6 +425,29 @@ impl std::fmt::Debug for AuthProofCheckArgs {
         f.debug_struct("AuthProofCheckArgs")
             .field("db_path", &self.db_path)
             .field("session_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AuthHostedLoginArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthHostedLoginArgs")
+            .field("api", &self.api)
+            .field("email", &self.email)
+            .field(
+                "invite_code",
+                &self.invite_code.as_ref().map(|_| "<redacted>"),
+            )
+            .field("invite_code_env", &self.invite_code_env)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AuthHostedSessionArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthHostedSessionArgs")
+            .field("api", &self.api)
+            .field("session_token_env", &self.session_token_env)
             .finish()
     }
 }
@@ -599,6 +639,30 @@ struct MetadataCheckArgs {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+struct MetadataAlphaInviteCreateArgs {
+    db_path: String,
+    email: Option<String>,
+    domain: Option<String>,
+    invite_code: Option<String>,
+    ttl_seconds: i64,
+}
+
+impl std::fmt::Debug for MetadataAlphaInviteCreateArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataAlphaInviteCreateArgs")
+            .field("db_path", &self.db_path)
+            .field("email", &self.email)
+            .field("domain", &self.domain)
+            .field(
+                "invite_code",
+                &self.invite_code.as_ref().map(|_| "<redacted>"),
+            )
+            .field("ttl_seconds", &self.ttl_seconds)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct MetadataCredentialLeaseArgs {
     db_path: String,
     session_token: String,
@@ -728,6 +792,42 @@ fn run_auth(args: &[String]) -> ExitCode {
                 }
             }
         }
+        Some("hosted-login") => match parse_auth_hosted_login_args(&args[1..])
+            .and_then(|args| auth_hosted_login(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!(
+                    "Usage: devbox auth hosted-login --api <URL> --email <EMAIL> --invite-code-env <ENV>|--invite-code <CODE>"
+                );
+                ExitCode::from(1)
+            }
+        },
+        Some("hosted-status") => match parse_auth_hosted_session_args(&args[1..], "hosted-status")
+            .and_then(|args| auth_hosted_status(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!(
+                    "Usage: devbox auth hosted-status --api <URL> [--session-token-env <ENV>]"
+                );
+                ExitCode::from(1)
+            }
+        },
+        Some("hosted-logout") => match parse_auth_hosted_session_args(&args[1..], "hosted-logout")
+            .and_then(|args| auth_hosted_logout(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!(
+                    "Usage: devbox auth hosted-logout --api <URL> [--session-token-env <ENV>]"
+                );
+                ExitCode::from(1)
+            }
+        },
         Some("proof-check") => match parse_auth_proof_check_args(&args[1..])
             .and_then(|args| auth_proof_check(&args).map_err(|error| error.to_string()))
         {
@@ -750,7 +850,7 @@ fn run_auth(args: &[String]) -> ExitCode {
         },
         _ => {
             eprintln!(
-                "devbox: auth requires mock-login, status, mock-verified-bootstrap, proof-check, or revoke-session"
+                "devbox: auth requires mock-login, status, mock-verified-bootstrap, hosted-login, hosted-status, hosted-logout, proof-check, or revoke-session"
             );
             eprintln!("Usage:");
             eprintln!("  devbox auth mock-login --db <DB_PATH>");
@@ -758,6 +858,11 @@ fn run_auth(args: &[String]) -> ExitCode {
             eprintln!(
                 "  devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN> [--provider-kind <KIND>] [--provider-issuer <ISSUER>] [--provider-subject <SUBJECT>] [--ttl-seconds <SECONDS>] [--proof-ttl-seconds <SECONDS>]"
             );
+            eprintln!(
+                "  devbox auth hosted-login --api <URL> --email <EMAIL> --invite-code-env <ENV>|--invite-code <CODE>"
+            );
+            eprintln!("  devbox auth hosted-status --api <URL> [--session-token-env <ENV>]");
+            eprintln!("  devbox auth hosted-logout --api <URL> [--session-token-env <ENV>]");
             eprintln!("  devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>");
             eprintln!("  devbox auth revoke-session --db <DB_PATH> <SESSION_ID>");
             ExitCode::from(2)
@@ -866,6 +971,25 @@ fn run_metadata(args: &[String]) -> ExitCode {
                 eprintln!("devbox: {error}");
                 print_metadata_usage();
                 ExitCode::from(1)
+            }
+        },
+        Some("alpha-invite") => match args.get(1).map(String::as_str) {
+            Some("create") => {
+                match parse_metadata_alpha_invite_create_args(&args[2..]).and_then(|args| {
+                    metadata_alpha_invite_create(&args).map_err(|error| error.to_string())
+                }) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        eprintln!("devbox: {error}");
+                        print_metadata_usage();
+                        ExitCode::from(1)
+                    }
+                }
+            }
+            _ => {
+                eprintln!("devbox: metadata alpha-invite requires create");
+                print_metadata_usage();
+                ExitCode::from(2)
             }
         },
         Some("credential-lease") => match args.get(1).map(String::as_str) {
@@ -1225,6 +1349,91 @@ fn parse_auth_proof_check_args(args: &[String]) -> Result<AuthProofCheckArgs, St
         db_path: db_path.ok_or_else(|| "auth proof-check requires --db <DB_PATH>".to_string())?,
         session_token: session_token
             .ok_or_else(|| "auth proof-check requires --session-token <TOKEN>".to_string())?,
+    })
+}
+
+fn parse_auth_hosted_login_args(args: &[String]) -> Result<AuthHostedLoginArgs, String> {
+    let mut api = None;
+    let mut email = None;
+    let mut invite_code = None;
+    let mut invite_code_env = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--api" => {
+                index += 1;
+                api = args.get(index).cloned();
+            }
+            "--email" => {
+                index += 1;
+                email = args.get(index).cloned();
+            }
+            "--invite-code" => {
+                index += 1;
+                invite_code = args.get(index).cloned();
+            }
+            "--invite-code-env" => {
+                index += 1;
+                invite_code_env = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown auth hosted-login option '{value}'"));
+            }
+            _ => return Err("auth hosted-login accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    if invite_code.is_some() == invite_code_env.is_some() {
+        return Err(
+            "auth hosted-login requires exactly one of --invite-code or --invite-code-env"
+                .to_string(),
+        );
+    }
+
+    Ok(AuthHostedLoginArgs {
+        api: api.ok_or_else(|| "auth hosted-login requires --api <URL>".to_string())?,
+        email: email.ok_or_else(|| "auth hosted-login requires --email <EMAIL>".to_string())?,
+        invite_code,
+        invite_code_env,
+    })
+}
+
+fn parse_auth_hosted_session_args(
+    args: &[String],
+    command: &'static str,
+) -> Result<AuthHostedSessionArgs, String> {
+    let mut api = None;
+    let mut session_token_env = "DEVBOX_SESSION_TOKEN".to_string();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--api" => {
+                index += 1;
+                api = args.get(index).cloned();
+            }
+            "--session-token-env" => {
+                index += 1;
+                session_token_env = args
+                    .get(index)
+                    .ok_or_else(|| "--session-token-env requires <ENV>".to_string())?
+                    .clone();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown auth {command} option '{value}'"));
+            }
+            _ => return Err(format!("auth {command} accepts only flags")),
+        }
+
+        index += 1;
+    }
+
+    Ok(AuthHostedSessionArgs {
+        api: api.ok_or_else(|| format!("auth {command} requires --api <URL>"))?,
+        session_token_env,
     })
 }
 
@@ -1832,6 +2041,71 @@ fn parse_metadata_check_args(args: &[String]) -> Result<MetadataCheckArgs, Strin
     Ok(MetadataCheckArgs {
         endpoint: endpoint.ok_or_else(|| "metadata check requires --endpoint <URL>".to_string())?,
         auth_mode,
+    })
+}
+
+fn parse_metadata_alpha_invite_create_args(
+    args: &[String],
+) -> Result<MetadataAlphaInviteCreateArgs, String> {
+    let mut db_path = None;
+    let mut email = None;
+    let mut domain = None;
+    let mut invite_code = None;
+    let mut ttl_seconds = 60 * 60 * 24 * 14;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--email" => {
+                index += 1;
+                email = args.get(index).cloned();
+            }
+            "--domain" => {
+                index += 1;
+                domain = args.get(index).cloned();
+            }
+            "--invite-code" => {
+                index += 1;
+                invite_code = args.get(index).cloned();
+            }
+            "--ttl-seconds" => {
+                index += 1;
+                ttl_seconds = args
+                    .get(index)
+                    .ok_or_else(|| "--ttl-seconds requires <SECONDS>".to_string())?
+                    .parse()
+                    .map_err(|_| "--ttl-seconds requires an integer".to_string())?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown metadata alpha-invite create option '{value}'"
+                ));
+            }
+            _ => return Err("metadata alpha-invite create accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    if email.is_none() && domain.is_none() {
+        return Err("metadata alpha-invite create requires --email or --domain".to_string());
+    }
+    if ttl_seconds <= 0 {
+        return Err("metadata alpha-invite create requires a positive --ttl-seconds".to_string());
+    }
+
+    Ok(MetadataAlphaInviteCreateArgs {
+        db_path: db_path.ok_or_else(|| {
+            "metadata alpha-invite create requires --db <METADATA_DB>".to_string()
+        })?,
+        email,
+        domain,
+        invite_code,
+        ttl_seconds,
     })
 }
 
@@ -3161,6 +3435,103 @@ fn auth_revoke_session(args: &AuthRevokeSessionArgs) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+#[derive(Serialize)]
+struct HostedLoginRequest<'a> {
+    email: &'a str,
+    invite_code: &'a str,
+}
+
+fn auth_hosted_login(args: &AuthHostedLoginArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let invite_code = invite_code_for_hosted_login(args)?;
+    let response: AlphaLoginResponse = ureq::post(&api_url(&args.api, "/v1/auth/alpha/login")?)
+        .send_json(serde_json::to_value(HostedLoginRequest {
+            email: &args.email,
+            invite_code: &invite_code,
+        })?)?
+        .into_json()?;
+
+    println!("Hosted auth session active");
+    println!("Account id: {}", response.account_id);
+    println!("Session id: {}", response.session_id);
+    println!("Provider kind: {}", response.provider_kind);
+    println!("Provider issuer: {}", response.provider_issuer);
+    println!("Provider subject: {}", response.provider_subject);
+    println!("Session expires at unix: {}", response.expires_at_unix);
+    println!("Session token env: DEVBOX_SESSION_TOKEN");
+    println!("Session token export:");
+    println!("export DEVBOX_SESSION_TOKEN='{}'", response.session_token);
+    println!("Stored credential material: none");
+
+    Ok(())
+}
+
+fn auth_hosted_status(args: &AuthHostedSessionArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let token = session_token_from_env(&args.session_token_env)?;
+    let response: AuthSessionResponse = ureq::get(&api_url(&args.api, "/v1/auth/session")?)
+        .set("authorization", &format!("Bearer {token}"))
+        .call()?
+        .into_json()?;
+
+    println!("Hosted auth session active");
+    println!("Account id: {}", response.account_id);
+    println!("Session id: {}", response.session_id);
+    println!("Provider kind: {}", response.provider_kind);
+    println!("Provider issuer: {}", response.provider_issuer);
+    println!("Provider subject: {}", response.provider_subject);
+    println!("Session expires at unix: {}", response.expires_at_unix);
+    println!("Session token: loaded from {}", args.session_token_env);
+
+    Ok(())
+}
+
+fn auth_hosted_logout(args: &AuthHostedSessionArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let token = session_token_from_env(&args.session_token_env)?;
+    let response: AuthSessionResponse = ureq::delete(&api_url(&args.api, "/v1/auth/session")?)
+        .set("authorization", &format!("Bearer {token}"))
+        .call()?
+        .into_json()?;
+
+    println!("Hosted auth session revoked");
+    println!("Account id: {}", response.account_id);
+    println!("Session id: {}", response.session_id);
+    println!("Session token: loaded from {}", args.session_token_env);
+
+    Ok(())
+}
+
+fn session_token_from_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    secret_from_env(name, "session token")
+}
+
+fn invite_code_for_hosted_login(
+    args: &AuthHostedLoginArgs,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(name) = &args.invite_code_env {
+        return secret_from_env(name, "invite code");
+    }
+    args.invite_code
+        .clone()
+        .ok_or_else(|| "hosted login requires an invite code".into())
+}
+
+fn secret_from_env(name: &str, label: &'static str) -> Result<String, Box<dyn std::error::Error>> {
+    validate_non_secret_reference(name, &format!("{label} env name"))?;
+    let value = std::env::var(name).map_err(|_| format!("{label} env var is not set: {name}"))?;
+    if value.trim().is_empty() {
+        return Err(format!("{label} env var is empty: {name}").into());
+    }
+    Ok(value)
+}
+
+fn api_url(api: &str, path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let check = MetadataServiceConfig {
+        endpoint: api.to_string(),
+        auth_mode: MetadataAuthMode::AccountSession,
+    }
+    .validate()?;
+    Ok(format!("{}{}", check.endpoint.trim_end_matches('/'), path))
+}
+
 fn devices_invite(args: &DeviceInviteArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_existing_metadata_store(&args.db_path)?;
     store.apply_migrations()?;
@@ -3930,6 +4301,44 @@ fn metadata_check(args: &MetadataCheckArgs) -> Result<(), Box<dyn std::error::Er
     println!(
         "Boundary: production-shaped service trust only; live OAuth, managed provider provisioning, deployment hardening, and UI are deferred"
     );
+
+    Ok(())
+}
+
+fn metadata_alpha_invite_create(
+    args: &MetadataAlphaInviteCreateArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let now_unix = now_unix_seconds();
+    let now = format!("unix:{now_unix}");
+    let invite_code = match &args.invite_code {
+        Some(code) => code.clone(),
+        None => generate_alpha_invite_code()?,
+    };
+    let request = create_alpha_invite_request(
+        &invite_code,
+        args.email.as_deref(),
+        args.domain.as_deref(),
+        &now,
+        now_unix,
+        args.ttl_seconds,
+    )?;
+    let record = store.create_alpha_invite(request)?;
+
+    println!("Alpha invite created");
+    println!("Invite id: {}", record.invite_id);
+    println!(
+        "Allowed email: {}",
+        record.allowed_email.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Allowed domain: {}",
+        record.allowed_domain.as_deref().unwrap_or("-")
+    );
+    println!("Invite state: {}", record.invite_state);
+    println!("Expires at unix: {}", record.expires_at_unix);
+    println!("Invite code: {invite_code}");
+    println!("Stored credential material: invite code hash only");
 
     Ok(())
 }
@@ -5259,6 +5668,9 @@ fn print_metadata_usage() {
         "  devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]"
     );
     eprintln!(
+        "  devbox metadata alpha-invite create --db <METADATA_DB> --email <EMAIL>|--domain <DOMAIN> [--invite-code <CODE>] [--ttl-seconds <SECONDS>]"
+    );
+    eprintln!(
         "  devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET> [--provider-kind r2|s3|minio-compatible] [--region <REGION>] [--prefix <PREFIX>] [--capabilities read,write,list,head] [--ttl-seconds <SECONDS>]"
     );
     eprintln!(
@@ -5509,6 +5921,103 @@ mod tests {
             error.to_string(),
             "metadata endpoint must not contain secret-looking material"
         );
+    }
+
+    #[test]
+    fn metadata_alpha_invite_create_args_accept_email_or_domain() {
+        let email_args = vec![
+            "--db".to_string(),
+            "metadata.sqlite3".to_string(),
+            "--email".to_string(),
+            "dev@example.com".to_string(),
+            "--ttl-seconds".to_string(),
+            "600".to_string(),
+        ];
+        let parsed =
+            parse_metadata_alpha_invite_create_args(&email_args).expect("email invite args parse");
+        assert_eq!(parsed.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(parsed.domain, None);
+        assert_eq!(parsed.ttl_seconds, 600);
+
+        let domain_args = vec![
+            "--db".to_string(),
+            "metadata.sqlite3".to_string(),
+            "--domain".to_string(),
+            "example.com".to_string(),
+        ];
+        let parsed = parse_metadata_alpha_invite_create_args(&domain_args)
+            .expect("domain invite args parse");
+        assert_eq!(parsed.domain.as_deref(), Some("example.com"));
+        assert_eq!(parsed.ttl_seconds, 60 * 60 * 24 * 14);
+
+        let missing_contact = vec!["--db".to_string(), "metadata.sqlite3".to_string()];
+        let error = parse_metadata_alpha_invite_create_args(&missing_contact)
+            .expect_err("contact scope is required");
+        assert_eq!(
+            error,
+            "metadata alpha-invite create requires --email or --domain"
+        );
+    }
+
+    #[test]
+    fn hosted_auth_args_parse_and_default_session_env() {
+        let login_args = vec![
+            "--api".to_string(),
+            "https://metadata.example".to_string(),
+            "--email".to_string(),
+            "dev@example.com".to_string(),
+            "--invite-code".to_string(),
+            "raw-code".to_string(),
+        ];
+        let login = parse_auth_hosted_login_args(&login_args).expect("login args parse");
+        assert_eq!(login.api, "https://metadata.example");
+        assert_eq!(login.email, "dev@example.com");
+        assert_eq!(login.invite_code.as_deref(), Some("raw-code"));
+        assert_eq!(login.invite_code_env, None);
+        assert!(!format!("{login:?}").contains("raw-code"));
+
+        let login_env_args = vec![
+            "--api".to_string(),
+            "https://metadata.example".to_string(),
+            "--email".to_string(),
+            "dev@example.com".to_string(),
+            "--invite-code-env".to_string(),
+            "DEVBOX_ALPHA_INVITE_CODE".to_string(),
+        ];
+        let login = parse_auth_hosted_login_args(&login_env_args).expect("env login args parse");
+        assert_eq!(
+            login.invite_code_env.as_deref(),
+            Some("DEVBOX_ALPHA_INVITE_CODE")
+        );
+        assert_eq!(login.invite_code, None);
+
+        let missing_invite = vec![
+            "--api".to_string(),
+            "https://metadata.example".to_string(),
+            "--email".to_string(),
+            "dev@example.com".to_string(),
+        ];
+        let error =
+            parse_auth_hosted_login_args(&missing_invite).expect_err("invite source is required");
+        assert_eq!(
+            error,
+            "auth hosted-login requires exactly one of --invite-code or --invite-code-env"
+        );
+
+        let status_args = vec!["--api".to_string(), "https://metadata.example".to_string()];
+        let status = parse_auth_hosted_session_args(&status_args, "hosted-status")
+            .expect("status args parse");
+        assert_eq!(status.session_token_env, "DEVBOX_SESSION_TOKEN");
+
+        let custom_env_args = vec![
+            "--api".to_string(),
+            "https://metadata.example".to_string(),
+            "--session-token-env".to_string(),
+            "DEVBOX_TEST_SESSION".to_string(),
+        ];
+        let logout = parse_auth_hosted_session_args(&custom_env_args, "hosted-logout")
+            .expect("logout args parse");
+        assert_eq!(logout.session_token_env, "DEVBOX_TEST_SESSION");
     }
 
     #[test]

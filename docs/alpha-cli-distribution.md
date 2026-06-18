@@ -33,6 +33,9 @@ DEVBOX_R2_BUCKET=devbox-alpha-your-name
 DEVBOX_R2_PREFIX=v1/projects/manual-test-001
 DEVBOX_R2_ACCESS_KEY_ID=replace-me
 DEVBOX_R2_SECRET_ACCESS_KEY=replace-me
+DEVBOX_METADATA_API=http://127.0.0.1:8787
+DEVBOX_ALPHA_INVITE_CODE=replace-after-invite-create
+DEVBOX_SESSION_TOKEN=replace-after-hosted-login
 ```
 
 Pass the credential variable names to the CLI:
@@ -46,15 +49,43 @@ Do not pass raw key values as CLI arguments.
 
 ## Current Deployment Boundary
 
-The manual real-R2 alpha path does not require deploying the Devbox API.
+The manual real-R2 alpha path still does not require deploying the Devbox API.
 
-The repo has hosted metadata and account/session foundations, but the current real-R2 smoke path is
-still local/manual:
+The repo now has a deployable hosted metadata alpha API with:
+
+- `/ready`
+- one-time alpha invite login
+- bearer account-session status and logout
+- hosted metadata handlers that can reject mock-dev headers unless explicitly enabled
+
+To test hosted login locally:
+
+```bash
+cargo run -p devbox-metadata -- --db ./metadata-alpha.sqlite3 --listen 127.0.0.1:8787
+
+cargo run -p devbox-cli -- metadata alpha-invite create \
+  --db ./metadata-alpha.sqlite3 \
+  --email dev@example.com
+
+export DEVBOX_ALPHA_INVITE_CODE='<printed-invite-code>'
+
+cargo run -p devbox-cli -- auth hosted-login \
+  --api http://127.0.0.1:8787 \
+  --email dev@example.com \
+  --invite-code-env DEVBOX_ALPHA_INVITE_CODE
+
+export DEVBOX_SESSION_TOKEN='<printed-session-token>'
+
+cargo run -p devbox-cli -- auth hosted-status \
+  --api http://127.0.0.1:8787
+```
+
+The current real-R2 smoke path is still local/manual:
 
 - object bytes go to R2
-- snapshot metadata lives in local SQLite
+- snapshot metadata can live in local SQLite, with hosted auth now available separately
 - device trust is bootstrapped with `--mock-key-source-db`
-- production credential leasing and production key exchange are deferred
+- production credential leasing and production key exchange are deferred to the next alpha PRs
 - the Electron app is not yet wired to live daemon/API state
 
 When production credential leasing is built, the backend will need deployment. It will own the

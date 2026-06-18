@@ -1,20 +1,21 @@
 //! Hosted metadata API foundation for Phase 1.
 //!
-//! This crate is intentionally production-shaped but not production-authenticated. It models the
-//! hosted metadata service boundary for accounts, devices, projects, published snapshot manifests,
-//! and server-side device/project cursors while keeping tests and local development SQLite-only.
-//! The `MockDevIdentity` header boundary is for local tests/dev only; production OAuth, account
-//! ownership proof, managed object credentials, billing, and deployment hardening remain deferred.
+//! This crate models the hosted metadata service boundary for accounts, devices, projects,
+//! published snapshot manifests, and server-side device/project cursors while keeping tests and
+//! local development SQLite-only. The `MockDevIdentity` header boundary is for local tests/dev only;
+//! hosted alpha mode uses one-time invite codes plus bearer account sessions. Production OAuth,
+//! managed object credential issuance, billing, and deployment hardening remain deferred.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use devbox_auth::{
+    create_account_ownership_proof, create_account_session, generate_session_token,
     hash_session_token_hex, revoke_account_session as revoke_auth_account_session,
     validate_account_ownership_proof, validate_account_session_hash, AccountOwnershipProof,
-    AccountSession, AuthenticatedAccountSession,
+    AccountOwnershipProofInput, AccountSession, AuthenticatedAccountSession,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -145,6 +146,158 @@ pub struct HealthResponse {
     pub status: String,
     pub service: String,
     pub storage: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostedAuthPolicy {
+    MockDevAndAccountSession,
+    AccountSessionOnly,
+}
+
+impl HostedAuthPolicy {
+    pub fn allows_mock_dev_headers(self) -> bool {
+        matches!(self, Self::MockDevAndAccountSession)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedApiConfig {
+    pub auth_policy: HostedAuthPolicy,
+    pub storage_label: String,
+    pub session_ttl_seconds: i64,
+    pub proof_ttl_seconds: i64,
+}
+
+impl HostedApiConfig {
+    pub fn local_dev() -> Self {
+        Self {
+            auth_policy: HostedAuthPolicy::MockDevAndAccountSession,
+            storage_label: "sqlite-dev".to_string(),
+            session_ttl_seconds: 60 * 60 * 24 * 30,
+            proof_ttl_seconds: 60 * 60 * 24 * 90,
+        }
+    }
+
+    pub fn hosted_alpha() -> Self {
+        Self {
+            auth_policy: HostedAuthPolicy::AccountSessionOnly,
+            storage_label: "sqlite-hosted-alpha".to_string(),
+            session_ttl_seconds: 60 * 60 * 24 * 30,
+            proof_ttl_seconds: 60 * 60 * 24 * 90,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadyResponse {
+    pub status: String,
+    pub service: String,
+    pub storage: String,
+    pub auth_policy: HostedAuthPolicy,
+    pub mock_auth_enabled: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlphaInviteRecord {
+    pub invite_id: String,
+    pub invite_code_hash_hex: String,
+    pub allowed_email: Option<String>,
+    pub allowed_domain: Option<String>,
+    pub invite_state: String,
+    pub created_at: String,
+    pub expires_at_unix: i64,
+    pub consumed_at: Option<String>,
+    pub consumed_by_account_id: Option<String>,
+}
+
+impl fmt::Debug for AlphaInviteRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AlphaInviteRecord")
+            .field("invite_id", &self.invite_id)
+            .field("invite_code_hash_hex", &"<redacted>")
+            .field("allowed_email", &self.allowed_email)
+            .field("allowed_domain", &self.allowed_domain)
+            .field("invite_state", &self.invite_state)
+            .field("created_at", &self.created_at)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("consumed_at", &self.consumed_at)
+            .field("consumed_by_account_id", &self.consumed_by_account_id)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlphaInviteCreateRequest {
+    pub invite_id: String,
+    pub invite_code_hash_hex: String,
+    pub allowed_email: Option<String>,
+    pub allowed_domain: Option<String>,
+    pub created_at: String,
+    pub expires_at_unix: i64,
+}
+
+impl fmt::Debug for AlphaInviteCreateRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AlphaInviteCreateRequest")
+            .field("invite_id", &self.invite_id)
+            .field("invite_code_hash_hex", &"<redacted>")
+            .field("allowed_email", &self.allowed_email)
+            .field("allowed_domain", &self.allowed_domain)
+            .field("created_at", &self.created_at)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlphaLoginRequest {
+    pub email: String,
+    pub invite_code: String,
+}
+
+impl fmt::Debug for AlphaLoginRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AlphaLoginRequest")
+            .field("email", &self.email)
+            .field("invite_code", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlphaLoginResponse {
+    pub account_id: String,
+    pub session_id: String,
+    pub session_token: String,
+    pub expires_at_unix: i64,
+    pub provider_kind: String,
+    pub provider_issuer: String,
+    pub provider_subject: String,
+}
+
+impl fmt::Debug for AlphaLoginResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AlphaLoginResponse")
+            .field("account_id", &self.account_id)
+            .field("session_id", &self.session_id)
+            .field("session_token", &"<redacted>")
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("provider_kind", &self.provider_kind)
+            .field("provider_issuer", &self.provider_issuer)
+            .field("provider_subject", &self.provider_subject)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthSessionResponse {
+    pub account_id: String,
+    pub session_id: String,
+    pub provider_kind: String,
+    pub provider_issuer: String,
+    pub provider_subject: String,
+    pub expires_at_unix: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,6 +646,20 @@ pub struct MetadataServiceCheck {
 }
 
 pub trait MetadataStore {
+    fn create_alpha_invite(
+        &mut self,
+        request: AlphaInviteCreateRequest,
+    ) -> MetadataResult<AlphaInviteRecord>;
+    fn alpha_invite_by_code_hash(
+        &self,
+        invite_code_hash_hex: &str,
+    ) -> MetadataResult<Option<AlphaInviteRecord>>;
+    fn consume_alpha_invite(
+        &mut self,
+        invite_id: &str,
+        account_id: &str,
+        consumed_at: &str,
+    ) -> MetadataResult<AlphaInviteRecord>;
     fn upsert_account_ownership_proof(
         &mut self,
         proof: AccountOwnershipProof,
@@ -567,6 +734,8 @@ pub trait MetadataStore {
 
 #[derive(Debug, Default)]
 pub struct InMemoryMetadataStore {
+    alpha_invites: BTreeMap<String, AlphaInviteRecord>,
+    alpha_invite_hash_index: BTreeMap<String, String>,
     accounts: BTreeMap<String, AccountRecord>,
     account_proofs: BTreeMap<String, AccountOwnershipProof>,
     account_provider_index: BTreeMap<(String, String, String), String>,
@@ -581,6 +750,74 @@ pub struct InMemoryMetadataStore {
 }
 
 impl MetadataStore for InMemoryMetadataStore {
+    fn create_alpha_invite(
+        &mut self,
+        request: AlphaInviteCreateRequest,
+    ) -> MetadataResult<AlphaInviteRecord> {
+        let record = alpha_invite_record_from_request(request)?;
+        if let Some(existing_invite_id) = self
+            .alpha_invite_hash_index
+            .get(&record.invite_code_hash_hex)
+        {
+            if existing_invite_id != &record.invite_id {
+                return Err(MetadataError::InvalidRequest(
+                    "alpha invite code hash is already registered".to_string(),
+                ));
+            }
+        }
+        if let Some(previous) = self.alpha_invites.get(&record.invite_id) {
+            self.alpha_invite_hash_index
+                .remove(&previous.invite_code_hash_hex);
+        }
+        self.alpha_invites
+            .insert(record.invite_id.clone(), record.clone());
+        self.alpha_invite_hash_index.insert(
+            record.invite_code_hash_hex.clone(),
+            record.invite_id.clone(),
+        );
+        Ok(record)
+    }
+
+    fn alpha_invite_by_code_hash(
+        &self,
+        invite_code_hash_hex: &str,
+    ) -> MetadataResult<Option<AlphaInviteRecord>> {
+        Ok(self
+            .alpha_invite_hash_index
+            .get(invite_code_hash_hex)
+            .and_then(|invite_id| self.alpha_invites.get(invite_id))
+            .cloned())
+    }
+
+    fn consume_alpha_invite(
+        &mut self,
+        invite_id: &str,
+        account_id: &str,
+        consumed_at: &str,
+    ) -> MetadataResult<AlphaInviteRecord> {
+        let mut record =
+            self.alpha_invites
+                .get(invite_id)
+                .cloned()
+                .ok_or_else(|| MetadataError::NotFound {
+                    entity: "alpha invite",
+                    id: invite_id.to_string(),
+                })?;
+        if record.invite_state != "active" || record.consumed_at.is_some() {
+            return Err(MetadataError::InvalidRequest(
+                "alpha invite is not active".to_string(),
+            ));
+        }
+        validate_public_identifier(account_id, "account id")?;
+        validate_non_empty_public(consumed_at, "consumed at")?;
+        record.invite_state = "consumed".to_string();
+        record.consumed_at = Some(consumed_at.to_string());
+        record.consumed_by_account_id = Some(account_id.to_string());
+        self.alpha_invites
+            .insert(record.invite_id.clone(), record.clone());
+        Ok(record)
+    }
+
     fn upsert_account_ownership_proof(
         &mut self,
         proof: AccountOwnershipProof,
@@ -995,6 +1232,21 @@ impl SqliteMetadataStore {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS metadata_alpha_invites (
+                invite_id TEXT PRIMARY KEY,
+                invite_code_hash_hex TEXT NOT NULL CHECK (length(invite_code_hash_hex) = 64),
+                allowed_email TEXT,
+                allowed_domain TEXT,
+                invite_state TEXT NOT NULL CHECK (invite_state IN ('active', 'consumed', 'revoked')),
+                created_at TEXT NOT NULL,
+                expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+                consumed_at TEXT,
+                consumed_by_account_id TEXT,
+                CHECK (allowed_email IS NOT NULL OR allowed_domain IS NOT NULL),
+                UNIQUE (invite_code_hash_hex),
+                FOREIGN KEY (consumed_by_account_id) REFERENCES metadata_accounts(account_id) ON DELETE SET NULL
+            );
+
             CREATE TABLE IF NOT EXISTS metadata_account_ownership_proofs (
                 account_id TEXT PRIMARY KEY,
                 provider_kind TEXT NOT NULL,
@@ -1104,6 +1356,8 @@ impl SqliteMetadataStore {
 
             CREATE INDEX IF NOT EXISTS idx_metadata_account_ownership_provider_subject
                 ON metadata_account_ownership_proofs(provider_kind, provider_issuer, provider_subject);
+            CREATE INDEX IF NOT EXISTS idx_metadata_alpha_invites_hash_state
+                ON metadata_alpha_invites(invite_code_hash_hex, invite_state, expires_at_unix);
             CREATE INDEX IF NOT EXISTS idx_metadata_account_sessions_account_state
                 ON metadata_account_sessions(account_id, session_state, expires_at_unix);
             CREATE INDEX IF NOT EXISTS idx_metadata_account_sessions_hash
@@ -1117,6 +1371,156 @@ impl SqliteMetadataStore {
 }
 
 impl MetadataStore for SqliteMetadataStore {
+    fn create_alpha_invite(
+        &mut self,
+        request: AlphaInviteCreateRequest,
+    ) -> MetadataResult<AlphaInviteRecord> {
+        let record = alpha_invite_record_from_request(request)?;
+        self.conn.execute(
+            r#"
+            INSERT INTO metadata_alpha_invites (
+                invite_id,
+                invite_code_hash_hex,
+                allowed_email,
+                allowed_domain,
+                invite_state,
+                created_at,
+                expires_at_unix,
+                consumed_at,
+                consumed_by_account_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(invite_id) DO UPDATE SET
+                invite_code_hash_hex = excluded.invite_code_hash_hex,
+                allowed_email = excluded.allowed_email,
+                allowed_domain = excluded.allowed_domain,
+                invite_state = excluded.invite_state,
+                expires_at_unix = excluded.expires_at_unix,
+                consumed_at = excluded.consumed_at,
+                consumed_by_account_id = excluded.consumed_by_account_id
+            "#,
+            params![
+                record.invite_id,
+                record.invite_code_hash_hex,
+                record.allowed_email,
+                record.allowed_domain,
+                record.invite_state,
+                record.created_at,
+                record.expires_at_unix,
+                record.consumed_at,
+                record.consumed_by_account_id,
+            ],
+        )?;
+        self.alpha_invite_by_code_hash(&record.invite_code_hash_hex)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "alpha invite",
+                id: record.invite_id,
+            })
+    }
+
+    fn alpha_invite_by_code_hash(
+        &self,
+        invite_code_hash_hex: &str,
+    ) -> MetadataResult<Option<AlphaInviteRecord>> {
+        validate_hash_hex(invite_code_hash_hex, "alpha invite code hash")?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    invite_id,
+                    invite_code_hash_hex,
+                    allowed_email,
+                    allowed_domain,
+                    invite_state,
+                    created_at,
+                    expires_at_unix,
+                    consumed_at,
+                    consumed_by_account_id
+                FROM metadata_alpha_invites
+                WHERE invite_code_hash_hex = ?1
+                "#,
+                params![invite_code_hash_hex],
+                alpha_invite_from_row,
+            )
+            .optional()
+            .map_err(MetadataError::from)
+    }
+
+    fn consume_alpha_invite(
+        &mut self,
+        invite_id: &str,
+        account_id: &str,
+        consumed_at: &str,
+    ) -> MetadataResult<AlphaInviteRecord> {
+        validate_public_identifier(invite_id, "alpha invite id")?;
+        validate_public_identifier(account_id, "account id")?;
+        validate_non_empty_public(consumed_at, "consumed at")?;
+        let current = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    invite_id,
+                    invite_code_hash_hex,
+                    allowed_email,
+                    allowed_domain,
+                    invite_state,
+                    created_at,
+                    expires_at_unix,
+                    consumed_at,
+                    consumed_by_account_id
+                FROM metadata_alpha_invites
+                WHERE invite_id = ?1
+                "#,
+                params![invite_id],
+                alpha_invite_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "alpha invite",
+                id: invite_id.to_string(),
+            })?;
+        if current.invite_state != "active" || current.consumed_at.is_some() {
+            return Err(MetadataError::InvalidRequest(
+                "alpha invite is not active".to_string(),
+            ));
+        }
+        self.conn.execute(
+            r#"
+            UPDATE metadata_alpha_invites
+            SET invite_state = 'consumed',
+                consumed_at = ?2,
+                consumed_by_account_id = ?3
+            WHERE invite_id = ?1
+            "#,
+            params![invite_id, consumed_at, account_id],
+        )?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    invite_id,
+                    invite_code_hash_hex,
+                    allowed_email,
+                    allowed_domain,
+                    invite_state,
+                    created_at,
+                    expires_at_unix,
+                    consumed_at,
+                    consumed_by_account_id
+                FROM metadata_alpha_invites
+                WHERE invite_id = ?1
+                "#,
+                params![invite_id],
+                alpha_invite_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "alpha invite",
+                id: invite_id.to_string(),
+            })
+    }
+
     fn upsert_account_ownership_proof(
         &mut self,
         proof: AccountOwnershipProof,
@@ -1921,12 +2325,40 @@ impl SqliteMetadataStore {
 
 pub type SharedMetadataStore<S> = Arc<Mutex<S>>;
 
+#[derive(Debug)]
+pub struct AppState<S> {
+    pub store: SharedMetadataStore<S>,
+    pub config: HostedApiConfig,
+}
+
+impl<S> Clone for AppState<S> {
+    fn clone(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            config: self.config.clone(),
+        }
+    }
+}
+
 pub fn app<S>(store: S) -> Router
 where
     S: MetadataStore + Send + 'static,
 {
+    app_with_config(store, HostedApiConfig::local_dev())
+}
+
+pub fn app_with_config<S>(store: S, config: HostedApiConfig) -> Router
+where
+    S: MetadataStore + Send + 'static,
+{
     Router::new()
-        .route("/health", get(health))
+        .route("/health", get(health::<S>))
+        .route("/ready", get(ready::<S>))
+        .route("/v1/auth/alpha/login", post(alpha_login::<S>))
+        .route(
+            "/v1/auth/session",
+            get(get_auth_session::<S>).delete(delete_auth_session::<S>),
+        )
         .route("/v1/devices", put(upsert_device::<S>))
         .route("/v1/projects", put(upsert_project::<S>))
         .route(
@@ -1941,58 +2373,215 @@ where
             "/v1/cursors/:project_id/:device_id",
             get(get_cursor::<S>).put(update_cursor::<S>),
         )
-        .with_state(Arc::new(Mutex::new(store)))
+        .with_state(AppState {
+            store: Arc::new(Mutex::new(store)),
+            config,
+        })
 }
 
 pub async fn serve_sqlite(path: &str, addr: SocketAddr) -> MetadataResult<()> {
+    serve_sqlite_with_config(path, addr, HostedApiConfig::local_dev()).await
+}
+
+pub async fn serve_sqlite_with_config(
+    path: &str,
+    addr: SocketAddr,
+    config: HostedApiConfig,
+) -> MetadataResult<()> {
     let store = SqliteMetadataStore::open_file(path)?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|error| MetadataError::InvalidRequest(error.to_string()))?;
-    axum::serve(listener, app(store))
+    axum::serve(listener, app_with_config(store, config))
         .await
         .map_err(|error| MetadataError::InvalidRequest(error.to_string()))
 }
 
-async fn health() -> Json<HealthResponse> {
+async fn health<S>(State(state): State<AppState<S>>) -> Json<HealthResponse>
+where
+    S: MetadataStore,
+{
     Json(HealthResponse {
         status: "ok".to_string(),
         service: "devbox-metadata".to_string(),
-        storage: "sqlite-dev".to_string(),
+        storage: state.config.storage_label,
     })
 }
 
+async fn ready<S>(State(state): State<AppState<S>>) -> Json<ReadyResponse>
+where
+    S: MetadataStore,
+{
+    Json(ReadyResponse {
+        status: "ready".to_string(),
+        service: "devbox-metadata".to_string(),
+        storage: state.config.storage_label,
+        auth_policy: state.config.auth_policy,
+        mock_auth_enabled: state.config.auth_policy.allows_mock_dev_headers(),
+    })
+}
+
+async fn alpha_login<S>(
+    State(state): State<AppState<S>>,
+    Json(request): Json<AlphaLoginRequest>,
+) -> MetadataResult<Json<AlphaLoginResponse>>
+where
+    S: MetadataStore,
+{
+    let now_unix = devbox_auth::now_unix_seconds();
+    let now = format!("unix:{now_unix}");
+    let normalized_email = normalize_alpha_email(&request.email)?;
+    let invite_hash = hash_alpha_invite_code(&request.invite_code)?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let invite = store
+        .alpha_invite_by_code_hash(&invite_hash)?
+        .ok_or_else(alpha_login_failed)?;
+    ensure_alpha_invite_login_allowed(&invite, &normalized_email, now_unix)?;
+
+    let provider_kind = "alpha-invite";
+    let provider_issuer = "devbox-alpha";
+    let provider_subject = normalized_email.clone();
+    let account_id = store
+        .account_for_provider_subject(provider_kind, provider_issuer, &provider_subject)?
+        .map(|account| account.account_id)
+        .unwrap_or_else(|| stable_alpha_account_id(&provider_subject));
+    let proof = create_account_ownership_proof(AccountOwnershipProofInput {
+        account_id: &account_id,
+        provider_kind,
+        provider_issuer,
+        provider_subject: &provider_subject,
+        verified_email: Some(&normalized_email),
+        verified_domain: None,
+        proof_issued_at: &now,
+        proof_expires_at_unix: now_unix + state.config.proof_ttl_seconds,
+    })
+    .map_err(auth_proof_error)?;
+    store.upsert_account_ownership_proof(proof.clone())?;
+
+    let raw_session_token = generate_session_token().map_err(auth_error)?;
+    let session = create_account_session(
+        &proof,
+        &raw_session_token,
+        &now,
+        now_unix,
+        state.config.session_ttl_seconds,
+    )
+    .map_err(auth_error)?;
+    let session = store.upsert_account_session(session)?;
+    store.consume_alpha_invite(&invite.invite_id, &account_id, &now)?;
+
+    Ok(Json(AlphaLoginResponse {
+        account_id,
+        session_id: session.session_id,
+        session_token: raw_session_token,
+        expires_at_unix: session.expires_at_unix,
+        provider_kind: session.provider_kind,
+        provider_issuer: session.provider_issuer,
+        provider_subject: session.provider_subject,
+    }))
+}
+
+async fn get_auth_session<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+) -> MetadataResult<Json<AuthSessionResponse>>
+where
+    S: MetadataStore,
+{
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let raw_token = bearer_session_token(&headers)?.ok_or_else(|| {
+        MetadataError::InvalidAccountSession(
+            "authorization bearer session token is required".into(),
+        )
+    })?;
+    let session =
+        authenticate_account_session(&*store, &raw_token, devbox_auth::now_unix_seconds())?;
+    let stored = store
+        .account_session(&session.session_id)?
+        .ok_or_else(|| MetadataError::InvalidAccountSession("account session not found".into()))?;
+    Ok(Json(AuthSessionResponse {
+        account_id: session.account_id,
+        session_id: session.session_id,
+        provider_kind: session.provider_kind,
+        provider_issuer: session.provider_issuer,
+        provider_subject: session.provider_subject,
+        expires_at_unix: stored.expires_at_unix,
+    }))
+}
+
+async fn delete_auth_session<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+) -> MetadataResult<Json<AuthSessionResponse>>
+where
+    S: MetadataStore,
+{
+    let raw_token = bearer_session_token(&headers)?.ok_or_else(|| {
+        MetadataError::InvalidAccountSession(
+            "authorization bearer session token is required".into(),
+        )
+    })?;
+    let now_unix = devbox_auth::now_unix_seconds();
+    let now = format!("unix:{now_unix}");
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let session = authenticate_account_session(&*store, &raw_token, now_unix)?;
+    let revoked = store.revoke_account_session(&session.session_id, &now)?;
+    Ok(Json(AuthSessionResponse {
+        account_id: revoked.account_id,
+        session_id: revoked.session_id,
+        provider_kind: revoked.provider_kind,
+        provider_issuer: revoked.provider_issuer,
+        provider_subject: revoked.provider_subject,
+        expires_at_unix: revoked.expires_at_unix,
+    }))
+}
+
 async fn upsert_device<S>(
-    State(store): State<SharedMetadataStore<S>>,
+    State(state): State<AppState<S>>,
     headers: HeaderMap,
     Json(mut request): Json<UpsertDeviceRequest>,
 ) -> MetadataResult<Json<DeviceRecord>>
 where
     S: MetadataStore,
 {
-    let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
-    let context = request_context(&headers, &*store)?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
     request.account_id = account_scope_for_request(&context, &request.account_id)?;
     authorize_request_device(&context, &request.device_id)?;
     Ok(Json(store.upsert_device(request)?))
 }
 
 async fn upsert_project<S>(
-    State(store): State<SharedMetadataStore<S>>,
+    State(state): State<AppState<S>>,
     headers: HeaderMap,
     Json(mut request): Json<UpsertProjectRequest>,
 ) -> MetadataResult<Json<ProjectRecord>>
 where
     S: MetadataStore,
 {
-    let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
-    let context = request_context(&headers, &*store)?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
     request.account_id = account_scope_for_request(&context, &request.account_id)?;
     Ok(Json(store.upsert_project(request)?))
 }
 
 async fn publish_snapshot<S>(
-    State(store): State<SharedMetadataStore<S>>,
+    State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path(project_id): Path<String>,
     Json(mut request): Json<PublishSnapshotRequest>,
@@ -2005,23 +2594,29 @@ where
             "snapshot path and body project must match".to_string(),
         ));
     }
-    let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
-    let context = request_context(&headers, &*store)?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
     request.account_id = account_scope_for_request(&context, &request.account_id)?;
     authorize_request_device(&context, &request.published_by_device_id)?;
     Ok(Json(store.publish_snapshot(request)?))
 }
 
 async fn get_snapshot<S>(
-    State(store): State<SharedMetadataStore<S>>,
+    State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path((project_id, snapshot_id)): Path<(String, String)>,
 ) -> MetadataResult<Json<PublishedSnapshotRecord>>
 where
     S: MetadataStore,
 {
-    let store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
-    let context = request_context(&headers, &*store)?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
     let record = store
         .snapshot(context.account_id(), &project_id, &snapshot_id)?
         .ok_or_else(|| MetadataError::NotFound {
@@ -2032,15 +2627,18 @@ where
 }
 
 async fn get_cursor<S>(
-    State(store): State<SharedMetadataStore<S>>,
+    State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path((project_id, device_id)): Path<(String, String)>,
 ) -> MetadataResult<Json<DeviceProjectCursorRecord>>
 where
     S: MetadataStore,
 {
-    let store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
-    let context = request_context(&headers, &*store)?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
     authorize_request_device(&context, &device_id)?;
     let record = store.cursor(context.account_id(), &device_id, &project_id)?;
     Ok(Json(record.unwrap_or(DeviceProjectCursorRecord {
@@ -2053,7 +2651,7 @@ where
 }
 
 async fn update_cursor<S>(
-    State(store): State<SharedMetadataStore<S>>,
+    State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path((project_id, device_id)): Path<(String, String)>,
     Json(mut request): Json<UpdateCursorRequest>,
@@ -2066,8 +2664,11 @@ where
             "cursor path and body identity must match".to_string(),
         ));
     }
-    let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
-    let context = request_context(&headers, &*store)?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
     authorize_request_device(&context, &device_id)?;
     request.account_id = account_scope_for_request(&context, &request.account_id)?;
     Ok(Json(store.compare_and_set_cursor(request)?))
@@ -2091,11 +2692,18 @@ impl HostedMetadataRequestContext {
 fn request_context<S: MetadataStore>(
     headers: &HeaderMap,
     store: &S,
+    auth_policy: HostedAuthPolicy,
 ) -> MetadataResult<HostedMetadataRequestContext> {
     if let Some(raw_token) = bearer_session_token(headers)? {
         let context =
             authenticate_account_session(store, &raw_token, devbox_auth::now_unix_seconds())?;
         return Ok(HostedMetadataRequestContext::AccountSession(context));
+    }
+
+    if !auth_policy.allows_mock_dev_headers() {
+        return Err(MetadataError::InvalidAccountSession(
+            "account session bearer auth is required".to_string(),
+        ));
     }
 
     MockDevIdentity::from_headers(headers).map(HostedMetadataRequestContext::MockDev)
@@ -2198,6 +2806,53 @@ pub fn redacted_managed_object_remote_config(
         rotation_generation: lease.rotation_generation,
         expires_at_unix: lease.expires_at_unix,
         revoked: lease.revoked_at.is_some(),
+    })
+}
+
+pub fn hash_alpha_invite_code(invite_code: &str) -> MetadataResult<String> {
+    let trimmed = invite_code.trim();
+    if trimmed.is_empty() {
+        return Err(MetadataError::InvalidRequest(
+            "alpha invite code must not be empty".to_string(),
+        ));
+    }
+    if contains_secret_marker(trimmed) {
+        return Err(MetadataError::InvalidRequest(
+            "alpha invite code must not contain reserved secret marker words".to_string(),
+        ));
+    }
+    Ok(hash_session_token_hex(trimmed))
+}
+
+pub fn create_alpha_invite_request(
+    invite_code: &str,
+    allowed_email: Option<&str>,
+    allowed_domain: Option<&str>,
+    created_at: &str,
+    now_unix: i64,
+    ttl_seconds: i64,
+) -> MetadataResult<AlphaInviteCreateRequest> {
+    if ttl_seconds <= 0 {
+        return Err(MetadataError::InvalidRequest(
+            "alpha invite ttl must be positive".to_string(),
+        ));
+    }
+    let invite_code_hash_hex = hash_alpha_invite_code(invite_code)?;
+    let allowed_email = allowed_email.map(normalize_alpha_email).transpose()?;
+    let allowed_domain = allowed_domain.map(normalize_alpha_domain).transpose()?;
+    if allowed_email.is_none() && allowed_domain.is_none() {
+        return Err(MetadataError::InvalidRequest(
+            "alpha invite requires an allowed email or domain".to_string(),
+        ));
+    }
+    validate_non_empty_public(created_at, "created at")?;
+    Ok(AlphaInviteCreateRequest {
+        invite_id: stable_alpha_invite_id(&invite_code_hash_hex),
+        invite_code_hash_hex,
+        allowed_email,
+        allowed_domain,
+        created_at: created_at.to_string(),
+        expires_at_unix: now_unix + ttl_seconds,
     })
 }
 
@@ -2447,6 +3102,142 @@ fn capabilities_from_string(value: &str) -> MetadataResult<Vec<ManagedObjectCapa
         .map(str::parse)
         .collect::<MetadataResult<Vec<_>>>()?;
     normalize_capabilities(capabilities)
+}
+
+fn alpha_invite_record_from_request(
+    request: AlphaInviteCreateRequest,
+) -> MetadataResult<AlphaInviteRecord> {
+    validate_public_identifier(&request.invite_id, "alpha invite id")?;
+    validate_hash_hex(&request.invite_code_hash_hex, "alpha invite code hash")?;
+    let allowed_email = request
+        .allowed_email
+        .as_deref()
+        .map(normalize_alpha_email)
+        .transpose()?;
+    let allowed_domain = request
+        .allowed_domain
+        .as_deref()
+        .map(normalize_alpha_domain)
+        .transpose()?;
+    if allowed_email.is_none() && allowed_domain.is_none() {
+        return Err(MetadataError::InvalidRequest(
+            "alpha invite requires an allowed email or domain".to_string(),
+        ));
+    }
+    validate_non_empty_public(&request.created_at, "created at")?;
+    if request.expires_at_unix <= 0 {
+        return Err(MetadataError::InvalidRequest(
+            "alpha invite expiration must be a positive unix timestamp".to_string(),
+        ));
+    }
+    Ok(AlphaInviteRecord {
+        invite_id: request.invite_id,
+        invite_code_hash_hex: request.invite_code_hash_hex,
+        allowed_email,
+        allowed_domain,
+        invite_state: "active".to_string(),
+        created_at: request.created_at,
+        expires_at_unix: request.expires_at_unix,
+        consumed_at: None,
+        consumed_by_account_id: None,
+    })
+}
+
+fn ensure_alpha_invite_login_allowed(
+    invite: &AlphaInviteRecord,
+    normalized_email: &str,
+    now_unix: i64,
+) -> MetadataResult<()> {
+    if invite.invite_state != "active" || invite.consumed_at.is_some() {
+        return Err(alpha_login_failed());
+    }
+    if invite.expires_at_unix <= now_unix {
+        return Err(alpha_login_failed());
+    }
+    let domain = normalized_email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain)
+        .ok_or_else(alpha_login_failed)?;
+    let email_allowed = invite.allowed_email.as_deref() == Some(normalized_email);
+    let domain_allowed = invite.allowed_domain.as_deref() == Some(domain);
+    if email_allowed || domain_allowed {
+        Ok(())
+    } else {
+        Err(alpha_login_failed())
+    }
+}
+
+fn alpha_login_failed() -> MetadataError {
+    MetadataError::InvalidAccountSession("alpha invite login failed".to_string())
+}
+
+fn normalize_alpha_email(value: &str) -> MetadataResult<String> {
+    let trimmed = validate_non_empty_public(value, "verified email")?;
+    let lowered = trimmed.to_ascii_lowercase();
+    let Some((local, domain)) = lowered.rsplit_once('@') else {
+        return Err(MetadataError::InvalidRequest(
+            "verified email must include a domain".to_string(),
+        ));
+    };
+    if local.is_empty()
+        || domain.is_empty()
+        || lowered.chars().any(char::is_whitespace)
+        || contains_secret_marker(&lowered)
+        || looks_like_raw_credential(&lowered)
+    {
+        return Err(MetadataError::InvalidRequest(
+            "verified email must be public metadata".to_string(),
+        ));
+    }
+    Ok(lowered)
+}
+
+fn normalize_alpha_domain(value: &str) -> MetadataResult<String> {
+    let trimmed = validate_non_empty_public(value, "verified domain")?;
+    let lowered = trimmed.trim_start_matches('@').to_ascii_lowercase();
+    if lowered.is_empty()
+        || lowered.contains('@')
+        || lowered.chars().any(char::is_whitespace)
+        || contains_secret_marker(&lowered)
+        || looks_like_raw_credential(&lowered)
+    {
+        return Err(MetadataError::InvalidRequest(
+            "verified domain must be public metadata".to_string(),
+        ));
+    }
+    Ok(lowered)
+}
+
+fn stable_alpha_account_id(provider_subject: &str) -> String {
+    let hash = hash_session_token_hex(&format!("alpha-account:{provider_subject}"));
+    format!("account-{}", &hash[..32])
+}
+
+fn stable_alpha_invite_id(invite_code_hash_hex: &str) -> String {
+    let hash = hash_session_token_hex(&format!("alpha-invite:{invite_code_hash_hex}"));
+    format!("invite-{}", &hash[..32])
+}
+
+fn validate_public_identifier(value: &str, field: &'static str) -> MetadataResult<String> {
+    public_metadata_identifier(value, field)
+}
+
+fn validate_non_empty_public(value: &str, field: &'static str) -> MetadataResult<String> {
+    public_metadata_identifier(value, field)
+}
+
+fn validate_hash_hex(value: &str, field: &'static str) -> MetadataResult<()> {
+    if value.len() != 64
+        || value
+            .as_bytes()
+            .iter()
+            .any(|byte| !byte.is_ascii_hexdigit())
+    {
+        return Err(MetadataError::InvalidRequest(format!(
+            "{field} must be a 64 character hex digest"
+        )));
+    }
+    Ok(())
 }
 
 fn managed_project_scope(project_id: Option<&str>) -> String {
@@ -2705,6 +3496,20 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> 
         display_name: row.get(1)?,
         created_at: row.get(2)?,
         updated_at: row.get(3)?,
+    })
+}
+
+fn alpha_invite_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlphaInviteRecord> {
+    Ok(AlphaInviteRecord {
+        invite_id: row.get(0)?,
+        invite_code_hash_hex: row.get(1)?,
+        allowed_email: row.get(2)?,
+        allowed_domain: row.get(3)?,
+        invite_state: row.get(4)?,
+        created_at: row.get(5)?,
+        expires_at_unix: row.get(6)?,
+        consumed_at: row.get(7)?,
+        consumed_by_account_id: row.get(8)?,
     })
 }
 
@@ -3511,6 +4316,184 @@ mod tests {
             .await
             .expect("response returns");
         assert_eq!(cursor.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn hosted_config_rejects_mock_dev_headers() {
+        let app = app_with_config(seeded_store(), HostedApiConfig::hosted_alpha());
+        let response = app
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/projects",
+                &project_request(),
+                true,
+            ))
+            .await
+            .expect("response returns");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_text(response).await;
+        assert_eq!(
+            body,
+            "{\"error\":\"account session authentication failed\"}"
+        );
+        assert!(!body.contains(MOCK_ACCOUNT_HEADER));
+        assert!(!body.contains(MOCK_DEVICE_HEADER));
+    }
+
+    #[tokio::test]
+    async fn health_reflects_hosted_storage_label() {
+        let app = app_with_config(seeded_store(), HostedApiConfig::hosted_alpha());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("sqlite-hosted-alpha"));
+        assert!(!body.contains("sqlite-dev"));
+    }
+
+    #[tokio::test]
+    async fn alpha_invite_login_consumes_invite_and_enables_bearer_session() {
+        let invite_code = "alpha-login-code";
+        let mut store = InMemoryMetadataStore::default();
+        let invite = create_alpha_invite_request(
+            invite_code,
+            Some("Dev@Test.Example"),
+            None,
+            "2026-06-18T10:00:00Z",
+            100,
+            4_000_000_000,
+        )
+        .expect("invite request creates");
+        store.create_alpha_invite(invite).expect("invite persists");
+        let app = app_with_config(store, HostedApiConfig::hosted_alpha());
+
+        let login = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/v1/auth/alpha/login",
+                &AlphaLoginRequest {
+                    email: "dev@test.example".to_string(),
+                    invite_code: invite_code.to_string(),
+                },
+                false,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(login.status(), StatusCode::OK);
+        let body = response_text(login).await;
+        let login_response: AlphaLoginResponse =
+            serde_json::from_str(&body).expect("login body decodes");
+        let debug_login = format!("{login_response:?}");
+        assert!(!debug_login.contains(&login_response.session_token));
+        assert_eq!(login_response.provider_subject, "dev@test.example");
+
+        let session = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/auth/session")
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", login_response.session_token),
+                    )
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+        assert_eq!(session.status(), StatusCode::OK);
+
+        let device = app
+            .clone()
+            .oneshot(session_json_request(
+                Method::PUT,
+                "/v1/devices",
+                &UpsertDeviceRequest {
+                    account_id: "account-attacker".to_string(),
+                    device_id: DEVICE.to_string(),
+                    display_name: "Laptop".to_string(),
+                    last_seen_at: "2026-06-18T10:01:00Z".to_string(),
+                },
+                &login_response.session_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(device.status(), StatusCode::OK);
+        let body = response_text(device).await;
+        assert!(body.contains(&login_response.account_id));
+        assert!(!body.contains("account-attacker"));
+
+        let second_login = app
+            .oneshot(json_request(
+                Method::POST,
+                "/v1/auth/alpha/login",
+                &AlphaLoginRequest {
+                    email: "dev@test.example".to_string(),
+                    invite_code: invite_code.to_string(),
+                },
+                false,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(second_login.status(), StatusCode::UNAUTHORIZED);
+        let body = response_text(second_login).await;
+        assert_eq!(
+            body,
+            "{\"error\":\"account session authentication failed\"}"
+        );
+        assert!(!body.contains(invite_code));
+    }
+
+    #[tokio::test]
+    async fn auth_session_delete_revokes_hosted_bearer_token() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session(&mut store, raw_token);
+        let app = app_with_config(store, HostedApiConfig::hosted_alpha());
+
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/v1/auth/session")
+                    .header("authorization", format!("Bearer {raw_token}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+        assert_eq!(deleted.status(), StatusCode::OK);
+
+        let reused = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/auth/session")
+                    .header("authorization", format!("Bearer {raw_token}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+        assert_eq!(reused.status(), StatusCode::UNAUTHORIZED);
+        let body = response_text(reused).await;
+        assert_eq!(
+            body,
+            "{\"error\":\"account session authentication failed\"}"
+        );
+        assert!(!body.contains(raw_token));
     }
 
     #[tokio::test]
