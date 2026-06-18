@@ -26,8 +26,11 @@ This repository currently contains the product foundation and MVP planning artif
   opt into an in-process mock-dev SQLite metadata store for manifest discovery and cursor
   compare-and-set without network services. A production-shaped account ownership proof and account
   session boundary now models provider subject/email/domain proof, token-hash sessions, expiration,
-  and revocation without live OAuth. Live sign-in, managed credentials, deployment hardening,
-  Electron UI, automatic conflict resolution, and conflict UI remain later Phase 1 work.
+  and revocation without live OAuth. Hosted metadata now also models managed object credential
+  leases with account/session/project scoping, R2/S3/MinIO-shaped provider references, redacted
+  credential references, expiration, revocation, and rotation generation. Live sign-in, live
+  Cloudflare/AWS credential provisioning, deployment hardening, Electron UI, automatic conflict
+  resolution, and conflict UI remain later Phase 1 work.
 
 ## Local MVP Surface
 
@@ -37,6 +40,10 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>`
 - `devbox changes list --db <DB_PATH> [--project <PROJECT_ID>]`
 - `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]`
+- `devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET>`
+- `devbox metadata credential-lease check --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
+- `devbox metadata credential-lease rotate --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
+- `devbox metadata credential-lease revoke --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN>`
 - `devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>`
 - `devbox auth revoke-session --db <DB_PATH> <SESSION_ID>`

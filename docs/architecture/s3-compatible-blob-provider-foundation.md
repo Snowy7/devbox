@@ -12,8 +12,11 @@ It does not add production sign-in, managed R2 credential provisioning, producti
 Electron UI, or conflict resolution. Clients still need a trusted local identity and key material
 before encrypted objects can be published or read. A hosted metadata API foundation now models
 metadata discovery and server-side compare-and-set cursors, and a production-shaped account/session
-boundary now models token-hash account sessions without live OAuth. This object provider still does
-not provision or rotate managed cloud credentials.
+boundary now models token-hash account sessions without live OAuth. A managed object credential
+lease foundation now models redacted R2/S3/MinIO-shaped provider references, account/session/project
+scope, capabilities, expiration, revocation, and rotation generation, but this object provider still
+does not make live Cloudflare/AWS provisioning calls or load managed credentials from the hosted
+service.
 
 ## Provider Model
 
@@ -107,7 +110,7 @@ configured local or S3-compatible object provider.
 Remaining Phase 1 work includes:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
-- managed R2 credential provisioning and rotation
+- live managed R2/S3 credential provisioning and rotation against provider APIs
 - production pairing UX and recovery flows
 - conflict UI and automatic merge/apply resolution
 - Electron tray/status integration

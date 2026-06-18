@@ -24,6 +24,9 @@ blobs are downloaded or applied, while persisting readable conflict records. Pub
 can now opt into in-process mock-dev hosted metadata for published manifest discovery and
 server-side cursor compare-and-set. Production-shaped account ownership proof and account session
 models now cover provider subject/email/domain proof, token-hash sessions, expiration, revocation,
-and no-network CLI/dev persistence. Live OAuth/login integration, managed object-storage credential
-provisioning, production pairing UX, explicit secret allow policy, automatic merge/apply resolution,
-conflict UI, Electron UI, and production deployment hardening remain later Phase 1 work.
+and no-network CLI/dev persistence. Hosted metadata now also models account/session/project-scoped
+managed object credential leases with redacted provider references, expiration, revocation, rotation
+generation, and no-network mock/dev CLI smoke commands. Live OAuth/login integration, live
+Cloudflare/AWS credential provisioning, production pairing UX, explicit secret allow policy,
+automatic merge/apply resolution, conflict UI, Electron UI, and production deployment hardening
+remain later Phase 1 work.
