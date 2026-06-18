@@ -2308,7 +2308,7 @@ fn metadata_check(args: &MetadataCheckArgs) -> Result<(), Box<dyn std::error::Er
     .validate()?;
 
     println!("Metadata service check");
-    println!("Endpoint: {}", check.endpoint);
+    println!("Endpoint (sanitized): {}", check.endpoint);
     println!("Auth mode: mock-dev-headers");
     println!("Required headers: x-devbox-mock-account-id, x-devbox-mock-device-id");
     println!("Network check: {}", check.network_check);

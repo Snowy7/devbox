@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use url::Url;
 
 const MOCK_ACCOUNT_HEADER: &str = "x-devbox-mock-account-id";
 const MOCK_DEVICE_HEADER: &str = "x-devbox-mock-device-id";
@@ -40,17 +41,9 @@ pub enum MetadataError {
     Sqlite(rusqlite::Error),
     PoisonedStore,
     MissingMockDevIdentity,
-    IdentityMismatch {
-        expected_account_id: String,
-        expected_device_id: String,
-    },
-    NotFound {
-        entity: &'static str,
-        id: String,
-    },
-    CursorPreconditionFailed {
-        current_cursor: Option<String>,
-    },
+    IdentityMismatch,
+    NotFound { entity: &'static str, id: String },
+    CursorPreconditionFailed { current_cursor: Option<String> },
     InvalidRequest(String),
 }
 
@@ -65,13 +58,7 @@ impl fmt::Display for MetadataError {
                     "mock-dev identity headers are required: {MOCK_ACCOUNT_HEADER}, {MOCK_DEVICE_HEADER}"
                 )
             }
-            Self::IdentityMismatch {
-                expected_account_id,
-                expected_device_id,
-            } => write!(
-                f,
-                "mock-dev identity mismatch: expected account {expected_account_id} and device {expected_device_id}"
-            ),
+            Self::IdentityMismatch => f.write_str("mock-dev identity mismatch"),
             Self::NotFound { entity, id } => write!(f, "{entity} not found: {id}"),
             Self::CursorPreconditionFailed { current_cursor } => write!(
                 f,
@@ -89,7 +76,7 @@ impl std::error::Error for MetadataError {
             Self::Sqlite(error) => Some(error),
             Self::PoisonedStore
             | Self::MissingMockDevIdentity
-            | Self::IdentityMismatch { .. }
+            | Self::IdentityMismatch
             | Self::NotFound { .. }
             | Self::CursorPreconditionFailed { .. }
             | Self::InvalidRequest(_) => None,
@@ -106,18 +93,30 @@ impl From<rusqlite::Error> for MetadataError {
 impl IntoResponse for MetadataError {
     fn into_response(self) -> Response {
         let status = match &self {
-            Self::MissingMockDevIdentity | Self::IdentityMismatch { .. } => {
-                StatusCode::UNAUTHORIZED
-            }
+            Self::MissingMockDevIdentity | Self::IdentityMismatch => StatusCode::UNAUTHORIZED,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::CursorPreconditionFailed { .. } => StatusCode::CONFLICT,
+            Self::Sqlite(error) if is_sqlite_constraint(error) => StatusCode::BAD_REQUEST,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::Sqlite(_) | Self::PoisonedStore => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = ErrorResponse {
-            error: self.to_string(),
+            error: self.public_message(),
         };
         (status, Json(body)).into_response()
+    }
+}
+
+impl MetadataError {
+    fn public_message(&self) -> String {
+        match self {
+            Self::Sqlite(error) if is_sqlite_constraint(error) => {
+                "metadata relationship precondition failed".to_string()
+            }
+            Self::Sqlite(_) => "metadata storage error".to_string(),
+            Self::PoisonedStore => "metadata storage error".to_string(),
+            _ => self.to_string(),
+        }
     }
 }
 
@@ -257,19 +256,21 @@ pub enum MetadataAuthMode {
 
 impl MetadataServiceConfig {
     pub fn validate(&self) -> MetadataResult<MetadataServiceCheck> {
-        if self.endpoint.trim().is_empty() {
+        let endpoint = self.endpoint.trim();
+        if endpoint.is_empty() {
             return Err(MetadataError::InvalidRequest(
                 "metadata endpoint must not be empty".to_string(),
             ));
         }
-        if contains_secret_marker(&self.endpoint) {
+        let sanitized_endpoint = sanitize_metadata_endpoint(endpoint)?;
+        if contains_secret_marker(&sanitized_endpoint) {
             return Err(MetadataError::InvalidRequest(
                 "metadata endpoint must not contain secret-looking material".to_string(),
             ));
         }
 
         Ok(MetadataServiceCheck {
-            endpoint: self.endpoint.clone(),
+            endpoint: sanitized_endpoint,
             auth_mode: self.auth_mode,
             network_check: "skipped".to_string(),
             production_ready: false,
@@ -295,6 +296,7 @@ pub trait MetadataStore {
     fn snapshot(
         &self,
         account_id: &str,
+        project_id: &str,
         snapshot_id: &str,
     ) -> MetadataResult<Option<PublishedSnapshotRecord>>;
     fn cursor(
@@ -314,7 +316,7 @@ pub struct InMemoryMetadataStore {
     accounts: BTreeMap<String, AccountRecord>,
     devices: BTreeMap<(String, String), DeviceRecord>,
     projects: BTreeMap<(String, String), ProjectRecord>,
-    snapshots: BTreeMap<(String, String), PublishedSnapshotRecord>,
+    snapshots: BTreeMap<(String, String, String), PublishedSnapshotRecord>,
     cursors: BTreeMap<(String, String, String), DeviceProjectCursorRecord>,
 }
 
@@ -349,6 +351,11 @@ impl MetadataStore for InMemoryMetadataStore {
 
     fn upsert_project(&mut self, request: UpsertProjectRequest) -> MetadataResult<ProjectRecord> {
         ensure_no_secret_material(&request)?;
+        if !self.accounts.contains_key(&request.account_id) {
+            return Err(MetadataError::InvalidRequest(
+                "account must be registered before project".to_string(),
+            ));
+        }
         let record = ProjectRecord {
             account_id: request.account_id,
             project_id: request.project_id,
@@ -369,6 +376,7 @@ impl MetadataStore for InMemoryMetadataStore {
         request: PublishSnapshotRequest,
     ) -> MetadataResult<PublishedSnapshotRecord> {
         ensure_no_secret_material(&request)?;
+        ensure_in_memory_snapshot_dependencies(self, &request)?;
         let record = PublishedSnapshotRecord {
             account_id: request.account_id,
             project_id: request.project_id,
@@ -382,7 +390,11 @@ impl MetadataStore for InMemoryMetadataStore {
             published_at: request.published_at,
         };
         self.snapshots.insert(
-            (record.account_id.clone(), record.snapshot_id.clone()),
+            (
+                record.account_id.clone(),
+                record.project_id.clone(),
+                record.snapshot_id.clone(),
+            ),
             record.clone(),
         );
         Ok(record)
@@ -391,11 +403,16 @@ impl MetadataStore for InMemoryMetadataStore {
     fn snapshot(
         &self,
         account_id: &str,
+        project_id: &str,
         snapshot_id: &str,
     ) -> MetadataResult<Option<PublishedSnapshotRecord>> {
         Ok(self
             .snapshots
-            .get(&(account_id.to_string(), snapshot_id.to_string()))
+            .get(&(
+                account_id.to_string(),
+                project_id.to_string(),
+                snapshot_id.to_string(),
+            ))
             .cloned())
     }
 
@@ -420,6 +437,7 @@ impl MetadataStore for InMemoryMetadataStore {
         request: UpdateCursorRequest,
     ) -> MetadataResult<DeviceProjectCursorRecord> {
         ensure_no_secret_material(&request)?;
+        ensure_in_memory_cursor_dependencies(self, &request)?;
         let key = (
             request.account_id.clone(),
             request.device_id.clone(),
@@ -511,7 +529,7 @@ impl SqliteMetadataStore {
                 total_size_bytes INTEGER NOT NULL,
                 published_by_device_id TEXT NOT NULL,
                 published_at TEXT NOT NULL,
-                PRIMARY KEY (account_id, snapshot_id),
+                PRIMARY KEY (account_id, project_id, snapshot_id),
                 FOREIGN KEY (account_id, project_id) REFERENCES metadata_projects(account_id, project_id) ON DELETE CASCADE,
                 FOREIGN KEY (account_id, published_by_device_id) REFERENCES metadata_devices(account_id, device_id) ON DELETE CASCADE
             );
@@ -578,6 +596,7 @@ impl MetadataStore for SqliteMetadataStore {
 
     fn upsert_project(&mut self, request: UpsertProjectRequest) -> MetadataResult<ProjectRecord> {
         ensure_no_secret_material(&request)?;
+        self.ensure_account_exists(&request.account_id)?;
         self.conn.execute(
             r#"
             INSERT INTO metadata_projects (
@@ -616,6 +635,8 @@ impl MetadataStore for SqliteMetadataStore {
         request: PublishSnapshotRequest,
     ) -> MetadataResult<PublishedSnapshotRecord> {
         ensure_no_secret_material(&request)?;
+        self.ensure_project_exists(&request.account_id, &request.project_id)?;
+        self.ensure_device_exists(&request.account_id, &request.published_by_device_id)?;
         self.conn.execute(
             r#"
             INSERT INTO metadata_snapshots (
@@ -631,8 +652,7 @@ impl MetadataStore for SqliteMetadataStore {
                 published_at
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            ON CONFLICT(account_id, snapshot_id) DO UPDATE SET
-                project_id = excluded.project_id,
+            ON CONFLICT(account_id, project_id, snapshot_id) DO UPDATE SET
                 parent_snapshot_id = excluded.parent_snapshot_id,
                 manifest_object_key = excluded.manifest_object_key,
                 manifest_hash = excluded.manifest_hash,
@@ -654,16 +674,21 @@ impl MetadataStore for SqliteMetadataStore {
                 request.published_at
             ],
         )?;
-        self.snapshot(&request.account_id, &request.snapshot_id)?
-            .ok_or_else(|| MetadataError::NotFound {
-                entity: "snapshot",
-                id: request.snapshot_id,
-            })
+        self.snapshot(
+            &request.account_id,
+            &request.project_id,
+            &request.snapshot_id,
+        )?
+        .ok_or_else(|| MetadataError::NotFound {
+            entity: "snapshot",
+            id: request.snapshot_id,
+        })
     }
 
     fn snapshot(
         &self,
         account_id: &str,
+        project_id: &str,
         snapshot_id: &str,
     ) -> MetadataResult<Option<PublishedSnapshotRecord>> {
         self.conn
@@ -681,9 +706,9 @@ impl MetadataStore for SqliteMetadataStore {
                     published_by_device_id,
                     published_at
                 FROM metadata_snapshots
-                WHERE account_id = ?1 AND snapshot_id = ?2
+                WHERE account_id = ?1 AND project_id = ?2 AND snapshot_id = ?3
                 "#,
-                params![account_id, snapshot_id],
+                params![account_id, project_id, snapshot_id],
                 snapshot_from_row,
             )
             .optional()
@@ -715,6 +740,8 @@ impl MetadataStore for SqliteMetadataStore {
         request: UpdateCursorRequest,
     ) -> MetadataResult<DeviceProjectCursorRecord> {
         ensure_no_secret_material(&request)?;
+        self.ensure_device_exists(&request.account_id, &request.device_id)?;
+        self.ensure_project_exists(&request.account_id, &request.project_id)?;
         let tx = self.conn.transaction()?;
         let current = tx
             .query_row(
@@ -817,6 +844,41 @@ impl SqliteMetadataStore {
             .optional()
             .map_err(MetadataError::from)
     }
+
+    fn ensure_account_exists(&self, account_id: &str) -> MetadataResult<()> {
+        let exists = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata_accounts WHERE account_id = ?1)",
+            params![account_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "account must be registered before project".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_device_exists(&self, account_id: &str, device_id: &str) -> MetadataResult<()> {
+        if self.device(account_id, device_id)?.is_some() {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "device must be registered before this metadata write".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_project_exists(&self, account_id: &str, project_id: &str) -> MetadataResult<()> {
+        if self.project(account_id, project_id)?.is_some() {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "project must be registered before this metadata write".to_string(),
+            ))
+        }
+    }
 }
 
 pub type SharedMetadataStore<S> = Arc<Mutex<S>>;
@@ -829,8 +891,14 @@ where
         .route("/health", get(health))
         .route("/v1/devices", put(upsert_device::<S>))
         .route("/v1/projects", put(upsert_project::<S>))
-        .route("/v1/snapshots", put(publish_snapshot::<S>))
-        .route("/v1/snapshots/:snapshot_id", get(get_snapshot::<S>))
+        .route(
+            "/v1/projects/:project_id/snapshots",
+            put(publish_snapshot::<S>),
+        )
+        .route(
+            "/v1/projects/:project_id/snapshots/:snapshot_id",
+            get(get_snapshot::<S>),
+        )
         .route(
             "/v1/cursors/:project_id/:device_id",
             get(get_cursor::<S>).put(update_cursor::<S>),
@@ -886,11 +954,17 @@ where
 async fn publish_snapshot<S>(
     State(store): State<SharedMetadataStore<S>>,
     headers: HeaderMap,
+    Path(project_id): Path<String>,
     Json(request): Json<PublishSnapshotRequest>,
 ) -> MetadataResult<Json<PublishedSnapshotRecord>>
 where
     S: MetadataStore,
 {
+    if request.project_id != project_id {
+        return Err(MetadataError::InvalidRequest(
+            "snapshot path and body project must match".to_string(),
+        ));
+    }
     authorize(
         &headers,
         &request.account_id,
@@ -903,7 +977,7 @@ where
 async fn get_snapshot<S>(
     State(store): State<SharedMetadataStore<S>>,
     headers: HeaderMap,
-    Path(snapshot_id): Path<String>,
+    Path((project_id, snapshot_id)): Path<(String, String)>,
 ) -> MetadataResult<Json<PublishedSnapshotRecord>>
 where
     S: MetadataStore,
@@ -911,7 +985,7 @@ where
     let identity = MockDevIdentity::from_headers(&headers)?;
     let store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
     let record = store
-        .snapshot(&identity.account_id, &snapshot_id)?
+        .snapshot(&identity.account_id, &project_id, &snapshot_id)?
         .ok_or_else(|| MetadataError::NotFound {
             entity: "snapshot",
             id: snapshot_id,
@@ -970,21 +1044,24 @@ fn authorize_identity(
     device_id: &str,
 ) -> MetadataResult<()> {
     if identity.account_id != account_id || identity.device_id != device_id {
-        return Err(MetadataError::IdentityMismatch {
-            expected_account_id: identity.account_id.clone(),
-            expected_device_id: identity.device_id.clone(),
-        });
+        return Err(MetadataError::IdentityMismatch);
     }
     Ok(())
 }
 
 fn required_header(headers: &HeaderMap, name: &'static str) -> MetadataResult<String> {
-    headers
+    let value = headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.to_string())
-        .ok_or(MetadataError::MissingMockDevIdentity)
+        .ok_or(MetadataError::MissingMockDevIdentity)?;
+    if contains_secret_marker(&value) {
+        return Err(MetadataError::InvalidRequest(
+            "mock-dev identity headers must not contain secret-looking material".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 fn ensure_no_secret_material<T: Serialize>(value: &T) -> MetadataResult<()> {
@@ -999,9 +1076,107 @@ fn ensure_no_secret_material<T: Serialize>(value: &T) -> MetadataResult<()> {
     Ok(())
 }
 
+fn ensure_in_memory_snapshot_dependencies(
+    store: &InMemoryMetadataStore,
+    request: &PublishSnapshotRequest,
+) -> MetadataResult<()> {
+    if !store
+        .projects
+        .contains_key(&(request.account_id.clone(), request.project_id.clone()))
+    {
+        return Err(MetadataError::InvalidRequest(
+            "project must be registered before this metadata write".to_string(),
+        ));
+    }
+    if !store.devices.contains_key(&(
+        request.account_id.clone(),
+        request.published_by_device_id.clone(),
+    )) {
+        return Err(MetadataError::InvalidRequest(
+            "device must be registered before this metadata write".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_in_memory_cursor_dependencies(
+    store: &InMemoryMetadataStore,
+    request: &UpdateCursorRequest,
+) -> MetadataResult<()> {
+    if !store
+        .devices
+        .contains_key(&(request.account_id.clone(), request.device_id.clone()))
+    {
+        return Err(MetadataError::InvalidRequest(
+            "device must be registered before this metadata write".to_string(),
+        ));
+    }
+    if !store
+        .projects
+        .contains_key(&(request.account_id.clone(), request.project_id.clone()))
+    {
+        return Err(MetadataError::InvalidRequest(
+            "project must be registered before this metadata write".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn sanitize_metadata_endpoint(endpoint: &str) -> MetadataResult<String> {
+    let url = Url::parse(endpoint).map_err(|_| {
+        MetadataError::InvalidRequest(
+            "metadata endpoint must be an absolute HTTP or HTTPS URL".to_string(),
+        )
+    })?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(MetadataError::InvalidRequest(
+                "metadata endpoint must use http or https".to_string(),
+            ));
+        }
+    }
+    if url.host_str().is_none() {
+        return Err(MetadataError::InvalidRequest(
+            "metadata endpoint must include a host".to_string(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(MetadataError::InvalidRequest(
+            "metadata endpoint must not include userinfo".to_string(),
+        ));
+    }
+    if url.query().is_some() {
+        return Err(MetadataError::InvalidRequest(
+            "metadata endpoint must not include a query string".to_string(),
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(MetadataError::InvalidRequest(
+            "metadata endpoint must not include a fragment".to_string(),
+        ));
+    }
+
+    let sanitized = url.to_string();
+    if contains_secret_marker(&sanitized) {
+        return Err(MetadataError::InvalidRequest(
+            "metadata endpoint must not contain secret-looking material".to_string(),
+        ));
+    }
+    Ok(sanitized)
+}
+
 fn contains_secret_marker(value: &str) -> bool {
     let lowered = value.to_ascii_lowercase();
     SECRET_MARKERS.iter().any(|marker| lowered.contains(marker))
+}
+
+fn is_sqlite_constraint(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(sqlite_error, _)
+            if sqlite_error.code == rusqlite::ErrorCode::ConstraintViolation
+    )
 }
 
 fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishedSnapshotRecord> {
@@ -1097,7 +1272,7 @@ mod tests {
         assert_eq!(persisted, PublishedSnapshotRecord::from(snapshot));
 
         let fetched = store
-            .snapshot(ACCOUNT, "snapshot-a")
+            .snapshot(ACCOUNT, PROJECT, "snapshot-a")
             .expect("snapshot lookup works")
             .expect("snapshot exists");
         assert_eq!(fetched.manifest_object_key, "manifests/snapshot-a.json.enc");
@@ -1113,6 +1288,50 @@ mod tests {
             })
             .expect("cursor persists");
         assert_eq!(cursor.cursor_value.as_deref(), Some("snapshot-a"));
+    }
+
+    #[test]
+    fn sqlite_snapshot_identity_is_project_scoped() {
+        let mut store = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        seed_store(&mut store);
+        store
+            .upsert_project(UpsertProjectRequest {
+                account_id: ACCOUNT.to_string(),
+                project_id: "project-other".to_string(),
+                display_name: "other".to_string(),
+                root_hint: "~/Code/other".to_string(),
+                project_kind: "rust".to_string(),
+                updated_at: "2026-06-18T10:02:00Z".to_string(),
+            })
+            .expect("second project upserts");
+
+        store
+            .publish_snapshot(publish_request())
+            .expect("first project snapshot persists");
+        store
+            .publish_snapshot(PublishSnapshotRequest {
+                project_id: "project-other".to_string(),
+                manifest_object_key: "manifests/other/snapshot-a.json.enc".to_string(),
+                ..publish_request()
+            })
+            .expect("second project can reuse snapshot id");
+
+        let first = store
+            .snapshot(ACCOUNT, PROJECT, "snapshot-a")
+            .expect("first lookup works")
+            .expect("first snapshot exists");
+        let second = store
+            .snapshot(ACCOUNT, "project-other", "snapshot-a")
+            .expect("second lookup works")
+            .expect("second snapshot exists");
+
+        assert_eq!(first.project_id, PROJECT);
+        assert_eq!(first.manifest_object_key, "manifests/snapshot-a.json.enc");
+        assert_eq!(second.project_id, "project-other");
+        assert_eq!(
+            second.manifest_object_key,
+            "manifests/other/snapshot-a.json.enc"
+        );
     }
 
     #[test]
@@ -1134,6 +1353,91 @@ mod tests {
             device_id: DEVICE.to_string(),
         };
         assert!(!format!("{identity:?}").to_ascii_lowercase().contains("key"));
+    }
+
+    #[test]
+    fn endpoint_validation_rejects_unsafe_urls_and_returns_sanitized_output() {
+        let safe = MetadataServiceConfig {
+            endpoint: "https://metadata.example:8443/devbox".to_string(),
+            auth_mode: MetadataAuthMode::MockDevHeaders,
+        }
+        .validate()
+        .expect("safe endpoint validates");
+        assert_eq!(safe.endpoint, "https://metadata.example:8443/devbox");
+
+        for (endpoint, expected) in [
+            ("", "metadata endpoint must not be empty"),
+            (
+                "metadata.example/devbox",
+                "metadata endpoint must be an absolute HTTP or HTTPS URL",
+            ),
+            (
+                "ftp://metadata.example",
+                "metadata endpoint must use http or https",
+            ),
+            (
+                "https://user:password@metadata.example",
+                "metadata endpoint must not include userinfo",
+            ),
+            (
+                "https://metadata.example/path?access=abc",
+                "metadata endpoint must not include a query string",
+            ),
+            (
+                "https://metadata.example/path#access",
+                "metadata endpoint must not include a fragment",
+            ),
+            (
+                "https://metadata.example/sync-key",
+                "metadata endpoint must not contain secret-looking material",
+            ),
+        ] {
+            let error = MetadataServiceConfig {
+                endpoint: endpoint.to_string(),
+                auth_mode: MetadataAuthMode::MockDevHeaders,
+            }
+            .validate()
+            .expect_err("unsafe endpoint is rejected");
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn in_memory_store_rejects_missing_parent_metadata() {
+        let mut store = InMemoryMetadataStore::default();
+        let project = store
+            .upsert_project(project_request())
+            .expect_err("project requires account");
+        assert_eq!(
+            project.to_string(),
+            "account must be registered before project"
+        );
+
+        store
+            .upsert_device(device_request())
+            .expect("device upserts");
+        let snapshot = store
+            .publish_snapshot(publish_request())
+            .expect_err("snapshot requires project");
+        assert_eq!(
+            snapshot.to_string(),
+            "project must be registered before this metadata write"
+        );
+
+        let cursor = store
+            .compare_and_set_cursor(UpdateCursorRequest {
+                account_id: ACCOUNT.to_string(),
+                device_id: DEVICE.to_string(),
+                project_id: PROJECT.to_string(),
+                expected_cursor: None,
+                next_cursor: Some("snapshot-a".to_string()),
+                updated_at: "2026-06-18T10:04:00Z".to_string(),
+            })
+            .expect_err("cursor requires project");
+        assert_eq!(
+            cursor.to_string(),
+            "project must be registered before this metadata write"
+        );
     }
 
     #[tokio::test]
@@ -1241,7 +1545,7 @@ mod tests {
             .clone()
             .oneshot(json_request(
                 Method::PUT,
-                "/v1/snapshots",
+                "/v1/projects/project-devbox/snapshots",
                 &publish_request(),
                 true,
             ))
@@ -1253,7 +1557,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v1/snapshots/snapshot-a")
+                    .uri("/v1/projects/project-devbox/snapshots/snapshot-a")
                     .header(MOCK_ACCOUNT_HEADER, ACCOUNT)
                     .header(MOCK_DEVICE_HEADER, DEVICE)
                     .body(Body::empty())
@@ -1262,6 +1566,186 @@ mod tests {
             .await
             .expect("response returns");
         assert_eq!(fetched.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sqlite_handlers_cover_registration_publish_fetch_and_cursor_flow() {
+        let app = app(SqliteMetadataStore::open_in_memory().expect("sqlite store opens"));
+
+        let device = app
+            .clone()
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/devices",
+                &device_request(),
+                true,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(device.status(), StatusCode::OK);
+
+        let project = app
+            .clone()
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/projects",
+                &project_request(),
+                true,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(project.status(), StatusCode::OK);
+
+        let publish = app
+            .clone()
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/snapshots",
+                &publish_request(),
+                true,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(publish.status(), StatusCode::OK);
+
+        let fetched = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/projects/project-devbox/snapshots/snapshot-a")
+                    .header(MOCK_ACCOUNT_HEADER, ACCOUNT)
+                    .header(MOCK_DEVICE_HEADER, DEVICE)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+        assert_eq!(fetched.status(), StatusCode::OK);
+
+        let cursor = app
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/cursors/project-devbox/device-laptop",
+                &UpdateCursorRequest {
+                    account_id: ACCOUNT.to_string(),
+                    device_id: DEVICE.to_string(),
+                    project_id: PROJECT.to_string(),
+                    expected_cursor: None,
+                    next_cursor: Some("snapshot-a".to_string()),
+                    updated_at: "2026-06-18T10:04:00Z".to_string(),
+                },
+                true,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(cursor.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sqlite_handlers_return_sanitized_4xx_for_out_of_order_calls() {
+        let app = app(SqliteMetadataStore::open_in_memory().expect("sqlite store opens"));
+
+        let project = app
+            .clone()
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/projects",
+                &project_request(),
+                true,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(project.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(project).await;
+        assert!(body.contains("account must be registered before project"));
+        assert!(!body.contains("FOREIGN KEY"));
+        assert!(!body.contains("constraint failed"));
+
+        let snapshot = app
+            .clone()
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/snapshots",
+                &publish_request(),
+                true,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(snapshot.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(snapshot).await;
+        assert!(body.contains("project must be registered before this metadata write"));
+        assert!(!body.contains("FOREIGN KEY"));
+        assert!(!body.contains("constraint failed"));
+
+        let cursor = app
+            .oneshot(json_request(
+                Method::PUT,
+                "/v1/cursors/project-devbox/device-laptop",
+                &UpdateCursorRequest {
+                    account_id: ACCOUNT.to_string(),
+                    device_id: DEVICE.to_string(),
+                    project_id: PROJECT.to_string(),
+                    expected_cursor: None,
+                    next_cursor: Some("snapshot-a".to_string()),
+                    updated_at: "2026-06-18T10:04:00Z".to_string(),
+                },
+                true,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(cursor.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(cursor).await;
+        assert!(body.contains("device must be registered before this metadata write"));
+        assert!(!body.contains("FOREIGN KEY"));
+        assert!(!body.contains("constraint failed"));
+    }
+
+    #[tokio::test]
+    async fn secret_like_mock_headers_are_not_reflected_in_error_bodies() {
+        let app = app(seeded_store());
+        let secret_like = "sync-key-should-not-echo";
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v1/projects")
+                    .header(MOCK_ACCOUNT_HEADER, secret_like)
+                    .header(MOCK_DEVICE_HEADER, DEVICE)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&project_request()).expect("json encodes"),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("mock-dev identity headers must not contain secret-looking material"));
+        assert!(!body.contains(secret_like));
+
+        let mismatch = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v1/projects")
+                    .header(MOCK_ACCOUNT_HEADER, "account-other")
+                    .header(MOCK_DEVICE_HEADER, DEVICE)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&project_request()).expect("json encodes"),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+        assert_eq!(mismatch.status(), StatusCode::UNAUTHORIZED);
+        let body = response_text(mismatch).await;
+        assert_eq!(body, "{\"error\":\"mock-dev identity mismatch\"}");
+        assert!(!body.contains("account-other"));
     }
 
     #[test]
@@ -1345,6 +1829,13 @@ mod tests {
         builder
             .body(Body::from(serde_json::to_vec(body).expect("json encodes")))
             .expect("request builds")
+    }
+
+    async fn response_text(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body reads");
+        String::from_utf8(bytes.to_vec()).expect("response is utf8")
     }
 
     impl From<PublishSnapshotRequest> for PublishedSnapshotRecord {

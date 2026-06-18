@@ -11,8 +11,8 @@ handlers for:
 - health checks
 - mock-dev device registration/upsert
 - project registration/upsert
-- published snapshot manifest metadata
-- snapshot metadata lookup by snapshot id
+- project-scoped published snapshot manifest metadata
+- project-scoped snapshot metadata lookup by snapshot id
 - server-side device/project cursor reads
 - server-side cursor compare-and-set updates
 
@@ -30,8 +30,16 @@ The first service schema tracks:
 - published snapshot manifests
 - device/project cursors
 
-Published snapshot metadata stores object references and counts only. It does not store plaintext
-file bytes, sync keys, device keys, R2 secrets, object credentials, or manifest contents.
+Published snapshot metadata is keyed by account, project, and snapshot id. The HTTP surface uses
+project-scoped routes:
+
+```text
+PUT /v1/projects/:project_id/snapshots
+GET /v1/projects/:project_id/snapshots/:snapshot_id
+```
+
+Snapshot records store object references and counts only. They do not store plaintext file bytes,
+sync keys, device keys, R2 secrets, object credentials, or manifest contents.
 
 ## Cursor Safety
 
@@ -63,8 +71,12 @@ Those headers are named as mock/dev credentials and are suitable only for local 
 flows. They are not account ownership proof, not a billing identity, and not safe for production
 deployment.
 
-The service rejects obvious secret-bearing request material and its public CLI check prints only
-configuration shape, not raw keys or object credentials.
+The service rejects obvious secret-bearing request material and its public CLI check prints a
+sanitized endpoint, not raw input, keys, or object credentials.
+
+Public API errors are sanitized. Client-domain ordering mistakes, such as writing a project before
+registering the account/device or writing a cursor before registering the project, return 4xx
+precondition errors rather than raw SQLite messages.
 
 ## CLI Boundary
 
@@ -84,8 +96,8 @@ The SQLite schema is deliberately small and maps one-to-one to future Postgres t
 - `metadata_snapshots`
 - `metadata_device_project_cursors`
 
-Moving to Postgres should replace the `MetadataStore` implementation, not the API models or cursor
-compare-and-set contract.
+Moving to Postgres should replace the `MetadataStore` implementation, not the project-scoped API
+models or cursor compare-and-set contract.
 
 ## Deferred
 
