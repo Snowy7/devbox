@@ -1,5 +1,9 @@
 //! SQLite-backed local metadata boundary for Devbox.
 
+mod blob_cache;
+
+pub use blob_cache::{BlobCache, BlobCacheError, BlobCacheResult, BlobRef};
+
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::Path;
