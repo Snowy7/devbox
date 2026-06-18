@@ -1589,7 +1589,7 @@ fn parse_metadata_credential_lease_create_args(
             }
             "--project" => {
                 index += 1;
-                project_id = args.get(index).cloned();
+                project_id = Some(parse_managed_credential_project_arg(args.get(index))?);
             }
             "--lease" => {
                 index += 1;
@@ -1723,7 +1723,7 @@ fn parse_metadata_credential_lease_mutate_args(
             }
             "--project" => {
                 index += 1;
-                project_id = args.get(index).cloned();
+                project_id = Some(parse_managed_credential_project_arg(args.get(index))?);
             }
             "--lease" => {
                 index += 1;
@@ -1776,6 +1776,19 @@ fn parse_managed_object_capabilities(value: &str) -> Result<Vec<ManagedObjectCap
     capabilities.sort();
     capabilities.dedup();
     Ok(capabilities)
+}
+
+fn parse_managed_credential_project_arg(value: Option<&String>) -> Result<String, String> {
+    let value = value
+        .ok_or_else(|| "--project requires a project id".to_string())?
+        .trim();
+    if value == "*" {
+        return Err(
+            "project id '*' is reserved for account-wide managed object credential leases"
+                .to_string(),
+        );
+    }
+    Ok(value.to_string())
 }
 
 fn parse_sync_metadata_arg(

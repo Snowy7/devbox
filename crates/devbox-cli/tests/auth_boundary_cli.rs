@@ -208,6 +208,91 @@ fn managed_object_credential_lease_cli_never_prints_or_persists_raw_cloud_materi
     }
 }
 
+#[test]
+fn managed_object_credential_lease_cli_rejects_project_scope_sentinel() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("metadata.sqlite3");
+    let session_token = "raw-managed-session-token-should-not-appear";
+    let devbox = env!("CARGO_BIN_EXE_devbox");
+
+    let account_wide = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "mock-create",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--verified-email",
+            "user@example.com",
+            "--lease",
+            "lease-account-wide",
+            "--provider-kind",
+            "r2",
+            "--endpoint",
+            "https://account.r2.cloudflarestorage.com",
+            "--bucket",
+            "devbox-alpha",
+            "--ttl-seconds",
+            "3600",
+        ])
+        .output()
+        .expect("account-wide lease create runs");
+    assert!(account_wide.status.success(), "{}", stderr(&account_wide));
+    assert!(stdout(&account_wide).contains("Project id: -"));
+
+    let sentinel = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "mock-create",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--verified-email",
+            "user@example.com",
+            "--project",
+            "*",
+            "--lease",
+            "lease-account-wide",
+            "--provider-kind",
+            "r2",
+            "--endpoint",
+            "https://account.r2.cloudflarestorage.com",
+            "--bucket",
+            "devbox-alpha",
+        ])
+        .output()
+        .expect("sentinel lease create runs");
+    assert!(!sentinel.status.success(), "{}", stdout(&sentinel));
+    assert!(stderr(&sentinel)
+        .contains("project id '*' is reserved for account-wide managed object credential leases"));
+
+    let check = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "check",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--lease",
+            "lease-account-wide",
+            "--require-capabilities",
+            "read",
+        ])
+        .output()
+        .expect("account-wide lease check runs");
+    assert!(check.status.success(), "{}", stderr(&check));
+    let check_stdout = stdout(&check);
+    assert!(check_stdout.contains("Managed object credential lease: active"));
+    assert!(check_stdout.contains("Project id: -"));
+    assert!(!check_stdout.contains(session_token));
+}
+
 fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
