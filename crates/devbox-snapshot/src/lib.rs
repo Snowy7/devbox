@@ -1,6 +1,6 @@
 //! Snapshot manifest construction over local project files.
 
-use devbox_core::scanner::evaluate_path_policy;
+use devbox_core::scanner::evaluate_directory_policy;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision, SnapshotId};
 use devbox_store::{BlobCache, BlobCacheError};
 use std::fmt;
@@ -34,7 +34,19 @@ impl SnapshotManifestBuilder {
             });
         }
 
-        let root = absolute_root(root)?;
+        let root = canonical_root(root)?;
+        let cache_root =
+            fs::canonicalize(self.blob_cache.root()).map_err(|source| SnapshotError::Io {
+                path: self.blob_cache.root().to_path_buf(),
+                source,
+            })?;
+        if cache_root == root || cache_root.starts_with(&root) {
+            return Err(SnapshotError::BlobCacheInsideSnapshotRoot {
+                cache_root,
+                snapshot_root: root,
+            });
+        }
+
         let mut entries = Vec::new();
         walk_directory(&self.blob_cache, &root, &root, &mut entries)?;
         let summary = SnapshotSummary::from_entries(&entries);
@@ -159,6 +171,7 @@ impl SnapshotSummary {
                     }
                     ManifestEntryKind::Directory => summary.included_directories += 1,
                     ManifestEntryKind::Symlink => summary.included_symlinks += 1,
+                    ManifestEntryKind::Unsupported => {}
                 },
                 PolicyDecision::Exclude { .. } => summary.excluded_entries += 1,
                 PolicyDecision::RequiresUserDecision { .. } => {}
@@ -209,6 +222,10 @@ pub enum SnapshotError {
         path: PathBuf,
         source: BlobCacheError,
     },
+    BlobCacheInsideSnapshotRoot {
+        cache_root: PathBuf,
+        snapshot_root: PathBuf,
+    },
 }
 
 impl fmt::Display for SnapshotError {
@@ -226,6 +243,15 @@ impl fmt::Display for SnapshotError {
             Self::BlobCache { path, source } => {
                 write!(f, "could not cache {}: {source}", path.display())
             }
+            Self::BlobCacheInsideSnapshotRoot {
+                cache_root,
+                snapshot_root,
+            } => write!(
+                f,
+                "blob cache root {} is inside snapshot root {}; choose a cache outside the project",
+                cache_root.display(),
+                snapshot_root.display()
+            ),
         }
     }
 }
@@ -235,7 +261,9 @@ impl std::error::Error for SnapshotError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::BlobCache { source, .. } => Some(source),
-            Self::RootNotFound { .. } | Self::RootNotDirectory { .. } => None,
+            Self::RootNotFound { .. }
+            | Self::RootNotDirectory { .. }
+            | Self::BlobCacheInsideSnapshotRoot { .. } => None,
         }
     }
 }
@@ -266,8 +294,19 @@ fn walk_directory(
             source,
         })?;
         let relative_path = relative_to(root, &child_path);
-        let policy_decision = evaluate_path_policy(&relative_path);
         let kind = entry_kind(&metadata);
+        let policy_decision = match kind {
+            ManifestEntryKind::Directory => evaluate_directory_policy(&relative_path),
+            ManifestEntryKind::File => PolicyDecision::Include,
+            ManifestEntryKind::Symlink => PolicyDecision::RequiresUserDecision {
+                reason: "symlink capture is deferred until restore safety rules exist".to_string(),
+            },
+            ManifestEntryKind::Unsupported => PolicyDecision::RequiresUserDecision {
+                reason:
+                    "unsupported filesystem node type is deferred until restore safety rules exist"
+                        .to_string(),
+            },
+        };
 
         if matches!(policy_decision, PolicyDecision::Exclude { .. }) {
             entries.push(SnapshotManifestEntry::new(
@@ -316,10 +355,17 @@ fn walk_directory(
                     None,
                     None,
                     None,
-                    PolicyDecision::RequiresUserDecision {
-                        reason: "symlink capture is deferred until restore safety rules exist"
-                            .to_string(),
-                    },
+                    policy_decision,
+                ));
+            }
+            ManifestEntryKind::Unsupported => {
+                entries.push(SnapshotManifestEntry::new(
+                    relative_path,
+                    ManifestEntryKind::Unsupported,
+                    None,
+                    None,
+                    None,
+                    policy_decision,
                 ));
             }
         }
@@ -334,8 +380,10 @@ fn entry_kind(metadata: &Metadata) -> ManifestEntryKind {
         ManifestEntryKind::Symlink
     } else if file_type.is_dir() {
         ManifestEntryKind::Directory
-    } else {
+    } else if file_type.is_file() {
         ManifestEntryKind::File
+    } else {
+        ManifestEntryKind::Unsupported
     }
 }
 
@@ -382,6 +430,7 @@ fn kind_name(kind: &ManifestEntryKind) -> &'static str {
         ManifestEntryKind::File => "file",
         ManifestEntryKind::Directory => "directory",
         ManifestEntryKind::Symlink => "symlink",
+        ManifestEntryKind::Unsupported => "unsupported",
     }
 }
 
@@ -416,17 +465,11 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
 
-fn absolute_root(root: &Path) -> Result<PathBuf, SnapshotError> {
-    if root.is_absolute() {
-        return Ok(root.to_path_buf());
-    }
-
-    let current_dir = std::env::current_dir().map_err(|source| SnapshotError::Io {
+fn canonical_root(root: &Path) -> Result<PathBuf, SnapshotError> {
+    fs::canonicalize(root).map_err(|source| SnapshotError::Io {
         path: root.to_path_buf(),
         source,
-    })?;
-
-    Ok(current_dir.join(root))
+    })
 }
 
 #[cfg(test)]
@@ -483,6 +526,42 @@ mod tests {
     }
 
     #[test]
+    fn includes_regular_files_named_like_generated_directories() {
+        let fixture = TestProject::new();
+        fixture.write("build", "regular file named build\n");
+
+        let snapshot = fixture.build();
+        let entry = snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.relative_path() == Path::new("build"))
+            .expect("build file entry exists");
+
+        assert_eq!(entry.kind(), &ManifestEntryKind::File);
+        assert_eq!(entry.policy_decision(), &PolicyDecision::Include);
+        assert!(entry.blob_id().is_some());
+        assert_eq!(fixture.object_file_count(), 1);
+    }
+
+    #[test]
+    fn rejects_blob_cache_inside_snapshot_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).expect("project dir creates");
+        fs::write(root.join("main.rs"), "fn main() {}\n").expect("file writes");
+        let cache = BlobCache::open(root.join(".devbox-cache")).expect("cache opens");
+
+        let error = SnapshotManifestBuilder::new(cache)
+            .build_draft(&root)
+            .expect_err("cache inside snapshot root is rejected");
+
+        assert!(matches!(
+            error,
+            SnapshotError::BlobCacheInsideSnapshotRoot { .. }
+        ));
+    }
+
+    #[test]
     fn writes_included_file_bytes_to_blob_cache() {
         let fixture = TestProject::new();
         fixture.write("README.md", "hello snapshot\n");
@@ -522,6 +601,31 @@ mod tests {
         assert_eq!(entry.blob_id(), None);
         assert_eq!(entry.object_ref(), None);
         assert_eq!(entry.policy_decision(), &PolicyDecision::Include);
+    }
+
+    #[test]
+    fn symlinks_are_deferred_without_blob_cache_writes() {
+        let fixture = TestProject::new();
+        fixture.write("real.txt", "real content\n");
+        if !fixture.symlink_file("real.txt", "linked.txt") {
+            return;
+        }
+
+        let snapshot = fixture.build();
+        let entry = snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.relative_path() == Path::new("linked.txt"))
+            .expect("symlink entry exists");
+
+        assert_eq!(entry.kind(), &ManifestEntryKind::Symlink);
+        assert!(matches!(
+            entry.policy_decision(),
+            PolicyDecision::RequiresUserDecision { reason }
+                if reason == "symlink capture is deferred until restore safety rules exist"
+        ));
+        assert_eq!(entry.blob_id(), None);
+        assert_eq!(fixture.object_file_count(), 1);
     }
 
     #[test]
@@ -575,6 +679,17 @@ mod tests {
                 fs::create_dir_all(parent).expect("parent creates");
             }
             fs::write(path, content).expect("file writes");
+        }
+
+        #[cfg(unix)]
+        fn symlink_file(&self, original: &str, link: &str) -> bool {
+            std::os::unix::fs::symlink(self.root.join(original), self.root.join(link)).is_ok()
+        }
+
+        #[cfg(windows)]
+        fn symlink_file(&self, original: &str, link: &str) -> bool {
+            std::os::windows::fs::symlink_file(self.root.join(original), self.root.join(link))
+                .is_ok()
         }
 
         fn object_file_count(&self) -> usize {

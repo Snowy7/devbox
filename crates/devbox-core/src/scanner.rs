@@ -209,7 +209,7 @@ impl std::error::Error for ScanError {
 
 fn scan_directory(root: &Path, path: &Path, scan: &mut ProjectScan) -> Result<(), ScanError> {
     let relative_path = relative_to(root, path);
-    let decision = evaluate_path_policy(&relative_path);
+    let decision = evaluate_directory_policy(&relative_path);
 
     if matches!(decision, PolicyDecision::Exclude { .. }) {
         scan.policy_evaluations
@@ -309,7 +309,7 @@ fn detect_project(relative_path: &Path, path: &Path) -> Option<DetectedProject> 
     None
 }
 
-pub fn evaluate_path_policy(relative_path: &Path) -> PolicyDecision {
+pub fn evaluate_directory_policy(relative_path: &Path) -> PolicyDecision {
     let Some(name) = relative_path.file_name().and_then(|name| name.to_str()) else {
         return PolicyDecision::Include;
     };

@@ -26,6 +26,7 @@ The builder walks a local project directory, applies the existing generated-arti
 - deterministic filesystem traversal
 - included file writes to `BlobCache`
 - one manifest entry per included file, included directory, symlink requiring a later decision, or excluded policy boundary
+- explicit deferral for unsupported filesystem node types
 - stable draft snapshot identity derived from canonical manifest entry fields
 - aggregate summary counts for dry-run and future operation records
 
@@ -42,7 +43,7 @@ This command creates local blob-cache objects for included files and prints the 
 Each draft manifest entry records:
 
 - relative path
-- entry kind: file, directory, or symlink
+- entry kind: file, directory, symlink, or unsupported
 - size for file-like entries when available
 - blob id for included files
 - blob object reference for included files
@@ -50,7 +51,13 @@ Each draft manifest entry records:
 
 Directory entries are sorted by filesystem name before recursion so repeated runs over the same tree produce the same entry order. Generated or tool-owned directories are recorded as excluded entries and are not descended into.
 
-Current exclusions come from the scanner policy and include `.git`, `node_modules`, `target`, `.venv`, build outputs, language caches, and tool caches. This keeps generated content out of the first snapshot boundary while still explaining what was skipped.
+Current directory exclusions come from the scanner policy and include `.git`, `node_modules`, `target`, `.venv`, build outputs, language caches, and tool caches. These exclusions apply to directories before descent, not to ordinary regular files that happen to share names such as `build` or `dist`.
+
+The blob cache root is Devbox-owned state. If the cache root is inside the snapshot root, the builder rejects the draft with an explicit error rather than trying to snapshot or explain its own object cache.
+
+Only regular files are written to `BlobCache`. Symlinks and unsupported filesystem node types are represented as requiring a future user or safety decision so restore semantics can be designed deliberately.
+
+Phase 0 canonical manifest identity converts relative paths to slash-separated UTF-8 strings using lossy path display. Non-Unicode path identity is intentionally deferred until the manifest format is ready to define byte-preserving path encoding across platforms.
 
 ## Relationship To SQLite
 
@@ -76,6 +83,7 @@ This slice intentionally does not implement:
 - `.gitignore` parsing
 - user, project, or team policy overrides
 - symlink restore semantics
+- byte-preserving non-Unicode path identity
 - cloud sync
 - encryption
 - compression

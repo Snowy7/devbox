@@ -22,7 +22,7 @@ The command prints the canonical scan root, detected projects, project signals, 
 
 ## Default Generated-Artifact Policy
 
-The scanner excludes generated or tool-owned directories before descending into them. Current defaults include:
+The scanner excludes generated or tool-owned directories before descending into them. These names are directory-boundary policy, not a rule that excludes ordinary regular files with the same names. Current defaults include:
 
 - `.git`
 - `node_modules`
