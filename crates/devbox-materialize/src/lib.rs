@@ -795,6 +795,56 @@ mod tests {
     }
 
     #[test]
+    fn blocked_secret_entries_are_not_published_or_materialized() {
+        let fixture = FoundationFixture::new();
+        let raw_secret = synthetic_token("github_pat_", "11AAabcdefghijklmnopqrstuvwxyz1234567890");
+        fixture.write("README.md", "safe content\n");
+        fixture.write("secrets.env", &format!("GITHUB_TOKEN={raw_secret}\n"));
+        let snapshot_id = fixture.persist_source_snapshot();
+        let source = Store::open_file(&fixture.source_db)
+            .expect("source opens")
+            .snapshot_with_entries(&snapshot_id)
+            .expect("snapshot reads")
+            .expect("snapshot exists");
+        let blocked = source
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == Path::new("secrets.env"))
+            .expect("blocked entry exists");
+        assert_eq!(blocked.blob_id, None);
+        assert_eq!(blocked.object_ref, None);
+
+        let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
+        let published = publish_snapshot(
+            &PublishSnapshotRequest {
+                db_path: fixture.source_db.clone(),
+                cache_root: fixture.source_cache.clone(),
+                snapshot_id: snapshot_id.clone(),
+            },
+            &provider,
+        )
+        .expect("snapshot publishes");
+        assert_eq!(published.blob_count, 1);
+
+        let outcome = materialize_snapshot(
+            &MaterializationRequest {
+                db_path: fixture.receiver_db.clone(),
+                cache_root: fixture.receiver_cache.clone(),
+                key_source_db_path: Some(fixture.source_db.clone()),
+                snapshot_id,
+                target: fixture.target.clone(),
+                apply: true,
+            },
+            &provider,
+        )
+        .expect("snapshot materializes");
+
+        assert_eq!(outcome.plan.files_to_write, 1);
+        assert!(fixture.target.join("README.md").is_file());
+        assert!(!fixture.target.join("secrets.env").exists());
+    }
+
+    #[test]
     fn import_is_idempotent_and_can_refill_missing_receiver_cache() {
         let fixture = FoundationFixture::new();
         fixture.write("README.md", "cached twice\n");
@@ -1069,5 +1119,9 @@ mod tests {
                 files.push(path);
             }
         }
+    }
+
+    fn synthetic_token(prefix: &str, tail: &str) -> String {
+        [prefix, tail].concat()
     }
 }

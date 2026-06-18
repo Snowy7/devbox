@@ -24,8 +24,9 @@ The diff is deterministic and file-oriented:
 - `deleted`: an included regular file from the base snapshot is missing from the current included
   file set.
 - `unchanged`: an included regular file exists in both states with the same blob id and size.
-- `skipped/deferred`: policy exclusions, generated dependency directories, symlinks, and unsupported
-  filesystem nodes. These are summarized but not persisted as uploadable operations.
+- `skipped/deferred`: policy exclusions, generated dependency directories, symlinks, unsupported
+  filesystem nodes, and secret-blocked files. These are summarized but not persisted as uploadable
+  operations.
 
 Pending operations are replaced per project on every scan. Re-running a scan with the same filesystem
 state therefore keeps the feed stable instead of creating duplicate rows.
@@ -48,6 +49,9 @@ The CLI preserves the existing cache/database preflight checks: the blob cache r
 database path must not live inside the project being scanned. Generated dependency directories are
 excluded by policy and are not treated as sync operations. Symlinks and unsupported filesystem nodes
 remain deferred and are never persisted as uploadable file changes.
+
+Secret-blocked regular files have no blob id or object ref, so they are never persisted as
+uploadable created or modified pending changes.
 
 The scan and watcher do not write cloud objects, delete user files, restore files, or mutate source
 trees.

@@ -55,6 +55,8 @@ Completed foundations:
   cursor primitives
 - local/mock second-device materialization through an encrypted local filesystem remote, including
   publish/import, receiving cursor update, and safe restore-engine apply
+- local high-confidence secret detection and block-by-default policy before snapshot blobs become
+  uploadable
 
 Remaining auth and pairing work:
 
@@ -62,6 +64,7 @@ Remaining auth and pairing work:
 - hosted metadata service and server-side device/project cursors
 - production pairing UX, recovery, and rotation flows
 - real cloud object credentials
+- explicit path-scoped secret allow/template/envelope policy
 - conflict-as-divergent-snapshot compare/merge flows
 
 Exit criteria:

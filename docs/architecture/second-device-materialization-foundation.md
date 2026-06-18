@@ -47,6 +47,10 @@ Remote manifest bytes must not contain plaintext file bytes or obvious path stri
 directories such as `.git`, `node_modules`, and build outputs remain excluded/deferred by the
 snapshot policy and are not materialized as included content.
 
+Secret-blocked files are also not materialized as included content. They persist in the encrypted
+bundle as manifest policy entries with no included blob reference, so publish/import can explain the
+policy decision without uploading or restoring the blocked file bytes.
+
 Object names are deterministic and safe for the local filesystem provider. They are intentionally
 not a final cloud layout.
 
@@ -97,3 +101,4 @@ Remaining Phase 1 work includes:
 - production pairing UX, recovery, and rotation
 - conflict-as-divergent-snapshot compare/merge flows
 - minimal tray/Electron continuation UI
+- explicit path-scoped secret allow/template/envelope policy

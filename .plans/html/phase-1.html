@@ -75,7 +75,8 @@
           <article class="card workstream red-line">
             <h3>Safety</h3>
             <ul class="checklist">
-              <li>Secrets blocked unless policy says otherwise.</li>
+              <li>Local high-confidence secret blocking before uploadable blobs.</li>
+              <li>Explicit secret allow/template/envelope policy remains deferred.</li>
               <li>Git verification after materialization.</li>
               <li>Atomic writes with rollback.</li>
               <li>Manual pause and project exclusion.</li>
@@ -93,6 +94,7 @@
           <li>Encrypted blob upload and download work through a local filesystem remote provider without cloud credentials.</li>
           <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
           <li>Local/mock second-device materialization now proves encrypted publish/import, receiving cursor update, and safe restore-engine apply.</li>
+          <li>Local high-confidence secret detection blocks detected files before blob-cache writes and uploadable local/mock sync blobs.</li>
           <li>Production cloud authentication, hosted metadata, real R2/S3 credentials, production pairing UX, and conflict resolution remain later Phase 1 work.</li>
         </ul>
       </section>

@@ -4,6 +4,10 @@ This slice introduces the Phase 0 snapshot manifest builder in `crates/devbox-sn
 
 The builder walks a local project directory, applies the existing generated-artifact policy from `devbox-core`, writes included file bytes into the local `BlobCache`, and returns an in-memory draft snapshot manifest. The CLI can now either print that draft as a dry run or persist its metadata to SQLite.
 
+The Phase 1 secret detection slice now applies a conservative local detector before blob-cache
+writes. Files with high-confidence secret findings are represented as blocked/deferred policy
+entries with no blob id or object ref.
+
 ## Boundary
 
 `devbox-core` owns domain vocabulary:
@@ -64,6 +68,10 @@ Current directory exclusions come from the scanner policy and include `.git`, `n
 The blob cache root is Devbox-owned state. If the cache root is inside the snapshot root, the dry-run CLI rejects it before `BlobCache::open` can create directories. The builder keeps the same validation as defense in depth rather than trying to snapshot or explain its own object cache.
 
 Only regular files are written to `BlobCache`. Symlinks and unsupported filesystem node types are represented as requiring a future user or safety decision so restore semantics can be designed deliberately.
+
+Regular files that trip the secret block policy are not written to `BlobCache`. Their policy reason
+records rule id, line number, and redacted evidence only; raw secret values are not stored in
+manifest policy metadata.
 
 Phase 0 canonical manifest identity converts relative paths to slash-separated UTF-8 strings using lossy path display. Non-Unicode path identity is intentionally deferred until the manifest format is ready to define byte-preserving path encoding across platforms.
 
