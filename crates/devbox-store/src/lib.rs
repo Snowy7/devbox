@@ -4,11 +4,12 @@ mod blob_cache;
 
 pub use blob_cache::{BlobCache, BlobCacheError, BlobCacheResult, BlobRef};
 
+use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision, ProjectId};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -27,6 +28,9 @@ pub enum StoreError {
     Sqlite(rusqlite::Error),
     UnsupportedSchemaVersion { found: u32, supported: u32 },
     InvalidMigrationState(String),
+    InvalidSnapshotDraft(String),
+    InvalidStoredValue(String),
+    DuplicateSnapshotId(String),
 }
 
 impl fmt::Display for StoreError {
@@ -38,6 +42,9 @@ impl fmt::Display for StoreError {
                 "SQLite schema version {found} is newer than supported version {supported}"
             ),
             Self::InvalidMigrationState(message) => f.write_str(message),
+            Self::InvalidSnapshotDraft(message) => f.write_str(message),
+            Self::InvalidStoredValue(message) => f.write_str(message),
+            Self::DuplicateSnapshotId(id) => write!(f, "snapshot already exists: {id}"),
         }
     }
 }
@@ -46,7 +53,11 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(error) => Some(error),
-            Self::UnsupportedSchemaVersion { .. } | Self::InvalidMigrationState(_) => None,
+            Self::UnsupportedSchemaVersion { .. }
+            | Self::InvalidMigrationState(_)
+            | Self::InvalidSnapshotDraft(_)
+            | Self::InvalidStoredValue(_)
+            | Self::DuplicateSnapshotId(_) => None,
         }
     }
 }
@@ -109,6 +120,10 @@ impl Store {
             self.conn.execute_batch(INITIAL_SCHEMA)?;
         }
 
+        if version < 2 {
+            self.conn.execute_batch(MIGRATION_2_MANIFEST_UNSUPPORTED)?;
+        }
+
         Ok(())
     }
 
@@ -144,6 +159,28 @@ impl Store {
             r#"
             INSERT INTO projects (id, root_path, kind, display_name, discovered_at)
             VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                project.id,
+                project.root_path,
+                project.kind,
+                project.display_name,
+                project.discovered_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_project(&self, project: &NewProject<'_>) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO projects (id, root_path, kind, display_name, discovered_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                root_path = excluded.root_path,
+                kind = excluded.kind,
+                display_name = excluded.display_name
             "#,
             params![
                 project.id,
@@ -239,6 +276,258 @@ impl Store {
             .optional()
             .map_err(StoreError::from)
     }
+
+    pub fn current_timestamp(&self) -> StoreResult<String> {
+        self.conn
+            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |row| {
+                row.get(0)
+            })
+            .map_err(StoreError::from)
+    }
+
+    pub fn persist_draft_snapshot(
+        &mut self,
+        draft: &NewSnapshotDraft<'_>,
+    ) -> StoreResult<PersistedSnapshot> {
+        if self.snapshot(draft.snapshot.id)?.is_some() {
+            return Err(StoreError::DuplicateSnapshotId(
+                draft.snapshot.id.to_string(),
+            ));
+        }
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO projects (id, root_path, kind, display_name, discovered_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                root_path = excluded.root_path,
+                kind = excluded.kind,
+                display_name = excluded.display_name
+            "#,
+            params![
+                draft.project.id,
+                draft.project.root_path,
+                draft.project.kind,
+                draft.project.display_name,
+                draft.project.discovered_at,
+            ],
+        )?;
+
+        tx.execute(
+            r#"
+            INSERT INTO snapshots (
+                id,
+                project_id,
+                parent_snapshot_id,
+                created_at,
+                reason,
+                manifest_entry_count,
+                total_size_bytes
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                draft.snapshot.id,
+                draft.snapshot.project_id,
+                draft.snapshot.parent_snapshot_id,
+                draft.snapshot.created_at,
+                draft.snapshot.reason,
+                draft.snapshot.manifest_entry_count,
+                draft.snapshot.total_size_bytes,
+            ],
+        )?;
+
+        for (index, entry) in draft.entries.iter().enumerate() {
+            let path = path_to_store_string(entry.relative_path);
+            let (decision, reason) = policy_to_store(entry.policy_decision);
+
+            if let Some(blob_id) = entry.blob_id {
+                let object_ref = entry.object_ref.ok_or_else(|| {
+                    StoreError::InvalidSnapshotDraft(format!(
+                        "manifest entry {path} has blob id {blob_id} without an object ref"
+                    ))
+                })?;
+
+                tx.execute(
+                    r#"
+                    INSERT INTO blobs (id, hash_algorithm, size_bytes, object_ref, created_at)
+                    VALUES (?1, 'blake3', ?2, ?3, ?4)
+                    ON CONFLICT(id) DO UPDATE SET
+                        size_bytes = excluded.size_bytes,
+                        object_ref = excluded.object_ref
+                    "#,
+                    params![
+                        blob_id.as_str(),
+                        entry.size_bytes,
+                        object_ref,
+                        draft.snapshot.created_at,
+                    ],
+                )?;
+            }
+
+            tx.execute(
+                r#"
+                INSERT INTO manifest_entries (
+                    snapshot_id,
+                    path,
+                    entry_kind,
+                    blob_id,
+                    target_path,
+                    file_mode,
+                    size_bytes,
+                    policy_decision,
+                    policy_reason
+                )
+                VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7)
+                "#,
+                params![
+                    draft.snapshot.id,
+                    path,
+                    kind_to_store(&entry.kind),
+                    entry.blob_id.map(BlobId::as_str),
+                    entry.size_bytes,
+                    decision,
+                    reason,
+                ],
+            )?;
+
+            if !matches!(entry.policy_decision, PolicyDecision::Include) {
+                tx.execute(
+                    r#"
+                    INSERT INTO policy_evaluations (
+                        id,
+                        policy_id,
+                        project_id,
+                        snapshot_id,
+                        path,
+                        decision,
+                        reason,
+                        evaluated_at
+                    )
+                    VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7)
+                    "#,
+                    params![
+                        format!("policy-eval-{}-{index}", draft.snapshot.id),
+                        draft.snapshot.project_id,
+                        draft.snapshot.id,
+                        path,
+                        decision,
+                        reason,
+                        draft.snapshot.created_at,
+                    ],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        self.snapshot_with_entries(draft.snapshot.id)?
+            .ok_or_else(|| {
+                StoreError::InvalidMigrationState("persisted snapshot is missing".into())
+            })
+    }
+
+    pub fn list_snapshots(&self) -> StoreResult<Vec<SnapshotListRecord>> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT
+                s.id,
+                s.project_id,
+                p.root_path,
+                p.display_name,
+                s.created_at,
+                s.manifest_entry_count,
+                s.total_size_bytes
+            FROM snapshots s
+            JOIN projects p ON p.id = s.project_id
+            ORDER BY s.created_at DESC, s.id ASC
+            "#,
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(SnapshotListRecord {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                project_root_path: row.get(2)?,
+                project_display_name: row.get(3)?,
+                created_at: row.get(4)?,
+                manifest_entry_count: row.get(5)?,
+                total_size_bytes: row.get(6)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn snapshot_with_entries(&self, id: &str) -> StoreResult<Option<PersistedSnapshot>> {
+        let Some(snapshot) = self.snapshot(id)? else {
+            return Ok(None);
+        };
+        let project = self.project(&snapshot.project_id)?.ok_or_else(|| {
+            StoreError::InvalidStoredValue(format!(
+                "snapshot {} references missing project {}",
+                snapshot.id, snapshot.project_id
+            ))
+        })?;
+        let entries = self.manifest_entries(id)?;
+
+        Ok(Some(PersistedSnapshot {
+            project,
+            snapshot,
+            entries,
+        }))
+    }
+
+    fn manifest_entries(&self, snapshot_id: &str) -> StoreResult<Vec<ManifestEntryRecord>> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT
+                me.path,
+                me.entry_kind,
+                me.blob_id,
+                b.object_ref,
+                me.size_bytes,
+                me.policy_decision,
+                me.policy_reason
+            FROM manifest_entries me
+            LEFT JOIN blobs b ON b.id = me.blob_id
+            WHERE me.snapshot_id = ?1
+            ORDER BY me.id ASC
+            "#,
+        )?;
+
+        let rows = statement.query_map(params![snapshot_id], |row| {
+            Ok(RawManifestEntryRecord {
+                relative_path: PathBuf::from(row.get::<_, String>(0)?),
+                kind: row.get(1)?,
+                blob_id: row.get(2)?,
+                object_ref: row.get(3)?,
+                size_bytes: row.get(4)?,
+                policy_decision: row.get(5)?,
+                policy_reason: row.get(6)?,
+            })
+        })?;
+
+        rows.map(|row| {
+            let record = row?;
+            let blob_id = record
+                .blob_id
+                .map(BlobId::from_blake3_hex)
+                .transpose()
+                .map_err(|error| invalid_domain_value("blob id", error))?;
+
+            Ok(ManifestEntryRecord {
+                relative_path: record.relative_path,
+                kind: kind_from_store(&record.kind)?,
+                size_bytes: record.size_bytes,
+                blob_id,
+                object_ref: record.object_ref,
+                policy_decision: policy_from_store(record.policy_decision, record.policy_reason)?,
+            })
+        })
+        .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +580,139 @@ pub struct SnapshotRecord {
     pub reason: String,
     pub manifest_entry_count: u64,
     pub total_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSnapshotDraft<'a> {
+    pub project: NewProject<'a>,
+    pub snapshot: NewSnapshot<'a>,
+    pub entries: Vec<NewSnapshotManifestEntry<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSnapshotManifestEntry<'a> {
+    pub relative_path: &'a Path,
+    pub kind: ManifestEntryKind,
+    pub size_bytes: u64,
+    pub blob_id: Option<&'a BlobId>,
+    pub object_ref: Option<&'a str>,
+    pub policy_decision: &'a PolicyDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotListRecord {
+    pub id: String,
+    pub project_id: String,
+    pub project_root_path: String,
+    pub project_display_name: String,
+    pub created_at: String,
+    pub manifest_entry_count: u64,
+    pub total_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedSnapshot {
+    pub project: ProjectRecord,
+    pub snapshot: SnapshotRecord,
+    pub entries: Vec<ManifestEntryRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestEntryRecord {
+    pub relative_path: PathBuf,
+    pub kind: ManifestEntryKind,
+    pub size_bytes: u64,
+    pub blob_id: Option<BlobId>,
+    pub object_ref: Option<String>,
+    pub policy_decision: PolicyDecision,
+}
+
+#[derive(Debug)]
+struct RawManifestEntryRecord {
+    relative_path: PathBuf,
+    kind: String,
+    size_bytes: u64,
+    blob_id: Option<String>,
+    object_ref: Option<String>,
+    policy_decision: String,
+    policy_reason: Option<String>,
+}
+
+pub fn local_project_id(root_path: impl AsRef<Path>) -> ProjectId {
+    let path = root_path.as_ref();
+    let identity = path_to_store_string(path);
+    let digest = blake3::hash(identity.as_bytes()).to_hex().to_string();
+    ProjectId::new(format!("project-local-b3-{digest}"))
+        .expect("local project ids are generated from a non-empty prefix")
+}
+
+pub fn path_to_store_string(path: &Path) -> String {
+    let parts = path
+        .components()
+        .map(|component| match component {
+            Component::Prefix(prefix) => prefix.as_os_str().to_string_lossy().into_owned(),
+            Component::RootDir => String::new(),
+            Component::Normal(part) => part.to_string_lossy().into_owned(),
+            Component::CurDir => ".".to_string(),
+            Component::ParentDir => "..".to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn kind_to_store(kind: &ManifestEntryKind) -> &'static str {
+    match kind {
+        ManifestEntryKind::File => "file",
+        ManifestEntryKind::Directory => "directory",
+        ManifestEntryKind::Symlink => "symlink",
+        ManifestEntryKind::Unsupported => "unsupported",
+    }
+}
+
+fn kind_from_store(value: &str) -> StoreResult<ManifestEntryKind> {
+    match value {
+        "file" => Ok(ManifestEntryKind::File),
+        "directory" => Ok(ManifestEntryKind::Directory),
+        "symlink" => Ok(ManifestEntryKind::Symlink),
+        "unsupported" => Ok(ManifestEntryKind::Unsupported),
+        _ => Err(StoreError::InvalidStoredValue(format!(
+            "unknown manifest entry kind: {value}"
+        ))),
+    }
+}
+
+fn policy_to_store(policy: &PolicyDecision) -> (&'static str, Option<&str>) {
+    match policy {
+        PolicyDecision::Include => ("include", None),
+        PolicyDecision::Exclude { reason } => ("exclude", Some(reason.as_str())),
+        PolicyDecision::RequiresUserDecision { reason } => {
+            ("requires_user_decision", Some(reason.as_str()))
+        }
+    }
+}
+
+fn policy_from_store(decision: String, reason: Option<String>) -> StoreResult<PolicyDecision> {
+    match decision.as_str() {
+        "include" => Ok(PolicyDecision::Include),
+        "exclude" => Ok(PolicyDecision::Exclude {
+            reason: reason.unwrap_or_default(),
+        }),
+        "requires_user_decision" => Ok(PolicyDecision::RequiresUserDecision {
+            reason: reason.unwrap_or_default(),
+        }),
+        _ => Err(StoreError::InvalidStoredValue(format!(
+            "unknown policy decision: {decision}"
+        ))),
+    }
+}
+
+fn invalid_domain_value(field: &str, error: DomainIdError) -> StoreError {
+    StoreError::InvalidStoredValue(format!("invalid stored {field}: {error}"))
 }
 
 const INITIAL_SCHEMA: &str = r#"
@@ -412,6 +834,64 @@ PRAGMA user_version = 1;
 COMMIT;
 "#;
 
+const MIGRATION_2_MANIFEST_UNSUPPORTED: &str = r#"
+BEGIN;
+
+CREATE TABLE manifest_entries_v2 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    entry_kind TEXT NOT NULL CHECK (entry_kind IN ('file', 'directory', 'symlink', 'unsupported')),
+    blob_id TEXT REFERENCES blobs(id) ON DELETE RESTRICT,
+    target_path TEXT,
+    file_mode INTEGER,
+    size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+    policy_decision TEXT NOT NULL CHECK (
+        policy_decision IN ('include', 'exclude', 'requires_user_decision')
+    ),
+    policy_reason TEXT,
+    UNIQUE (snapshot_id, path)
+);
+
+INSERT INTO manifest_entries_v2 (
+    id,
+    snapshot_id,
+    path,
+    entry_kind,
+    blob_id,
+    target_path,
+    file_mode,
+    size_bytes,
+    policy_decision,
+    policy_reason
+)
+SELECT
+    id,
+    snapshot_id,
+    path,
+    entry_kind,
+    blob_id,
+    target_path,
+    file_mode,
+    size_bytes,
+    policy_decision,
+    policy_reason
+FROM manifest_entries;
+
+DROP TABLE manifest_entries;
+ALTER TABLE manifest_entries_v2 RENAME TO manifest_entries;
+
+CREATE INDEX IF NOT EXISTS idx_manifest_entries_snapshot_path
+    ON manifest_entries(snapshot_id, path);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (2, 'manifest_entries_support_unsupported_kind');
+
+PRAGMA user_version = 2;
+
+COMMIT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +985,132 @@ mod tests {
     }
 
     #[test]
+    fn draft_snapshot_persistence_round_trips_manifest_metadata() {
+        let mut store = migrated_store();
+        let blob_id = blob_id_for(b"hello");
+        let include = PolicyDecision::Include;
+        let src_path = Path::new("src");
+        let file_path = Path::new("src/main.rs");
+        let entries = vec![
+            NewSnapshotManifestEntry {
+                relative_path: src_path,
+                kind: ManifestEntryKind::Directory,
+                size_bytes: 0,
+                blob_id: None,
+                object_ref: None,
+                policy_decision: &include,
+            },
+            NewSnapshotManifestEntry {
+                relative_path: file_path,
+                kind: ManifestEntryKind::File,
+                size_bytes: 5,
+                blob_id: Some(&blob_id),
+                object_ref: Some("blobs/b3/ea/8f/object"),
+                policy_decision: &include,
+            },
+        ];
+
+        store
+            .persist_draft_snapshot(&draft("snapshot-1", &entries))
+            .expect("draft persists");
+
+        let persisted = store
+            .snapshot_with_entries("snapshot-1")
+            .expect("snapshot loads")
+            .expect("snapshot exists");
+
+        assert_eq!(persisted.project.root_path, "/workspace/devbox");
+        assert_eq!(persisted.snapshot.manifest_entry_count, 2);
+        assert_eq!(persisted.snapshot.total_size_bytes, 5);
+        assert_eq!(
+            persisted
+                .entries
+                .iter()
+                .map(|entry| entry.relative_path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("src"), PathBuf::from("src/main.rs")]
+        );
+        assert_eq!(persisted.entries[1].blob_id, Some(blob_id));
+        assert_eq!(
+            persisted.entries[1].object_ref.as_deref(),
+            Some("blobs/b3/ea/8f/object")
+        );
+    }
+
+    #[test]
+    fn policy_exclusions_and_deferred_entries_round_trip() {
+        let mut store = migrated_store();
+        let excluded = PolicyDecision::Exclude {
+            reason: "generated dependency directory".to_string(),
+        };
+        let deferred = PolicyDecision::RequiresUserDecision {
+            reason: "symlink capture is deferred until restore safety rules exist".to_string(),
+        };
+        let node_modules_path = Path::new("node_modules");
+        let symlink_path = Path::new("linked.txt");
+        let entries = vec![
+            NewSnapshotManifestEntry {
+                relative_path: node_modules_path,
+                kind: ManifestEntryKind::Directory,
+                size_bytes: 0,
+                blob_id: None,
+                object_ref: None,
+                policy_decision: &excluded,
+            },
+            NewSnapshotManifestEntry {
+                relative_path: symlink_path,
+                kind: ManifestEntryKind::Symlink,
+                size_bytes: 0,
+                blob_id: None,
+                object_ref: None,
+                policy_decision: &deferred,
+            },
+        ];
+
+        store
+            .persist_draft_snapshot(&draft("snapshot-policy", &entries))
+            .expect("draft persists");
+
+        let persisted = store
+            .snapshot_with_entries("snapshot-policy")
+            .expect("snapshot loads")
+            .expect("snapshot exists");
+
+        assert_eq!(persisted.entries[0].policy_decision, excluded);
+        assert_eq!(persisted.entries[1].policy_decision, deferred);
+
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "policy_evaluations"), 2);
+    }
+
+    #[test]
+    fn duplicate_snapshot_id_is_reported_clearly() {
+        let mut store = migrated_store();
+        let include = PolicyDecision::Include;
+        let readme_path = Path::new("README.md");
+        let entries = vec![NewSnapshotManifestEntry {
+            relative_path: readme_path,
+            kind: ManifestEntryKind::File,
+            size_bytes: 0,
+            blob_id: None,
+            object_ref: None,
+            policy_decision: &include,
+        }];
+
+        store
+            .persist_draft_snapshot(&draft("snapshot-duplicate", &entries))
+            .expect("first draft persists");
+        let error = store
+            .persist_draft_snapshot(&draft("snapshot-duplicate", &entries))
+            .expect_err("duplicate snapshot id fails");
+
+        assert_eq!(
+            error.to_string(),
+            "snapshot already exists: snapshot-duplicate"
+        );
+    }
+
+    #[test]
     fn foreign_keys_are_enforced() {
         let store = migrated_store();
 
@@ -531,6 +1137,36 @@ mod tests {
         let store = Store::open_in_memory().expect("store opens");
         store.apply_migrations().expect("migrations apply");
         store
+    }
+
+    fn draft<'a>(
+        snapshot_id: &'a str,
+        entries: &'a [NewSnapshotManifestEntry<'a>],
+    ) -> NewSnapshotDraft<'a> {
+        NewSnapshotDraft {
+            project: NewProject {
+                id: "project-1",
+                root_path: "/workspace/devbox",
+                kind: "Rust",
+                display_name: "devbox",
+                discovered_at: "2026-06-18T10:00:00Z",
+            },
+            snapshot: NewSnapshot {
+                id: snapshot_id,
+                project_id: "project-1",
+                parent_snapshot_id: None,
+                created_at: "2026-06-18T10:01:00Z",
+                reason: "manual",
+                manifest_entry_count: entries.len() as u64,
+                total_size_bytes: entries.iter().map(|entry| entry.size_bytes).sum(),
+            },
+            entries: entries.to_vec(),
+        }
+    }
+
+    fn blob_id_for(content: &[u8]) -> BlobId {
+        BlobId::from_blake3_hex(blake3::hash(content).to_hex().to_string())
+            .expect("BLAKE3 returns valid blob ids")
     }
 
     fn count(summary: &SchemaSummary, table: &str) -> u64 {

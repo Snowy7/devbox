@@ -1,6 +1,6 @@
 # Local Metadata Store
 
-This slice introduces the Phase 0 local storage boundary in `crates/devbox-store`.
+This document describes the Phase 0 local storage boundary in `crates/devbox-store`.
 
 The store is intentionally a metadata database, not a file-content database. It gives the daemon a transactional place to record what Devbox knows about projects, snapshots, manifests, policy decisions, and restore attempts while keeping actual source bytes in a local content-addressed cache.
 
@@ -31,9 +31,31 @@ SQLite rows may reference cache objects, but SQLite must not store project files
 
 The SQLite `blobs.object_ref` column should store a stable reference to this cache object, such as `blobs/b3/aa/bb/<digest>`, plus metadata like hash algorithm and byte length. SQLite owns the metadata row lifecycle; the blob cache owns bytes and paths.
 
+## Snapshot Persistence Flow
+
+Local snapshot creation now crosses three deliberately separate boundaries:
+
+1. `devbox-snapshot` walks the project root, evaluates default policy, writes included file bytes into `BlobCache`, and returns an in-memory draft manifest.
+2. `BlobCache` stores file bytes under content-addressed BLAKE3 object paths. It does not open or mutate SQLite.
+3. `devbox-store` persists the draft's metadata into SQLite: project identity, snapshot identity, creation time, summary counts and bytes, manifest entries, blob ids and object refs for included files, and policy rows for excluded or deferred entries.
+
+SQLite stores metadata and references only. It does not store raw project file bytes. Repeated writes of the same file content continue to converge on the same blob-cache object, while the snapshot row records which object ref a manifest entry used.
+
+The CLI surface for the persisted path is:
+
+```text
+devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
+devbox snapshot list --db <DB_PATH>
+devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>
+```
+
+`devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>` remains non-persisting. Both dry-run and persisted creation reject a blob cache that sits inside the snapshot root before the cache can create directories.
+
+Persisting the same stable snapshot id twice currently returns a duplicate snapshot error. The project row is upserted so the local root metadata can be refreshed without rewriting existing snapshot rows.
+
 ## Migration Rules
 
-`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `1`.
+`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `2`.
 
 The initial migration creates:
 
@@ -50,13 +72,12 @@ The initial migration creates:
 
 `PRAGMA user_version` is the quick schema version check. `schema_migrations` records the applied migration name so later migrations can remain explicit and auditable.
 
+Schema version `2` rebuilds `manifest_entries` with the same columns and constraints, but expands `entry_kind` to include `unsupported`. That keeps SQLite aligned with the domain manifest model used by the builder for deferred filesystem node types.
+
 ## Deferred
 
 This boundary does not implement:
 
-- recording blob metadata rows automatically during cache writes
-- snapshot creation
-- translating draft snapshot manifests into SQLite rows
 - restore planning or materialization
 - filesystem watching
 - cloud sync
