@@ -350,7 +350,9 @@ pub trait MetadataStore {
 pub struct InMemoryMetadataStore {
     accounts: BTreeMap<String, AccountRecord>,
     account_proofs: BTreeMap<String, AccountOwnershipProof>,
+    account_provider_index: BTreeMap<(String, String, String), String>,
     account_sessions: BTreeMap<String, AccountSession>,
+    account_session_hash_index: BTreeMap<String, String>,
     devices: BTreeMap<(String, String), DeviceRecord>,
     projects: BTreeMap<(String, String), ProjectRecord>,
     snapshots: BTreeMap<(String, String, String), PublishedSnapshotRecord>,
@@ -363,6 +365,18 @@ impl MetadataStore for InMemoryMetadataStore {
         proof: AccountOwnershipProof,
     ) -> MetadataResult<AccountRecord> {
         validate_account_ownership_proof(&proof, 0).map_err(auth_proof_error)?;
+        let provider_key = provider_tuple_key(
+            &proof.provider_kind,
+            &proof.provider_issuer,
+            &proof.provider_subject,
+        );
+        if let Some(existing_account_id) = self.account_provider_index.get(&provider_key) {
+            if existing_account_id != &proof.account_id {
+                return Err(MetadataError::InvalidRequest(
+                    "provider subject is already linked to another account".to_string(),
+                ));
+            }
+        }
         let display_name = proof
             .verified_email
             .as_deref()
@@ -380,8 +394,17 @@ impl MetadataStore for InMemoryMetadataStore {
             });
         account.display_name = display_name;
         account.updated_at = proof.proof_issued_at.clone();
+        if let Some(previous) = self.account_proofs.get(&proof.account_id) {
+            self.account_provider_index.remove(&provider_tuple_key(
+                &previous.provider_kind,
+                &previous.provider_issuer,
+                &previous.provider_subject,
+            ));
+        }
         self.account_proofs
             .insert(proof.account_id.clone(), proof.clone());
+        self.account_provider_index
+            .insert(provider_key, proof.account_id.clone());
         Ok(account.clone())
     }
 
@@ -392,14 +415,13 @@ impl MetadataStore for InMemoryMetadataStore {
         provider_subject: &str,
     ) -> MetadataResult<Option<AccountRecord>> {
         let account_id = self
-            .account_proofs
-            .values()
-            .find(|proof| {
-                proof.provider_kind == provider_kind
-                    && proof.provider_issuer == provider_issuer
-                    && proof.provider_subject == provider_subject
-            })
-            .map(|proof| proof.account_id.clone());
+            .account_provider_index
+            .get(&provider_tuple_key(
+                provider_kind,
+                provider_issuer,
+                provider_subject,
+            ))
+            .cloned();
         Ok(account_id.and_then(|account_id| self.accounts.get(&account_id).cloned()))
     }
 
@@ -408,13 +430,36 @@ impl MetadataStore for InMemoryMetadataStore {
         session: AccountSession,
     ) -> MetadataResult<AccountSession> {
         ensure_session_hash(&session)?;
-        if !self.account_proofs.contains_key(&session.account_id) {
+        let provider_key = provider_tuple_key(
+            &session.provider_kind,
+            &session.provider_issuer,
+            &session.provider_subject,
+        );
+        if self.account_provider_index.get(&provider_key) != Some(&session.account_id) {
             return Err(MetadataError::InvalidRequest(
                 "account ownership proof must be registered before session".to_string(),
             ));
         }
+        if let Some(existing_session_id) = self
+            .account_session_hash_index
+            .get(&session.session_token_hash_hex)
+        {
+            if existing_session_id != &session.session_id {
+                return Err(MetadataError::InvalidRequest(
+                    "account session token hash is already registered".to_string(),
+                ));
+            }
+        }
+        if let Some(previous) = self.account_sessions.get(&session.session_id) {
+            self.account_session_hash_index
+                .remove(&previous.session_token_hash_hex);
+        }
         self.account_sessions
             .insert(session.session_id.clone(), session.clone());
+        self.account_session_hash_index.insert(
+            session.session_token_hash_hex.clone(),
+            session.session_id.clone(),
+        );
         Ok(session)
     }
 
@@ -427,9 +472,9 @@ impl MetadataStore for InMemoryMetadataStore {
         session_token_hash_hex: &str,
     ) -> MetadataResult<Option<AccountSession>> {
         Ok(self
-            .account_sessions
-            .values()
-            .find(|session| session.session_token_hash_hex == session_token_hash_hex)
+            .account_session_hash_index
+            .get(session_token_hash_hex)
+            .and_then(|session_id| self.account_sessions.get(session_id))
             .cloned())
     }
 
@@ -447,9 +492,7 @@ impl MetadataStore for InMemoryMetadataStore {
                 id: session_id.to_string(),
             })?;
         let revoked = revoke_auth_account_session(&session, revoked_at).map_err(auth_error)?;
-        self.account_sessions
-            .insert(session_id.to_string(), revoked.clone());
-        Ok(revoked)
+        self.upsert_account_session(revoked)
     }
 
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord> {
@@ -1552,6 +1595,18 @@ fn ensure_session_hash(session: &AccountSession) -> MetadataResult<()> {
     Ok(())
 }
 
+fn provider_tuple_key(
+    provider_kind: &str,
+    provider_issuer: &str,
+    provider_subject: &str,
+) -> (String, String, String) {
+    (
+        provider_kind.to_string(),
+        provider_issuer.to_string(),
+        provider_subject.to_string(),
+    )
+}
+
 fn auth_error(error: devbox_auth::AuthError) -> MetadataError {
     MetadataError::InvalidAccountSession(error.to_string())
 }
@@ -1900,6 +1955,96 @@ mod tests {
                 .expect("session authenticates")
                 .account_id,
             ACCOUNT
+        );
+    }
+
+    #[test]
+    fn in_memory_account_proof_rejects_duplicate_provider_tuple() {
+        let mut store = InMemoryMetadataStore::default();
+        let proof = account_proof();
+        store
+            .upsert_account_ownership_proof(proof.clone())
+            .expect("first proof upserts");
+        let duplicate_provider = AccountOwnershipProof {
+            account_id: "account-other".to_string(),
+            ..proof
+        };
+
+        let error = store
+            .upsert_account_ownership_proof(duplicate_provider)
+            .expect_err("duplicate provider tuple is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "provider subject is already linked to another account"
+        );
+    }
+
+    #[test]
+    fn in_memory_account_session_requires_matching_provider_tuple() {
+        let raw_token = "raw-hosted-session-token";
+        let proof = account_proof();
+        let mut session = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        session.provider_subject = "unproven-provider-subject".to_string();
+        let mut store = InMemoryMetadataStore::default();
+        store
+            .upsert_account_ownership_proof(proof)
+            .expect("proof upserts");
+
+        let error = store
+            .upsert_account_session(session)
+            .expect_err("session provider tuple must match proof");
+
+        assert_eq!(
+            error.to_string(),
+            "account ownership proof must be registered before session"
+        );
+    }
+
+    #[test]
+    fn in_memory_account_session_rejects_duplicate_token_hash() {
+        let raw_token = "raw-hosted-session-token";
+        let proof = account_proof();
+        let first = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("first session creates");
+        let second = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:02:00Z",
+            102,
+            600,
+        )
+        .expect("second session creates");
+        assert_ne!(first.session_id, second.session_id);
+        assert_eq!(first.session_token_hash_hex, second.session_token_hash_hex);
+        let mut store = InMemoryMetadataStore::default();
+        store
+            .upsert_account_ownership_proof(proof)
+            .expect("proof upserts");
+        store
+            .upsert_account_session(first)
+            .expect("first session upserts");
+
+        let error = store
+            .upsert_account_session(second)
+            .expect_err("duplicate token hash is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "account session token hash is already registered"
         );
     }
 

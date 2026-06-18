@@ -5,9 +5,9 @@ mod blob_cache;
 pub use blob_cache::{BlobCache, BlobCacheError, BlobCacheResult, BlobRef};
 
 use devbox_auth::{
-    hash_session_token_hex, revoke_trusted_device, AccountOwnershipProof, AccountSession,
-    AuthSession, DeviceProjectCursor, DeviceTrustRecord, KeyEnvelope, PairingApproval,
-    PairingInvitation,
+    hash_session_token_hex, now_unix_seconds, revoke_trusted_device,
+    validate_account_ownership_proof, AccountOwnershipProof, AccountSession, AuthSession,
+    DeviceProjectCursor, DeviceTrustRecord, KeyEnvelope, PairingApproval, PairingInvitation,
 };
 use devbox_conflict::{ConflictSummary, PathComparisonState};
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision, ProjectId};
@@ -518,6 +518,8 @@ impl Store {
     }
 
     pub fn upsert_account_ownership_proof(&self, proof: &AccountOwnershipProof) -> StoreResult<()> {
+        validate_account_ownership_proof(proof, now_unix_seconds())
+            .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
         self.conn.execute(
             r#"
             INSERT INTO account_ownership_proofs (
@@ -620,6 +622,7 @@ impl Store {
     }
 
     pub fn upsert_account_session(&self, session: &AccountSession) -> StoreResult<()> {
+        ensure_session_hash(session)?;
         self.conn.execute(
             r#"
             INSERT INTO account_sessions (
@@ -2237,6 +2240,21 @@ fn account_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account
     })
 }
 
+fn ensure_session_hash(session: &AccountSession) -> StoreResult<()> {
+    if session.session_token_hash_hex.len() != 64
+        || session
+            .session_token_hash_hex
+            .as_bytes()
+            .iter()
+            .any(|byte| !byte.is_ascii_hexdigit())
+    {
+        return Err(StoreError::InvalidStoredValue(
+            "account session token hash must be 64 hex characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn conflict_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRecord> {
     let status: String = row.get(5)?;
     Ok(ConflictRecord {
@@ -3082,7 +3100,7 @@ mod tests {
                     verified_email: Some("user@example.com"),
                     verified_domain: Some("example.com"),
                     proof_issued_at: "2026-06-18T10:00:00Z",
-                    proof_expires_at_unix: 1_000,
+                    proof_expires_at_unix: now_unix_seconds() + 600,
                 },
             )
             .expect("proof creates");
@@ -3150,6 +3168,100 @@ mod tests {
     }
 
     #[test]
+    fn production_account_proof_validation_runs_at_local_store_boundary() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let valid =
+            devbox_auth::create_account_ownership_proof(devbox_auth::AccountOwnershipProofInput {
+                account_id: &identity.account_id,
+                provider_kind: "oidc-dev",
+                provider_issuer: "https://issuer.devbox.local",
+                provider_subject: "oidc-subject-123",
+                verified_email: Some("user@example.com"),
+                verified_domain: None,
+                proof_issued_at: "2026-06-18T10:00:00Z",
+                proof_expires_at_unix: now_unix_seconds() + 600,
+            })
+            .expect("proof creates");
+
+        let mut secret_like = valid.clone();
+        secret_like.provider_subject = "provider-secret-should-not-persist".to_string();
+        let error = store
+            .upsert_account_ownership_proof(&secret_like)
+            .expect_err("secret-like provider material is rejected");
+        assert!(error
+            .to_string()
+            .contains("value must not contain secret-looking material"));
+
+        let mut empty_verified_evidence = valid.clone();
+        empty_verified_evidence.verified_email = Some("   ".to_string());
+        empty_verified_evidence.verified_domain = None;
+        let error = store
+            .upsert_account_ownership_proof(&empty_verified_evidence)
+            .expect_err("empty verified evidence is rejected");
+        assert!(error.to_string().contains("value must not be empty"));
+
+        let mut expired = valid;
+        expired.proof_expires_at_unix = 1;
+        let error = store
+            .upsert_account_ownership_proof(&expired)
+            .expect_err("expired proof is rejected");
+        assert!(error.to_string().contains("ownership proof is expired"));
+    }
+
+    #[test]
+    fn production_account_session_rejects_raw_64_character_token_as_hash() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let raw_token = format!("raw-token-{}", "x".repeat(54));
+        assert_eq!(raw_token.len(), 64);
+        let proof =
+            devbox_auth::create_account_ownership_proof(devbox_auth::AccountOwnershipProofInput {
+                account_id: &identity.account_id,
+                provider_kind: "oidc-dev",
+                provider_issuer: "https://issuer.devbox.local",
+                provider_subject: "oidc-subject-123",
+                verified_email: Some("user@example.com"),
+                verified_domain: None,
+                proof_issued_at: "2026-06-18T10:00:00Z",
+                proof_expires_at_unix: now_unix_seconds() + 600,
+            })
+            .expect("proof creates");
+        store
+            .upsert_account_ownership_proof(&proof)
+            .expect("proof persists");
+        let mut session = devbox_auth::create_account_session(
+            &proof,
+            &raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        session.session_token_hash_hex = raw_token.clone();
+
+        let error = store
+            .upsert_account_session(&session)
+            .expect_err("raw token-shaped value is rejected as hash");
+        assert_eq!(
+            error.to_string(),
+            "account session token hash must be 64 hex characters"
+        );
+        assert!(store
+            .account_session(&session.session_id)
+            .expect("session lookup works")
+            .is_none());
+    }
+
+    #[test]
     fn production_account_session_revocation_persists() {
         let mut store = migrated_store();
         let identity = store
@@ -3167,7 +3279,7 @@ mod tests {
                 verified_email: Some("user@example.com"),
                 verified_domain: None,
                 proof_issued_at: "2026-06-18T10:00:00Z",
-                proof_expires_at_unix: 1_000,
+                proof_expires_at_unix: now_unix_seconds() + 600,
             })
             .expect("proof creates");
         store

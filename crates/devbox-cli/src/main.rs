@@ -281,7 +281,7 @@ struct DbOnlyArgs {
     db_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct AuthMockVerifiedBootstrapArgs {
     db_path: String,
     provider_kind: String,
@@ -294,10 +294,35 @@ struct AuthMockVerifiedBootstrapArgs {
     proof_ttl_seconds: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct AuthProofCheckArgs {
     db_path: String,
     session_token: String,
+}
+
+impl std::fmt::Debug for AuthMockVerifiedBootstrapArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthMockVerifiedBootstrapArgs")
+            .field("db_path", &self.db_path)
+            .field("provider_kind", &self.provider_kind)
+            .field("provider_issuer", &self.provider_issuer)
+            .field("provider_subject", &self.provider_subject)
+            .field("verified_email", &self.verified_email)
+            .field("verified_domain", &self.verified_domain)
+            .field("session_token", &"<redacted>")
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("proof_ttl_seconds", &self.proof_ttl_seconds)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AuthProofCheckArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthProofCheckArgs")
+            .field("db_path", &self.db_path)
+            .field("session_token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4125,6 +4150,21 @@ mod tests {
         assert_eq!(parsed.verified_email.as_deref(), Some("user@example.com"));
         assert_eq!(parsed.session_token, "raw-token");
         assert_eq!(parsed.ttl_seconds, 60);
+
+        let formatted = format!("{parsed:?}");
+        assert!(!formatted.contains("raw-token"));
+        assert!(formatted.contains("<redacted>"));
+
+        let proof_check = parse_auth_proof_check_args(&[
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--session-token".to_string(),
+            "raw-token".to_string(),
+        ])
+        .expect("proof check args parse");
+        let formatted = format!("{proof_check:?}");
+        assert!(!formatted.contains("raw-token"));
+        assert!(formatted.contains("<redacted>"));
     }
 
     #[test]
