@@ -107,9 +107,12 @@ devbox snapshot restore --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --to <TARGET
 ## Hosted Metadata Opt-In
 
 For dev/test wiring, add `--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>` to publish.
-For import/materialize, also pass `--metadata-project <PROJECT_ID>` so the manifest object key is
-looked up from project-scoped hosted metadata instead of derived locally. Cursor advancement uses
-hosted compare-and-set first; if the hosted cursor is stale, the local cursor remains unchanged.
+For import/materialize, also pass `--metadata-project <PROJECT_ID>` and either
+`--metadata-account <ACCOUNT_ID>` or the existing `--mock-key-source-db <PUBLISHER_DB>` local/mock
+trust bootstrap. That account/project scope lets the manifest object key be looked up from
+publisher-scoped hosted metadata instead of derived locally. Cursor advancement uses hosted
+compare-and-set first under the hosted account scope and receiver device id; if the hosted cursor is
+stale, the local cursor remains unchanged.
 
 ## Deferred
 

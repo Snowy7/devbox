@@ -39,8 +39,12 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
 - `devbox sync publish-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>`
-- `devbox sync import-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID>`
-- `devbox sync materialize ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID>`
+- `devbox sync import-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --mock-key-source-db <PUBLISHER_DB>`
+- `devbox sync materialize ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --mock-key-source-db <PUBLISHER_DB>`
+
+For import/materialize, the hosted metadata account scope is either passed explicitly with
+`--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
+local/mock trust bootstrap. Production account proof remains deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

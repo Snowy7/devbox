@@ -16,11 +16,14 @@ Import and materialize also require:
 
 ```text
 --metadata-project <PROJECT_ID>
+--metadata-account <ACCOUNT_ID>  # or derive from --mock-key-source-db <PUBLISHER_DB>
 ```
 
-That project id lets the receiver discover the manifest object key from hosted metadata by
-`(account_id, project_id, snapshot_id)` before decrypting the encrypted bundle. The default path
-remains local/mock only and still derives the manifest object key locally.
+That account/project scope lets the receiver discover the manifest object key from hosted metadata
+by `(account_id, project_id, snapshot_id)` before decrypting the encrypted bundle. In the current
+mock-dev CLI path, `--mock-key-source-db <PUBLISHER_DB>` can provide the publisher account id for
+the same local trust bootstrap that provides the decryption key. The default path remains local/mock
+only and still derives the manifest object key locally.
 
 ## Publish Semantics
 
@@ -39,13 +42,17 @@ raw sync keys, device keys, R2 secrets, object credentials, or manifest contents
 Metadata-enabled import/materialize:
 
 - upserts the receiver mock-dev device
-- looks up the published snapshot metadata by project and snapshot id
+- looks up the published snapshot metadata by hosted account, project, and snapshot id
 - downloads/decrypts the manifest from the hosted metadata object key
 - keeps local preflight conflict refusal before blob download/materialization
 - advances the hosted device/project cursor with compare-and-set before writing the local cursor
 
 If hosted compare-and-set returns a stale cursor conflict, the local cursor is not advanced. This
 keeps a receiver from blindly overwriting newer server-side cursor state.
+
+The hosted cursor uses the hosted/publisher account scope and the receiving device id. The local
+cursor remains stored under the receiver DB's local account/device ids so the receiver's local state
+does not pretend to own the publisher account.
 
 ## CLI Boundary
 
