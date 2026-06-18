@@ -19,7 +19,9 @@ This repository currently contains the product foundation and MVP planning artif
 - Local blob cache: content-addressed files on disk
 - Local change feed: SQLite-backed pending file operations derived from the latest snapshot
 - Backend: Rust API, Postgres
-- Remote blob storage: Cloudflare R2 behind an S3-compatible interface
+- Remote blob storage: Cloudflare R2 behind an S3-compatible interface; provider foundation exists
+  for R2/S3/MinIO-compatible encrypted blobs, while hosted metadata and managed credentials remain
+  later Phase 1 work
 
 ## Local MVP Surface
 

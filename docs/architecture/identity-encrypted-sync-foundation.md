@@ -6,6 +6,7 @@ This slice introduces the first Phase 1 sync foundation after the local watcher 
 - generated local key material for encrypted object transport
 - immutable remote blob provider interface
 - local filesystem remote provider for tests and manual smoke
+- S3-compatible remote provider for R2, AWS S3, and MinIO-style object storage
 - encrypted upload/download of existing local blob-cache objects
 
 ## Boundary
@@ -54,8 +55,12 @@ device rows. Store tests explicitly insert multiple non-local devices for one ac
 
 The local filesystem provider stores objects under a provider-owned `objects/` directory and rejects
 unsafe object keys such as absolute paths, parent traversal, empty path segments, and Windows
-separator escapes. It stands in for future R2/S3-compatible providers without requiring real
-credentials or network services.
+separator escapes. It remains the default no-network provider for tests and local smoke runs.
+
+The S3-compatible provider now uses the same object-key contract with optional safe prefixes,
+path-style endpoint/bucket URLs, AWS Signature V4, and credential values loaded only from
+environment variables. CLI output prints endpoint, bucket, prefix, and env variable names, but not
+raw access keys, secret keys, or session tokens.
 
 Payload encryption uses XChaCha20-Poly1305 with a random 24-byte nonce per object write. The object
 key is authenticated as associated data. Remote provider bytes are an encrypted envelope containing
@@ -78,5 +83,5 @@ encrypted object to the remote provider. Download reads the encrypted remote obj
 verifies the expected BLAKE3 blob id, and writes the plaintext back into a local blob cache.
 
 Download targets the blob cache, not a project directory. Second-device project materialization,
-now has a local/mock foundation in `devbox-materialize`; production key exchange, conflict handling,
-hosted metadata, real cloud object credentials, and UI restore flows remain later Phase 1 work.
+now has a local/mock foundation in `devbox-materialize`; production key exchange, hosted metadata,
+managed cloud credential provisioning, conflict UI, and UI restore flows remain later Phase 1 work.

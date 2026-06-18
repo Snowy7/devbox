@@ -13,10 +13,10 @@ This slice completes the first local/mock Phase 1 vertical path for second-devic
 
 This is still a local/mock foundation.
 
-It does not implement production account ownership proof, hosted metadata, real R2/S3 credentials,
-server-side cursors, production pairing UX, automatic conflict resolution, or Electron UI. Local
-preflight now refuses divergent local/mock import/materialize paths and persists local conflict
-records, but it does not resolve or merge them. The manual smoke path can use
+It does not implement production account ownership proof, hosted metadata, managed R2/S3 credential
+provisioning, server-side cursors, production pairing UX, automatic conflict resolution, or
+Electron UI. Local preflight now refuses divergent local/mock import/materialize paths and persists
+local conflict records, but it does not resolve or merge them. The manual smoke path can use
 `--mock-key-source-db` so a receiving local context can decrypt a publisher's locally encrypted
 objects without printing raw key material. That flag is a test/dev trust bootstrap, not a
 production key exchange.
@@ -56,8 +56,8 @@ Secret-blocked files are also not materialized as included content. They persist
 bundle as manifest policy entries with no included blob reference, so publish/import can explain the
 policy decision without uploading or restoring the blocked file bytes.
 
-Object names are deterministic and safe for the local filesystem provider. They are intentionally
-not a final cloud layout.
+Object names are deterministic and safe for both the local filesystem provider and the
+S3-compatible provider. They are a foundation layout, not the final hosted metadata indexing model.
 
 ## Import And Cursor
 
@@ -109,7 +109,7 @@ Remaining Phase 1 work includes:
 
 - production account ownership and key exchange
 - hosted metadata service and server-side cursor reconciliation
-- real R2/S3 credentials and final object layout
+- managed R2/S3 credential provisioning, rotation, and hosted object indexing
 - production pairing UX, recovery, and rotation
 - automatic conflict merge/apply resolution and user-facing conflict flows
 - minimal tray/Electron continuation UI

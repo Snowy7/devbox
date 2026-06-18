@@ -1,0 +1,107 @@
+# S3-Compatible Blob Provider Foundation
+
+This Phase 1 slice adds a production-shaped encrypted object remote for the existing sync pipeline.
+`devbox-sync` can now target S3-compatible object storage such as Cloudflare R2, AWS S3, or MinIO
+behind the same `RemoteBlobProvider` boundary used by the local filesystem provider.
+
+## Boundary
+
+This is object transport only.
+
+It does not add production sign-in, hosted metadata, server-side device/project cursors, managed R2
+credential provisioning, production pairing UX, Electron UI, or conflict resolution. Clients still
+need a trusted local identity and key material before encrypted objects can be published or read.
+Metadata discovery and cursor arbitration remain later Phase 1 service work.
+
+## Provider Model
+
+The S3-compatible provider implements the existing remote blob contract:
+
+- `put`
+- `get`
+- `head`
+- immutable object keys
+- idempotent same-byte uploads
+- collision refusal for different bytes at an existing key
+
+Objects are addressed with the same safe relative `ObjectKey` model used by local sync. An optional
+remote prefix namespaces Devbox objects inside a bucket. Prefixes and object keys reject parent
+traversal, absolute paths, empty path segments, Windows separators, and accidental double slashes.
+
+The provider uses path-style URLs:
+
+```text
+<endpoint>/<bucket>/<optional-prefix>/<object-key>
+```
+
+That keeps Cloudflare R2, AWS S3, and MinIO-compatible local endpoints behind one configuration
+shape.
+
+## Credentials
+
+The CLI accepts credential environment variable names, not raw secret values:
+
+```text
+--s3-access-key-env DEVBOX_R2_ACCESS_KEY_ID
+--s3-secret-key-env DEVBOX_R2_SECRET_ACCESS_KEY
+--s3-session-token-env DEVBOX_R2_SESSION_TOKEN
+```
+
+If explicit env names are omitted, the provider uses the standard AWS-compatible environment names:
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_SESSION_TOKEN`
+
+Config/debug/status output is redacted and prints env variable names only. Missing credentials report
+which env var is missing without printing secret material.
+
+## Upload Semantics
+
+`upload_blob_from_cache` still decrypts existing remote objects before treating an upload as
+idempotent. Because encrypted object writes use random nonces, byte-for-byte ciphertext equality is
+not required for same-plaintext idempotency at the sync layer.
+
+The S3 provider also uses conditional create semantics for `put` so a concurrent writer cannot
+silently replace an object between existence check and upload. If the object appears first, the
+provider re-reads it and either returns idempotent success for identical encrypted bytes or refuses
+the immutable-object collision.
+
+## CLI Surface
+
+Local filesystem remotes remain the default and keep the existing shape:
+
+```text
+devbox sync publish-snapshot --db <DB> --cache <CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
+```
+
+S3-compatible remotes opt in with `--remote-kind s3`:
+
+```text
+devbox sync publish-snapshot \
+  --db <DB> \
+  --cache <CACHE> \
+  --remote-kind s3 \
+  --s3-endpoint https://<account>.r2.cloudflarestorage.com \
+  --s3-bucket devbox-alpha \
+  --s3-region auto \
+  --s3-prefix accounts/<account-id>/projects \
+  --s3-access-key-env DEVBOX_R2_ACCESS_KEY_ID \
+  --s3-secret-key-env DEVBOX_R2_SECRET_ACCESS_KEY \
+  <SNAPSHOT_ID>
+```
+
+`devbox sync remote check --validate-only` validates and prints redacted configuration without a
+network request. Without `--validate-only`, it loads credentials and performs a lightweight `head`
+probe against the remote.
+
+## Deferred
+
+Remaining Phase 1 work includes:
+
+- hosted metadata service for manifests, device registry, and server-side cursors
+- production sign-in and account ownership proof
+- managed R2 credential provisioning and rotation
+- production pairing UX and recovery flows
+- conflict UI and automatic merge/apply resolution
+- Electron tray/status integration

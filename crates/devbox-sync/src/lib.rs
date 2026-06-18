@@ -1,5 +1,7 @@
 //! Encrypted immutable blob transport for Devbox sync foundations.
 
+mod s3;
+
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use devbox_core::BlobId;
@@ -10,6 +12,11 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub use s3::{
+    S3CompatibleBlobProvider, S3CompatibleConfig, S3Credentials, S3CredentialsSource,
+    S3RedactedConfig,
+};
 
 const OBJECTS_DIR: &str = "objects";
 const TEMP_DIR: &str = "tmp";
@@ -28,6 +35,9 @@ pub enum SyncError {
     MissingRemoteObject(ObjectKey),
     RemoteObjectAlreadyExists { key: ObjectKey },
     BlobIdMismatch { expected: BlobId, actual: BlobId },
+    RemoteConfig(String),
+    RemoteCredentials(String),
+    RemoteTransport(String),
 }
 
 impl fmt::Display for SyncError {
@@ -52,6 +62,9 @@ impl fmt::Display for SyncError {
                     "downloaded blob hash mismatch: expected {expected}, got {actual}"
                 )
             }
+            Self::RemoteConfig(message) => write!(f, "remote configuration error: {message}"),
+            Self::RemoteCredentials(message) => write!(f, "remote credentials error: {message}"),
+            Self::RemoteTransport(message) => write!(f, "remote transport error: {message}"),
         }
     }
 }
@@ -67,7 +80,10 @@ impl std::error::Error for SyncError {
             | Self::Decryption
             | Self::MissingRemoteObject(_)
             | Self::RemoteObjectAlreadyExists { .. }
-            | Self::BlobIdMismatch { .. } => None,
+            | Self::BlobIdMismatch { .. }
+            | Self::RemoteConfig(_)
+            | Self::RemoteCredentials(_)
+            | Self::RemoteTransport(_) => None,
         }
     }
 }
@@ -327,7 +343,7 @@ pub fn encrypted_blob_object_key(blob_id: &BlobId) -> ObjectKey {
 
 pub fn upload_blob_from_cache(
     cache: &BlobCache,
-    provider: &impl RemoteBlobProvider,
+    provider: &(impl RemoteBlobProvider + ?Sized),
     key: &SyncKey,
     blob_id: &BlobId,
     object_key: &ObjectKey,
@@ -350,7 +366,29 @@ pub fn upload_blob_from_cache(
     }
 
     let encrypted = encrypt_payload(key, object_key, &plaintext)?;
-    let outcome = provider.put(object_key, &encrypted)?;
+    let outcome = match provider.put(object_key, &encrypted) {
+        Ok(outcome) => outcome,
+        Err(SyncError::RemoteObjectAlreadyExists { key: existing_key })
+            if existing_key == *object_key =>
+        {
+            if let Some(existing) = provider.get(object_key)? {
+                let existing_plaintext = decrypt_payload(key, object_key, &existing)?;
+                if existing_plaintext == plaintext {
+                    return Ok(UploadedBlob {
+                        object_key: object_key.clone(),
+                        plaintext_bytes: plaintext.len() as u64,
+                        remote_bytes: existing.len() as u64,
+                        uploaded: false,
+                    });
+                }
+            }
+
+            return Err(SyncError::RemoteObjectAlreadyExists {
+                key: object_key.clone(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
 
     Ok(UploadedBlob {
         object_key: object_key.clone(),
@@ -362,7 +400,7 @@ pub fn upload_blob_from_cache(
 
 pub fn download_blob_to_cache(
     cache: &BlobCache,
-    provider: &impl RemoteBlobProvider,
+    provider: &(impl RemoteBlobProvider + ?Sized),
     key: &SyncKey,
     expected_blob_id: &BlobId,
     object_key: &ObjectKey,
@@ -508,6 +546,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::fs;
 
     #[test]
@@ -597,6 +636,27 @@ mod tests {
             restored_cache.read(blob.id()).expect("blob reads"),
             plaintext
         );
+    }
+
+    #[test]
+    fn upload_treats_plaintext_match_after_put_race_as_idempotent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobCache::open(dir.path().join("cache")).expect("cache opens");
+        let plaintext = b"same plaintext after remote write race";
+        let blob = cache.write_bytes(plaintext).expect("blob writes");
+        let sync_key = SyncKey::from_bytes([23; 32]);
+        let object_key = encrypted_blob_object_key(blob.id());
+        let existing_encrypted =
+            encrypt_payload(&sync_key, &object_key, plaintext).expect("encryption works");
+        let provider = RacingRemoteProvider::new(object_key.clone(), existing_encrypted);
+
+        let upload = upload_blob_from_cache(&cache, &provider, &sync_key, blob.id(), &object_key)
+            .expect("same plaintext race is idempotent");
+
+        assert!(!upload.uploaded);
+        assert_eq!(upload.plaintext_bytes, plaintext.len() as u64);
+        assert_eq!(provider.put_calls.get(), 1);
+        assert_eq!(provider.get_calls.get(), 2);
     }
 
     #[test]
@@ -698,5 +758,53 @@ mod tests {
         }
 
         count
+    }
+
+    struct RacingRemoteProvider {
+        key: ObjectKey,
+        existing: Vec<u8>,
+        get_calls: Cell<usize>,
+        put_calls: Cell<usize>,
+    }
+
+    impl RacingRemoteProvider {
+        fn new(key: ObjectKey, existing: Vec<u8>) -> Self {
+            Self {
+                key,
+                existing,
+                get_calls: Cell::new(0),
+                put_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl RemoteBlobProvider for RacingRemoteProvider {
+        fn put(&self, key: &ObjectKey, _bytes: &[u8]) -> SyncResult<PutOutcome> {
+            self.put_calls.set(self.put_calls.get() + 1);
+            Err(SyncError::RemoteObjectAlreadyExists { key: key.clone() })
+        }
+
+        fn get(&self, key: &ObjectKey) -> SyncResult<Option<Vec<u8>>> {
+            self.get_calls.set(self.get_calls.get() + 1);
+            if self.get_calls.get() == 1 {
+                return Ok(None);
+            }
+            if key == &self.key {
+                Ok(Some(self.existing.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn head(&self, key: &ObjectKey) -> SyncResult<Option<ObjectMetadata>> {
+            if key == &self.key {
+                Ok(Some(ObjectMetadata {
+                    key: key.clone(),
+                    size_bytes: self.existing.len() as u64,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }

@@ -293,7 +293,7 @@ pub fn published_snapshot_object_key(snapshot_id: &str) -> MaterializeResult<Obj
 
 pub fn publish_snapshot(
     request: &PublishSnapshotRequest,
-    provider: &impl RemoteBlobProvider,
+    provider: &(impl RemoteBlobProvider + ?Sized),
 ) -> MaterializeResult<PublishedSnapshotBundle> {
     let store = open_store(&request.db_path)?;
     let identity = store
@@ -360,14 +360,14 @@ pub fn sync_preflight(request: &SyncPreflightRequest) -> MaterializeResult<SyncP
 
 pub fn import_snapshot(
     request: &ImportSnapshotRequest,
-    provider: &impl RemoteBlobProvider,
+    provider: &(impl RemoteBlobProvider + ?Sized),
 ) -> MaterializeResult<ImportedSnapshotBundle> {
     import_snapshot_inner(request, provider, true)
 }
 
 fn import_snapshot_inner(
     request: &ImportSnapshotRequest,
-    provider: &impl RemoteBlobProvider,
+    provider: &(impl RemoteBlobProvider + ?Sized),
     advance_cursor: bool,
 ) -> MaterializeResult<ImportedSnapshotBundle> {
     let mut receiver_store = open_store(&request.db_path)?;
@@ -475,7 +475,7 @@ fn import_snapshot_inner(
 
 pub fn materialize_snapshot(
     request: &MaterializationRequest,
-    provider: &impl RemoteBlobProvider,
+    provider: &(impl RemoteBlobProvider + ?Sized),
 ) -> MaterializeResult<MaterializationOutcome> {
     let mut import = import_snapshot_inner(
         &ImportSnapshotRequest {
@@ -750,7 +750,7 @@ struct ManifestPut {
 }
 
 fn put_encrypted_manifest(
-    provider: &impl RemoteBlobProvider,
+    provider: &(impl RemoteBlobProvider + ?Sized),
     sync_key: &SyncKey,
     object_key: &ObjectKey,
     plaintext: &[u8],
@@ -770,7 +770,25 @@ fn put_encrypted_manifest(
     }
 
     let encrypted = encrypt_payload(sync_key, object_key, plaintext)?;
-    let put = provider.put(object_key, &encrypted)?;
+    let put = match provider.put(object_key, &encrypted) {
+        Ok(put) => put,
+        Err(SyncError::RemoteObjectAlreadyExists { key }) if key == *object_key => {
+            if let Some(existing) = provider.get(object_key)? {
+                let existing_plaintext = decrypt_payload(sync_key, object_key, &existing)?;
+                if existing_plaintext == plaintext {
+                    return Ok(ManifestPut {
+                        uploaded: false,
+                        remote_bytes: existing.len() as u64,
+                    });
+                }
+            }
+
+            return Err(MaterializeError::RemoteObjectAlreadyExists(
+                object_key.clone(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
     Ok(ManifestPut {
         uploaded: put.uploaded,
         remote_bytes: put.size_bytes,
@@ -1043,8 +1061,27 @@ mod tests {
         local_project_id, BlobCache, EnsureLocalIdentityOptions, NewProject, NewSnapshot,
         NewSnapshotDraft, NewSnapshotManifestEntry,
     };
-    use devbox_sync::LocalFilesystemBlobProvider;
+    use devbox_sync::{LocalFilesystemBlobProvider, ObjectMetadata, PutOutcome, SyncResult};
+    use std::cell::Cell;
     use std::fs;
+
+    #[test]
+    fn put_encrypted_manifest_treats_plaintext_match_after_put_race_as_idempotent() {
+        let sync_key = SyncKey::from_bytes([31; 32]);
+        let object_key =
+            ObjectKey::new("snapshots/project/snapshot/manifest.json").expect("object key parses");
+        let plaintext = br#"{"version":1,"entries":[]}"#;
+        let existing_encrypted =
+            encrypt_payload(&sync_key, &object_key, plaintext).expect("encryption works");
+        let provider = RacingManifestProvider::new(object_key.clone(), existing_encrypted);
+
+        let put = put_encrypted_manifest(&provider, &sync_key, &object_key, plaintext)
+            .expect("same plaintext manifest race is idempotent");
+
+        assert!(!put.uploaded);
+        assert_eq!(provider.put_calls.get(), 1);
+        assert_eq!(provider.get_calls.get(), 2);
+    }
 
     #[test]
     fn publish_import_and_materialize_round_trip_through_local_remote() {
@@ -1754,5 +1791,53 @@ mod tests {
             .expect("cursor reads")
             .expect("cursor exists");
         assert_eq!(cursor.cursor_value, expected);
+    }
+
+    struct RacingManifestProvider {
+        key: ObjectKey,
+        existing: Vec<u8>,
+        get_calls: Cell<usize>,
+        put_calls: Cell<usize>,
+    }
+
+    impl RacingManifestProvider {
+        fn new(key: ObjectKey, existing: Vec<u8>) -> Self {
+            Self {
+                key,
+                existing,
+                get_calls: Cell::new(0),
+                put_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl RemoteBlobProvider for RacingManifestProvider {
+        fn put(&self, key: &ObjectKey, _bytes: &[u8]) -> SyncResult<PutOutcome> {
+            self.put_calls.set(self.put_calls.get() + 1);
+            Err(SyncError::RemoteObjectAlreadyExists { key: key.clone() })
+        }
+
+        fn get(&self, key: &ObjectKey) -> SyncResult<Option<Vec<u8>>> {
+            self.get_calls.set(self.get_calls.get() + 1);
+            if self.get_calls.get() == 1 {
+                return Ok(None);
+            }
+            if key == &self.key {
+                Ok(Some(self.existing.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn head(&self, key: &ObjectKey) -> SyncResult<Option<ObjectMetadata>> {
+            if key == &self.key {
+                Ok(Some(ObjectMetadata {
+                    key: key.clone(),
+                    size_bytes: self.existing.len() as u64,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }

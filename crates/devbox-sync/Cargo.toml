@@ -12,6 +12,12 @@ chacha20poly1305 = "0.10"
 devbox-core = { path = "../devbox-core" }
 devbox-store = { path = "../devbox-store" }
 getrandom = "0.2"
+hmac = "0.12"
+percent-encoding = "2"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "macros"] }
+ureq = "2"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"
