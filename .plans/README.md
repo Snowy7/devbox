@@ -14,6 +14,7 @@ The MVP rule is simple: earn trust before expanding into teams, agents, or a Git
 
 Current Phase 1 foundation status: snapshot/restore, manual change-feed scanning, the local watcher,
 local account/current-device identity, encrypted blob transport through a local filesystem remote
-provider, and local/mock auth plus device-pairing trust primitives are in place. Real cloud
-authentication, hosted metadata, real R2/S3 credentials, production pairing UX, server-side cursors,
-and second-device materialization remain later Phase 1 work.
+provider, local/mock auth plus device-pairing trust primitives, and local/mock second-device
+materialization through an encrypted local remote are in place. Real cloud authentication, hosted
+metadata, real R2/S3 credentials, production pairing UX, server-side cursors, and conflict resolution
+remain later Phase 1 work.

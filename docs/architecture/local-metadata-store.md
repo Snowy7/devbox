@@ -118,6 +118,7 @@ This boundary does not implement:
 
 - production cloud authentication, hosted sign-in, account ownership proof, or production pairing UX
 - backend account/device cursors
+- hosted second-device materialization metadata or server-side conflict resolution
 - compression
 - packfiles
 - cache eviction or garbage collection

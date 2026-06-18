@@ -1,23 +1,20 @@
 [package]
-name = "devbox-cli"
+name = "devbox-materialize"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "devbox"
-path = "src/main.rs"
-
 [dependencies]
+blake3 = "1"
 devbox-auth = { path = "../devbox-auth" }
 devbox-core = { path = "../devbox-core" }
-devbox-materialize = { path = "../devbox-materialize" }
 devbox-snapshot = { path = "../devbox-snapshot" }
 devbox-store = { path = "../devbox-store" }
 devbox-sync = { path = "../devbox-sync" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
-rusqlite = "0.31"
 tempfile = "3"

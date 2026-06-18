@@ -78,4 +78,5 @@ encrypted object to the remote provider. Download reads the encrypted remote obj
 verifies the expected BLAKE3 blob id, and writes the plaintext back into a local blob cache.
 
 Download targets the blob cache, not a project directory. Second-device project materialization,
-conflict handling, and UI restore flows remain later Phase 1 work.
+now has a local/mock foundation in `devbox-materialize`; production key exchange, conflict handling,
+hosted metadata, real cloud object credentials, and UI restore flows remain later Phase 1 work.

@@ -326,6 +326,181 @@ fn sync_upload_and_download_encrypts_remote_object_bytes() {
 }
 
 #[test]
+fn sync_snapshot_publish_import_and_materialize_smoke_uses_two_local_contexts() {
+    let fixture = SnapshotCliFixture::new();
+    let plaintext = "hello from device one\n";
+    fixture.write("README.md", plaintext);
+    fixture.write("src/main.rs", "fn main() {}\n");
+    fixture.write("node_modules/left-pad/index.js", "module.exports = true;\n");
+    fixture.write(".git/config", "[core]\nrepositoryformatversion = 0\n");
+
+    assert_success(&run_devbox([
+        "init",
+        "--db",
+        fixture.db_path(),
+        "--device-name",
+        "Desk",
+    ]));
+    assert_success(&run_devbox([
+        "init",
+        "--db",
+        fixture.receiver_db_path(),
+        "--device-name",
+        "Laptop",
+    ]));
+
+    let create = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&create);
+    let snapshot_id = stdout(&create)
+        .lines()
+        .find_map(|line| line.strip_prefix("Snapshot id: "))
+        .expect("snapshot id prints")
+        .to_string();
+
+    let publish = run_devbox([
+        "sync",
+        "publish-snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        snapshot_id.as_str(),
+    ]);
+    assert_success(&publish);
+    let publish_stdout = stdout(&publish);
+    assert!(publish_stdout.contains("Sync publish snapshot: encrypted local/mock bundle"));
+    assert!(publish_stdout.contains("Boundary: local/mock second-device foundation"));
+    assert!(publish_stdout.contains("Included blob count: 2"));
+    let manifest_object_key = prefixed_value(&publish_stdout, "Manifest object key: ");
+    let remote_manifest = fs::read(remote_object_path(
+        fixture.remote_path_buf(),
+        &manifest_object_key,
+    ))
+    .expect("remote manifest object reads");
+    assert!(!remote_manifest
+        .windows("src/main.rs".len())
+        .any(|window| window == b"src/main.rs"));
+    assert!(!remote_manifest
+        .windows(plaintext.len())
+        .any(|window| window == plaintext.as_bytes()));
+
+    let import = run_devbox([
+        "sync",
+        "import-snapshot",
+        "--db",
+        fixture.receiver_db_path(),
+        "--cache",
+        fixture.download_cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        "--mock-key-source-db",
+        fixture.db_path(),
+        snapshot_id.as_str(),
+    ]);
+    assert_success(&import);
+    let import_stdout = stdout(&import);
+    assert!(
+        import_stdout.contains("Sync import snapshot: decrypted into local/mock second context")
+    );
+    assert!(import_stdout.contains("Snapshot inserted: true"));
+    assert!(import_stdout.contains("Downloaded blob count: 2"));
+    assert!(import_stdout.contains("Trust bootstrap: local/mock --mock-key-source-db used"));
+
+    let second_import = run_devbox([
+        "sync",
+        "import-snapshot",
+        "--db",
+        fixture.receiver_db_path(),
+        "--cache",
+        fixture.download_cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        "--mock-key-source-db",
+        fixture.db_path(),
+        snapshot_id.as_str(),
+    ]);
+    assert_success(&second_import);
+    assert!(stdout(&second_import).contains("Snapshot inserted: false"));
+
+    let materialize = run_devbox([
+        "sync",
+        "materialize",
+        "--db",
+        fixture.receiver_db_path(),
+        "--cache",
+        fixture.download_cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        "--to",
+        fixture.target_path(),
+        "--mock-key-source-db",
+        fixture.db_path(),
+        snapshot_id.as_str(),
+        "--apply",
+    ]);
+    assert_success(&materialize);
+    let materialize_stdout = stdout(&materialize);
+    assert!(materialize_stdout.contains("Sync materialize snapshot"));
+    assert!(materialize_stdout.contains("Mode: apply"));
+    assert!(materialize_stdout.contains("Apply allowed: true"));
+    assert!(materialize_stdout.contains("Applied: true"));
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("README.md")).expect("readme restored"),
+        plaintext
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("src/main.rs")).expect("source restored"),
+        "fn main() {}\n"
+    );
+    assert!(!fixture.target.join("node_modules").exists());
+    assert!(!fixture.target.join(".git").exists());
+
+    let cursor_get = run_devbox([
+        "sync",
+        "cursor",
+        "get",
+        "--db",
+        fixture.receiver_db_path(),
+        "--project",
+        &prefixed_value(&materialize_stdout, "Project id: "),
+    ]);
+    assert_success(&cursor_get);
+    assert!(stdout(&cursor_get).contains(&format!("Cursor value: {snapshot_id}")));
+
+    let refused = run_devbox([
+        "sync",
+        "materialize",
+        "--db",
+        fixture.receiver_db_path(),
+        "--cache",
+        fixture.download_cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        "--to",
+        fixture.target_path(),
+        "--mock-key-source-db",
+        fixture.db_path(),
+        snapshot_id.as_str(),
+        "--apply",
+    ]);
+    assert_failure(&refused);
+    assert!(stderr(&refused).contains("restore target must be missing or empty"));
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("README.md")).expect("existing readme reads"),
+        plaintext
+    );
+}
+
+#[test]
 fn snapshot_dry_run_stays_non_persisting() {
     let fixture = SnapshotCliFixture::new();
     fixture.write("README.md", "hello\n");
@@ -588,6 +763,7 @@ struct SnapshotCliFixture {
     cache: std::path::PathBuf,
     download_cache: std::path::PathBuf,
     db: std::path::PathBuf,
+    receiver_db: std::path::PathBuf,
     remote: std::path::PathBuf,
     target: std::path::PathBuf,
 }
@@ -599,6 +775,7 @@ impl SnapshotCliFixture {
         let cache = dir.path().join("cache");
         let download_cache = dir.path().join("download-cache");
         let db = dir.path().join("devbox.sqlite3");
+        let receiver_db = dir.path().join("receiver.sqlite3");
         let remote = dir.path().join("remote");
         let target = dir.path().join("target");
         fs::create_dir_all(&project).expect("project dir creates");
@@ -609,6 +786,7 @@ impl SnapshotCliFixture {
             cache,
             download_cache,
             db,
+            receiver_db,
             remote,
             target,
         }
@@ -632,6 +810,10 @@ impl SnapshotCliFixture {
 
     fn db_path(&self) -> &str {
         self.db.to_str().expect("test paths are UTF-8")
+    }
+
+    fn receiver_db_path(&self) -> &str {
+        self.receiver_db.to_str().expect("test paths are UTF-8")
     }
 
     fn remote_path(&self) -> &str {

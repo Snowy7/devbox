@@ -115,3 +115,7 @@ This slice intentionally does not implement:
 - garbage collection
 - conflict handling
 - Electron UI
+
+The later local/mock second-device materialization foundation composes this restore engine with the
+encrypted local remote provider; this snapshot crate still owns restore safety and does not own
+remote publication.

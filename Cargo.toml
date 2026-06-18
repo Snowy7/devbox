@@ -5,6 +5,7 @@ members = [
     "crates/devbox-core",
     "crates/devbox-daemon",
     "crates/devbox-git",
+    "crates/devbox-materialize",
     "crates/devbox-snapshot",
     "crates/devbox-store",
     "crates/devbox-sync",
