@@ -118,6 +118,121 @@ fn snapshot_dry_run_stays_non_persisting() {
 }
 
 #[test]
+fn changes_scan_and_list_smoke_are_stable_and_idempotent() {
+    let fixture = SnapshotCliFixture::new();
+    fixture.write("Cargo.toml", "[package]\nname = \"demo\"\n");
+    fixture.write("src/main.rs", "fn main() {}\n");
+    fixture.write("delete-me.txt", "gone soon\n");
+    fixture.write("node_modules/left-pad/index.js", "module.exports = true;\n");
+
+    let create = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&create);
+    let snapshot_id = stdout(&create)
+        .lines()
+        .find_map(|line| line.strip_prefix("Snapshot id: "))
+        .expect("snapshot id prints")
+        .to_string();
+
+    fixture.write("src/main.rs", "fn main() { println!(\"changed\"); }\n");
+    fixture.write("src/lib.rs", "pub fn added() {}\n");
+    fs::remove_file(fixture.project.join("delete-me.txt")).expect("fixture file deletes");
+    fixture.write("target/debug/generated", "ignored\n");
+
+    let first_scan = run_devbox([
+        "changes",
+        "scan",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&first_scan);
+    let first_scan_stdout = stdout(&first_scan);
+    assert!(first_scan_stdout.contains(&format!("Base snapshot id: {snapshot_id}")));
+    assert!(first_scan_stdout.contains("Created: 1"));
+    assert!(first_scan_stdout.contains("Modified: 1"));
+    assert!(first_scan_stdout.contains("Deleted: 1"));
+    assert!(first_scan_stdout.contains("Unchanged: 1"));
+    assert!(first_scan_stdout.contains("Skipped/deferred: 2"));
+    assert!(first_scan_stdout.contains("Pending operations: 3"));
+
+    let second_scan = run_devbox([
+        "changes",
+        "scan",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&second_scan);
+    assert!(stdout(&second_scan).contains("Pending operations: 3"));
+
+    let project_id = first_scan_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Project id: "))
+        .expect("project id prints")
+        .to_string();
+    let list = run_devbox(["changes", "list", "--db", fixture.db_path()]);
+    assert_success(&list);
+    let list_stdout = stdout(&list);
+    assert!(list_stdout.contains(
+        "Project id\tBase snapshot id\tChange\tPath\tBytes\tBlob id\tPrevious blob id\tDetected at"
+    ));
+    assert!(list_stdout.contains(&format!(
+        "{project_id}\t{snapshot_id}\tdeleted\tdelete-me.txt"
+    )));
+    assert!(list_stdout.contains(&format!(
+        "{project_id}\t{snapshot_id}\tmodified\tsrc/main.rs"
+    )));
+    assert!(list_stdout.contains(&format!("{project_id}\t{snapshot_id}\tcreated\tsrc/lib.rs")));
+    assert!(!list_stdout.contains("target/debug/generated"));
+    assert_eq!(pending_change_row_count(fixture.db_path()), 3);
+}
+
+#[test]
+fn changes_scan_rejects_in_project_cache_and_db_without_leftovers() {
+    let fixture = SnapshotCliFixture::new();
+    fixture.write("README.md", "hello\n");
+    let in_project_cache = fixture.project.join(".devbox-cache");
+    let in_project_db = fixture.project.join("devbox.sqlite3");
+
+    let rejected_cache = run_devbox([
+        "changes",
+        "scan",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        path_str(&in_project_cache),
+        fixture.project_path(),
+    ]);
+    assert_failure(&rejected_cache);
+    assert!(stderr(&rejected_cache).contains("blob cache root"));
+    assert!(!in_project_cache.exists());
+
+    let rejected_db = run_devbox([
+        "changes",
+        "scan",
+        "--db",
+        path_str(&in_project_db),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_failure(&rejected_db);
+    assert!(stderr(&rejected_db).contains("metadata database path"));
+    assert!(!in_project_db.exists());
+}
+
+#[test]
 fn snapshot_restore_rejects_tampered_current_dir_manifest_path() {
     let fixture = SnapshotCliFixture::new();
     fixture.write("src/main.rs", "fn main() {}\n");
@@ -333,4 +448,12 @@ fn stderr(output: &Output) -> String {
 
 fn path_str(path: &std::path::Path) -> &str {
     path.to_str().expect("test paths are UTF-8")
+}
+
+fn pending_change_row_count(db_path: &str) -> u64 {
+    let conn = Connection::open(db_path).expect("metadata database opens");
+    conn.query_row("SELECT COUNT(*) FROM pending_local_changes", [], |row| {
+        row.get(0)
+    })
+    .expect("pending change count reads")
 }

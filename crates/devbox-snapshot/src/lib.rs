@@ -4,7 +4,11 @@ mod restore;
 
 use devbox_core::scanner::evaluate_directory_policy;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision, SnapshotId};
-use devbox_store::{BlobCache, BlobCacheError};
+use devbox_store::{
+    path_to_store_string, BlobCache, BlobCacheError, LocalChangeKind, ManifestEntryRecord,
+    PersistedSnapshot,
+};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, DirEntry, Metadata};
 use std::io;
@@ -210,6 +214,229 @@ impl SnapshotSummary {
 
     pub fn total_file_bytes(&self) -> u64 {
         self.total_file_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalChangeFeedDiff {
+    base_snapshot_id: Option<String>,
+    changes: Vec<LocalChange>,
+    summary: LocalChangeSummary,
+}
+
+impl LocalChangeFeedDiff {
+    pub fn compare(base: Option<&PersistedSnapshot>, current: &DraftSnapshot) -> Self {
+        let base_snapshot_id = base.map(|snapshot| snapshot.snapshot.id.clone());
+        let base_files = base
+            .map(|snapshot| {
+                snapshot
+                    .entries
+                    .iter()
+                    .filter(|entry| stored_included_file(entry))
+                    .map(|entry| (entry.relative_path.clone(), entry))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let current_files = current
+            .entries()
+            .iter()
+            .filter(|entry| draft_included_file(entry))
+            .map(|entry| (entry.relative_path().to_path_buf(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut changes = Vec::new();
+        let mut summary = LocalChangeSummary {
+            skipped_deferred: current
+                .entries()
+                .iter()
+                .filter(|entry| skipped_or_deferred(entry))
+                .count(),
+            ..LocalChangeSummary::default()
+        };
+
+        for (path, current_entry) in &current_files {
+            match base_files.get(path) {
+                Some(base_entry) if same_file_identity(base_entry, current_entry) => {
+                    summary.unchanged += 1;
+                }
+                Some(base_entry) => {
+                    summary.modified += 1;
+                    summary.bytes_to_upload += current_entry.size_bytes().unwrap_or_default();
+                    changes.push(LocalChange::modified(base_entry, current_entry));
+                }
+                None => {
+                    summary.created += 1;
+                    summary.bytes_to_upload += current_entry.size_bytes().unwrap_or_default();
+                    changes.push(LocalChange::created(current_entry));
+                }
+            }
+        }
+
+        for (path, base_entry) in &base_files {
+            if !current_files.contains_key(path) {
+                summary.deleted += 1;
+                summary.bytes_deleted += base_entry.size_bytes;
+                changes.push(LocalChange::deleted(base_entry));
+            }
+        }
+
+        changes.sort_by(|left, right| {
+            left.relative_path
+                .cmp(&right.relative_path)
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+        });
+
+        Self {
+            base_snapshot_id,
+            changes,
+            summary,
+        }
+    }
+
+    pub fn base_snapshot_id(&self) -> Option<&str> {
+        self.base_snapshot_id.as_deref()
+    }
+
+    pub fn changes(&self) -> &[LocalChange] {
+        &self.changes
+    }
+
+    pub fn summary(&self) -> &LocalChangeSummary {
+        &self.summary
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalChange {
+    relative_path: PathBuf,
+    kind: LocalChangeKind,
+    previous_blob_id: Option<BlobId>,
+    blob_id: Option<BlobId>,
+    object_ref: Option<String>,
+    size_bytes: u64,
+}
+
+impl LocalChange {
+    fn created(entry: &SnapshotManifestEntry) -> Self {
+        Self {
+            relative_path: entry.relative_path().to_path_buf(),
+            kind: LocalChangeKind::Created,
+            previous_blob_id: None,
+            blob_id: entry.blob_id().cloned(),
+            object_ref: entry.object_ref().map(ToString::to_string),
+            size_bytes: entry.size_bytes().unwrap_or_default(),
+        }
+    }
+
+    fn modified(base: &ManifestEntryRecord, entry: &SnapshotManifestEntry) -> Self {
+        Self {
+            relative_path: entry.relative_path().to_path_buf(),
+            kind: LocalChangeKind::Modified,
+            previous_blob_id: base.blob_id.clone(),
+            blob_id: entry.blob_id().cloned(),
+            object_ref: entry.object_ref().map(ToString::to_string),
+            size_bytes: entry.size_bytes().unwrap_or_default(),
+        }
+    }
+
+    fn deleted(base: &ManifestEntryRecord) -> Self {
+        Self {
+            relative_path: base.relative_path.clone(),
+            kind: LocalChangeKind::Deleted,
+            previous_blob_id: base.blob_id.clone(),
+            blob_id: None,
+            object_ref: None,
+            size_bytes: base.size_bytes,
+        }
+    }
+
+    pub fn relative_path(&self) -> &Path {
+        &self.relative_path
+    }
+
+    pub fn kind(&self) -> &LocalChangeKind {
+        &self.kind
+    }
+
+    pub fn previous_blob_id(&self) -> Option<&BlobId> {
+        self.previous_blob_id.as_ref()
+    }
+
+    pub fn blob_id(&self) -> Option<&BlobId> {
+        self.blob_id.as_ref()
+    }
+
+    pub fn object_ref(&self) -> Option<&str> {
+        self.object_ref.as_deref()
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    pub fn stable_id(&self, project_id: &str, base_snapshot_id: Option<&str>) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"devbox-pending-local-change-v1\n");
+        hasher.update(project_id.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(base_snapshot_id.unwrap_or("-").as_bytes());
+        hasher.update(b"\n");
+        hasher.update(path_to_store_string(self.relative_path()).as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.kind.as_str().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(
+            self.previous_blob_id()
+                .map(BlobId::as_str)
+                .unwrap_or("-")
+                .as_bytes(),
+        );
+        hasher.update(b"\n");
+        hasher.update(self.blob_id().map(BlobId::as_str).unwrap_or("-").as_bytes());
+        let digest = hasher.finalize().to_hex().to_string();
+
+        format!("pending-change-b3-{digest}")
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalChangeSummary {
+    created: usize,
+    modified: usize,
+    deleted: usize,
+    unchanged: usize,
+    skipped_deferred: usize,
+    bytes_to_upload: u64,
+    bytes_deleted: u64,
+}
+
+impl LocalChangeSummary {
+    pub fn created(&self) -> usize {
+        self.created
+    }
+
+    pub fn modified(&self) -> usize {
+        self.modified
+    }
+
+    pub fn deleted(&self) -> usize {
+        self.deleted
+    }
+
+    pub fn unchanged(&self) -> usize {
+        self.unchanged
+    }
+
+    pub fn skipped_deferred(&self) -> usize {
+        self.skipped_deferred
+    }
+
+    pub fn bytes_to_upload(&self) -> u64 {
+        self.bytes_to_upload
+    }
+
+    pub fn bytes_deleted(&self) -> u64 {
+        self.bytes_deleted
     }
 }
 
@@ -432,6 +659,27 @@ fn canonical_entry(entry: &SnapshotManifestEntry) -> String {
     )
 }
 
+fn stored_included_file(entry: &ManifestEntryRecord) -> bool {
+    entry.kind == ManifestEntryKind::File && entry.policy_decision == PolicyDecision::Include
+}
+
+fn draft_included_file(entry: &SnapshotManifestEntry) -> bool {
+    entry.kind() == &ManifestEntryKind::File && entry.policy_decision() == &PolicyDecision::Include
+}
+
+fn skipped_or_deferred(entry: &SnapshotManifestEntry) -> bool {
+    !matches!(entry.policy_decision(), PolicyDecision::Include)
+        || matches!(
+            entry.kind(),
+            ManifestEntryKind::Symlink | ManifestEntryKind::Unsupported
+        )
+}
+
+fn same_file_identity(base: &ManifestEntryRecord, current: &SnapshotManifestEntry) -> bool {
+    base.blob_id.as_ref() == current.blob_id()
+        && base.size_bytes == current.size_bytes().unwrap_or_default()
+}
+
 fn kind_name(kind: &ManifestEntryKind) -> &'static str {
     match kind {
         ManifestEntryKind::File => "file",
@@ -482,7 +730,7 @@ fn canonical_root(root: &Path) -> Result<PathBuf, SnapshotError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devbox_store::BlobCache;
+    use devbox_store::{BlobCache, ProjectRecord, SnapshotRecord};
     use std::fs;
 
     #[test]
@@ -649,6 +897,80 @@ mod tests {
         assert_eq!(second.summary().included_files(), 1);
     }
 
+    #[test]
+    fn diff_reports_created_modified_deleted_and_unchanged_files() {
+        let fixture = TestProject::new();
+        fixture.write("created.txt", "new\n");
+        fixture.write("deleted.txt", "gone\n");
+        fixture.write("same.txt", "same\n");
+        fixture.write("src/main.rs", "before\n");
+        let base = persisted_from_draft(&fixture.build());
+
+        fs::remove_file(fixture.root.join("deleted.txt")).expect("delete fixture file");
+        fixture.write("src/main.rs", "after\n");
+        let current = fixture.build();
+
+        let diff = LocalChangeFeedDiff::compare(Some(&base), &current);
+
+        assert_eq!(diff.base_snapshot_id(), Some(base.snapshot.id.as_str()));
+        assert_eq!(diff.summary().created(), 0);
+        assert_eq!(diff.summary().modified(), 1);
+        assert_eq!(diff.summary().deleted(), 1);
+        assert_eq!(diff.summary().unchanged(), 2);
+        assert_eq!(
+            diff.changes()
+                .iter()
+                .map(|change| {
+                    (
+                        path_to_manifest_string(change.relative_path()),
+                        change.kind().clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("deleted.txt".to_string(), LocalChangeKind::Deleted),
+                ("src/main.rs".to_string(), LocalChangeKind::Modified),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_treats_no_base_snapshot_as_all_current_files_created() {
+        let fixture = TestProject::new();
+        fixture.write("a.txt", "a");
+        fixture.mkdir("empty");
+        let current = fixture.build();
+
+        let diff = LocalChangeFeedDiff::compare(None, &current);
+
+        assert_eq!(diff.base_snapshot_id(), None);
+        assert_eq!(diff.summary().created(), 1);
+        assert_eq!(diff.summary().unchanged(), 0);
+        assert_eq!(diff.changes().len(), 1);
+        assert_eq!(diff.changes()[0].kind(), &LocalChangeKind::Created);
+        assert_eq!(diff.changes()[0].relative_path(), Path::new("a.txt"));
+    }
+
+    #[test]
+    fn diff_summarizes_policy_and_deferred_entries_without_uploadable_changes() {
+        let fixture = TestProject::new();
+        fixture.mkdir("node_modules/left-pad");
+        fixture.write("node_modules/left-pad/index.js", "module.exports = true;\n");
+        fixture.write("real.txt", "real content\n");
+        let symlink_created = fixture.symlink_file("real.txt", "linked.txt");
+        let current = fixture.build();
+
+        let diff = LocalChangeFeedDiff::compare(None, &current);
+
+        assert_eq!(diff.summary().created(), 1);
+        assert_eq!(
+            diff.summary().skipped_deferred(),
+            if symlink_created { 2 } else { 1 }
+        );
+        assert_eq!(diff.changes().len(), 1);
+        assert_eq!(diff.changes()[0].relative_path(), Path::new("real.txt"));
+    }
+
     struct TestProject {
         _dir: tempfile::TempDir,
         root: PathBuf,
@@ -739,5 +1061,38 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn persisted_from_draft(draft: &DraftSnapshot) -> PersistedSnapshot {
+        PersistedSnapshot {
+            project: ProjectRecord {
+                id: "project-1".to_string(),
+                root_path: draft.root().display().to_string(),
+                kind: "local".to_string(),
+                display_name: "project".to_string(),
+                discovered_at: "2026-06-18T10:00:00Z".to_string(),
+            },
+            snapshot: SnapshotRecord {
+                id: draft.id().to_string(),
+                project_id: "project-1".to_string(),
+                parent_snapshot_id: None,
+                created_at: "2026-06-18T10:00:00Z".to_string(),
+                reason: "manual".to_string(),
+                manifest_entry_count: draft.entries().len() as u64,
+                total_size_bytes: draft.summary().total_file_bytes(),
+            },
+            entries: draft
+                .entries()
+                .iter()
+                .map(|entry| ManifestEntryRecord {
+                    relative_path: entry.relative_path().to_path_buf(),
+                    kind: entry.kind().clone(),
+                    size_bytes: entry.size_bytes().unwrap_or_default(),
+                    blob_id: entry.blob_id().cloned(),
+                    object_ref: entry.object_ref().map(ToString::to_string),
+                    policy_decision: entry.policy_decision().clone(),
+                })
+                .collect(),
+        }
     }
 }

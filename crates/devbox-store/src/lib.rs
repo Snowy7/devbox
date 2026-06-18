@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -18,6 +18,7 @@ const SUMMARY_TABLES: &[&str] = &[
     "blobs",
     "chunks",
     "operations",
+    "pending_local_changes",
     "policies",
     "policy_evaluations",
     "restore_attempts",
@@ -122,6 +123,10 @@ impl Store {
 
         if version < 2 {
             self.conn.execute_batch(MIGRATION_2_MANIFEST_UNSUPPORTED)?;
+        }
+
+        if version < 3 {
+            self.conn.execute_batch(MIGRATION_3_PENDING_LOCAL_CHANGES)?;
         }
 
         Ok(())
@@ -479,6 +484,202 @@ impl Store {
         }))
     }
 
+    pub fn latest_snapshot_for_project(
+        &self,
+        project_id: &str,
+    ) -> StoreResult<Option<PersistedSnapshot>> {
+        let snapshot_id = self
+            .conn
+            .query_row(
+                r#"
+                SELECT id
+                FROM snapshots
+                WHERE project_id = ?1
+                ORDER BY created_at DESC, id ASC
+                LIMIT 1
+                "#,
+                params![project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        match snapshot_id {
+            Some(snapshot_id) => self.snapshot_with_entries(&snapshot_id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn replace_pending_local_changes(
+        &mut self,
+        project: &NewProject<'_>,
+        changes: &[NewPendingLocalChange<'_>],
+        detected_at: &str,
+    ) -> StoreResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO projects (id, root_path, kind, display_name, discovered_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                root_path = excluded.root_path,
+                kind = excluded.kind,
+                display_name = excluded.display_name
+            "#,
+            params![
+                project.id,
+                project.root_path,
+                project.kind,
+                project.display_name,
+                project.discovered_at,
+            ],
+        )?;
+
+        tx.execute(
+            "DELETE FROM pending_local_changes WHERE project_id = ?1",
+            params![project.id],
+        )?;
+
+        for change in changes {
+            if let (Some(blob_id), Some(object_ref)) = (change.blob_id, change.object_ref) {
+                tx.execute(
+                    r#"
+                    INSERT INTO blobs (id, hash_algorithm, size_bytes, object_ref, created_at)
+                    VALUES (?1, 'blake3', ?2, ?3, ?4)
+                    ON CONFLICT(id) DO UPDATE SET
+                        size_bytes = excluded.size_bytes,
+                        object_ref = excluded.object_ref
+                    "#,
+                    params![blob_id.as_str(), change.size_bytes, object_ref, detected_at],
+                )?;
+            }
+
+            tx.execute(
+                r#"
+                INSERT INTO pending_local_changes (
+                    id,
+                    project_id,
+                    base_snapshot_id,
+                    path,
+                    change_kind,
+                    entry_kind,
+                    previous_blob_id,
+                    blob_id,
+                    object_ref,
+                    size_bytes,
+                    status,
+                    detected_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, 'file', ?6, ?7, ?8, ?9, 'pending', ?10)
+                "#,
+                params![
+                    change.id,
+                    project.id,
+                    change.base_snapshot_id,
+                    path_to_store_string(change.relative_path),
+                    change.kind.as_str(),
+                    change.previous_blob_id.map(BlobId::as_str),
+                    change.blob_id.map(BlobId::as_str),
+                    change.object_ref,
+                    change.size_bytes,
+                    detected_at,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_pending_local_changes(
+        &self,
+        project_id: Option<&str>,
+    ) -> StoreResult<Vec<PendingLocalChangeRecord>> {
+        let mut statement = if project_id.is_some() {
+            self.conn.prepare(
+                r#"
+                SELECT
+                    id,
+                    project_id,
+                    base_snapshot_id,
+                    path,
+                    change_kind,
+                    entry_kind,
+                    previous_blob_id,
+                    blob_id,
+                    object_ref,
+                    size_bytes,
+                    status,
+                    detected_at
+                FROM pending_local_changes
+                WHERE project_id = ?1
+                ORDER BY project_id ASC, path ASC, change_kind ASC, id ASC
+                "#,
+            )?
+        } else {
+            self.conn.prepare(
+                r#"
+                SELECT
+                    id,
+                    project_id,
+                    base_snapshot_id,
+                    path,
+                    change_kind,
+                    entry_kind,
+                    previous_blob_id,
+                    blob_id,
+                    object_ref,
+                    size_bytes,
+                    status,
+                    detected_at
+                FROM pending_local_changes
+                ORDER BY project_id ASC, path ASC, change_kind ASC, id ASC
+                "#,
+            )?
+        };
+
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(RawPendingLocalChangeRecord {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                base_snapshot_id: row.get(2)?,
+                relative_path: PathBuf::from(row.get::<_, String>(3)?),
+                change_kind: row.get(4)?,
+                entry_kind: row.get(5)?,
+                previous_blob_id: row.get(6)?,
+                blob_id: row.get(7)?,
+                object_ref: row.get(8)?,
+                size_bytes: row.get(9)?,
+                status: row.get(10)?,
+                detected_at: row.get(11)?,
+            })
+        };
+
+        let rows = match project_id {
+            Some(project_id) => statement
+                .query_map(params![project_id], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => statement
+                .query_map([], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        rows.into_iter()
+            .map(PendingLocalChangeRecord::try_from)
+            .collect()
+    }
+
+    pub fn clear_pending_local_changes(&self, project_id: Option<&str>) -> StoreResult<usize> {
+        let changed = match project_id {
+            Some(project_id) => self.conn.execute(
+                "DELETE FROM pending_local_changes WHERE project_id = ?1",
+                params![project_id],
+            )?,
+            None => self.conn.execute("DELETE FROM pending_local_changes", [])?,
+        };
+
+        Ok(changed)
+    }
+
     fn manifest_entries(&self, snapshot_id: &str) -> StoreResult<Vec<ManifestEntryRecord>> {
         let mut statement = self.conn.prepare(
             r#"
@@ -627,6 +828,51 @@ pub struct ManifestEntryRecord {
     pub policy_decision: PolicyDecision,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+impl LocalChangeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPendingLocalChange<'a> {
+    pub id: &'a str,
+    pub base_snapshot_id: Option<&'a str>,
+    pub relative_path: &'a Path,
+    pub kind: LocalChangeKind,
+    pub previous_blob_id: Option<&'a BlobId>,
+    pub blob_id: Option<&'a BlobId>,
+    pub object_ref: Option<&'a str>,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingLocalChangeRecord {
+    pub id: String,
+    pub project_id: String,
+    pub base_snapshot_id: Option<String>,
+    pub relative_path: PathBuf,
+    pub change_kind: LocalChangeKind,
+    pub entry_kind: ManifestEntryKind,
+    pub previous_blob_id: Option<BlobId>,
+    pub blob_id: Option<BlobId>,
+    pub object_ref: Option<String>,
+    pub size_bytes: u64,
+    pub status: String,
+    pub detected_at: String,
+}
+
 #[derive(Debug)]
 struct RawManifestEntryRecord {
     relative_path: PathBuf,
@@ -636,6 +882,54 @@ struct RawManifestEntryRecord {
     object_ref: Option<String>,
     policy_decision: String,
     policy_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct RawPendingLocalChangeRecord {
+    id: String,
+    project_id: String,
+    base_snapshot_id: Option<String>,
+    relative_path: PathBuf,
+    change_kind: String,
+    entry_kind: String,
+    previous_blob_id: Option<String>,
+    blob_id: Option<String>,
+    object_ref: Option<String>,
+    size_bytes: u64,
+    status: String,
+    detected_at: String,
+}
+
+impl TryFrom<RawPendingLocalChangeRecord> for PendingLocalChangeRecord {
+    type Error = StoreError;
+
+    fn try_from(record: RawPendingLocalChangeRecord) -> StoreResult<Self> {
+        let previous_blob_id = record
+            .previous_blob_id
+            .map(BlobId::from_blake3_hex)
+            .transpose()
+            .map_err(|error| invalid_domain_value("previous blob id", error))?;
+        let blob_id = record
+            .blob_id
+            .map(BlobId::from_blake3_hex)
+            .transpose()
+            .map_err(|error| invalid_domain_value("blob id", error))?;
+
+        Ok(Self {
+            id: record.id,
+            project_id: record.project_id,
+            base_snapshot_id: record.base_snapshot_id,
+            relative_path: record.relative_path,
+            change_kind: change_kind_from_store(&record.change_kind)?,
+            entry_kind: kind_from_store(&record.entry_kind)?,
+            previous_blob_id,
+            blob_id,
+            object_ref: record.object_ref,
+            size_bytes: record.size_bytes,
+            status: record.status,
+            detected_at: record.detected_at,
+        })
+    }
 }
 
 pub fn local_project_id(root_path: impl AsRef<Path>) -> ProjectId {
@@ -682,6 +976,17 @@ fn kind_from_store(value: &str) -> StoreResult<ManifestEntryKind> {
         "unsupported" => Ok(ManifestEntryKind::Unsupported),
         _ => Err(StoreError::InvalidStoredValue(format!(
             "unknown manifest entry kind: {value}"
+        ))),
+    }
+}
+
+fn change_kind_from_store(value: &str) -> StoreResult<LocalChangeKind> {
+    match value {
+        "created" => Ok(LocalChangeKind::Created),
+        "modified" => Ok(LocalChangeKind::Modified),
+        "deleted" => Ok(LocalChangeKind::Deleted),
+        _ => Err(StoreError::InvalidStoredValue(format!(
+            "unknown local change kind: {value}"
         ))),
     }
 }
@@ -888,6 +1193,50 @@ INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (2, 'manifest_entries_support_unsupported_kind');
 
 PRAGMA user_version = 2;
+
+COMMIT;
+"#;
+
+const MIGRATION_3_PENDING_LOCAL_CHANGES: &str = r#"
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS pending_local_changes (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    base_snapshot_id TEXT REFERENCES snapshots(id) ON DELETE SET NULL,
+    path TEXT NOT NULL,
+    change_kind TEXT NOT NULL CHECK (change_kind IN ('created', 'modified', 'deleted')),
+    entry_kind TEXT NOT NULL CHECK (entry_kind = 'file'),
+    previous_blob_id TEXT REFERENCES blobs(id) ON DELETE SET NULL,
+    blob_id TEXT REFERENCES blobs(id) ON DELETE RESTRICT,
+    object_ref TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+    status TEXT NOT NULL CHECK (status = 'pending'),
+    detected_at TEXT NOT NULL,
+    CHECK (
+        (
+            change_kind IN ('created', 'modified')
+            AND blob_id IS NOT NULL
+            AND object_ref IS NOT NULL
+        )
+        OR (
+            change_kind = 'deleted'
+            AND blob_id IS NULL
+            AND object_ref IS NULL
+        )
+    ),
+    UNIQUE (project_id, path, status)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_local_changes_project_path
+    ON pending_local_changes(project_id, path);
+CREATE INDEX IF NOT EXISTS idx_pending_local_changes_base_snapshot
+    ON pending_local_changes(base_snapshot_id);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (3, 'pending_local_change_feed');
+
+PRAGMA user_version = 3;
 
 COMMIT;
 "#;
@@ -1108,6 +1457,168 @@ mod tests {
             error.to_string(),
             "snapshot already exists: snapshot-duplicate"
         );
+    }
+
+    #[test]
+    fn pending_local_change_feed_round_trips_and_replaces_project_rows() {
+        let mut store = migrated_store();
+        let created_blob = blob_id_for(b"created");
+        let modified_previous_blob = blob_id_for(b"before");
+        let modified_blob = blob_id_for(b"after");
+        let deleted_blob = blob_id_for(b"deleted");
+        let created_path = Path::new("created.txt");
+        let modified_path = Path::new("src/main.rs");
+        let deleted_path = Path::new("deleted.txt");
+        let include = PolicyDecision::Include;
+        let base_entries = vec![
+            NewSnapshotManifestEntry {
+                relative_path: modified_path,
+                kind: ManifestEntryKind::File,
+                size_bytes: 6,
+                blob_id: Some(&modified_previous_blob),
+                object_ref: Some("blobs/b3/before"),
+                policy_decision: &include,
+            },
+            NewSnapshotManifestEntry {
+                relative_path: deleted_path,
+                kind: ManifestEntryKind::File,
+                size_bytes: 7,
+                blob_id: Some(&deleted_blob),
+                object_ref: Some("blobs/b3/deleted"),
+                policy_decision: &include,
+            },
+        ];
+        store
+            .persist_draft_snapshot(&draft("snapshot-base", &base_entries))
+            .expect("base snapshot persists");
+
+        let changes = vec![
+            NewPendingLocalChange {
+                id: "change-created",
+                base_snapshot_id: Some("snapshot-base"),
+                relative_path: created_path,
+                kind: LocalChangeKind::Created,
+                previous_blob_id: None,
+                blob_id: Some(&created_blob),
+                object_ref: Some("blobs/b3/created"),
+                size_bytes: 7,
+            },
+            NewPendingLocalChange {
+                id: "change-modified",
+                base_snapshot_id: Some("snapshot-base"),
+                relative_path: modified_path,
+                kind: LocalChangeKind::Modified,
+                previous_blob_id: Some(&modified_previous_blob),
+                blob_id: Some(&modified_blob),
+                object_ref: Some("blobs/b3/after"),
+                size_bytes: 5,
+            },
+            NewPendingLocalChange {
+                id: "change-deleted",
+                base_snapshot_id: Some("snapshot-base"),
+                relative_path: deleted_path,
+                kind: LocalChangeKind::Deleted,
+                previous_blob_id: Some(&deleted_blob),
+                blob_id: None,
+                object_ref: None,
+                size_bytes: 7,
+            },
+        ];
+
+        store
+            .replace_pending_local_changes(
+                &NewProject {
+                    id: "project-1",
+                    root_path: "/workspace/devbox",
+                    kind: "Rust",
+                    display_name: "devbox",
+                    discovered_at: "2026-06-18T10:02:00Z",
+                },
+                &changes,
+                "2026-06-18T10:03:00Z",
+            )
+            .expect("changes persist");
+        store
+            .replace_pending_local_changes(
+                &NewProject {
+                    id: "project-1",
+                    root_path: "/workspace/devbox",
+                    kind: "Rust",
+                    display_name: "devbox",
+                    discovered_at: "2026-06-18T10:02:00Z",
+                },
+                &changes,
+                "2026-06-18T10:04:00Z",
+            )
+            .expect("repeated change scan replaces existing rows");
+
+        let pending = store
+            .list_pending_local_changes(Some("project-1"))
+            .expect("pending changes list");
+        assert_eq!(pending.len(), 3);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|change| (&change.relative_path, &change.change_kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (&PathBuf::from("created.txt"), &LocalChangeKind::Created),
+                (&PathBuf::from("deleted.txt"), &LocalChangeKind::Deleted),
+                (&PathBuf::from("src/main.rs"), &LocalChangeKind::Modified),
+            ]
+        );
+        assert_eq!(pending[0].blob_id, Some(created_blob));
+        assert_eq!(pending[1].blob_id, None);
+        assert_eq!(pending[2].previous_blob_id, Some(modified_previous_blob));
+
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "pending_local_changes"), 3);
+    }
+
+    #[test]
+    fn pending_local_change_constraints_reject_upload_without_blob() {
+        let store = migrated_store();
+        store
+            .insert_project(&NewProject {
+                id: "project-1",
+                root_path: "/workspace/devbox",
+                kind: "Rust",
+                display_name: "devbox",
+                discovered_at: "2026-06-18T10:00:00Z",
+            })
+            .expect("project inserts");
+
+        let result = store.conn.execute(
+            r#"
+            INSERT INTO pending_local_changes (
+                id,
+                project_id,
+                path,
+                change_kind,
+                entry_kind,
+                size_bytes,
+                status,
+                detected_at
+            )
+            VALUES (
+                'invalid-change',
+                'project-1',
+                'missing-blob.txt',
+                'created',
+                'file',
+                10,
+                'pending',
+                '2026-06-18T10:00:00Z'
+            )
+            "#,
+            [],
+        );
+
+        assert!(matches!(
+            result,
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation
+        ));
     }
 
     #[test]
