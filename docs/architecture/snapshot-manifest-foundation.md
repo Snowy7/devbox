@@ -29,6 +29,7 @@ The builder walks a local project directory, applies the existing generated-arti
 - explicit deferral for unsupported filesystem node types
 - stable draft snapshot identity derived from canonical manifest entry fields
 - aggregate summary counts for dry-run and future operation records
+- local restore planning and materialization from persisted manifest entries
 
 The CLI exposes the current surface as:
 
@@ -37,6 +38,8 @@ devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>
 devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
 devbox snapshot list --db <DB_PATH>
 devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>
+devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --dry-run
+devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --apply
 ```
 
 Dry-run validates that the cache root is outside the snapshot root before initializing the cache, then creates local blob-cache objects for included files and prints the draft manifest summary. It intentionally does not write SQLite metadata.
@@ -77,11 +80,28 @@ The local cache remains the source of file bytes. SQLite should store references
 
 Snapshot ids are still stable draft manifest ids derived from manifest content. Attempting to persist the same snapshot id twice returns a duplicate snapshot error rather than silently creating a second row for the same manifest.
 
+## Local Restore Foundation
+
+`devbox snapshot restore` materializes only included regular files and included directories from an already persisted snapshot. The CLI adapter loads the snapshot metadata from SQLite, opens the local `BlobCache`, and asks `devbox-snapshot` to build a restore plan. The snapshot crate does not query SQLite directly.
+
+Restore defaults to dry-run unless `--apply` is provided. The dry-run output is line-oriented and includes the snapshot id, target path and target status, whether apply is allowed, files to write, directories to create, skipped entries, missing blobs, and total bytes.
+
+Apply is intentionally conservative:
+
+- the target must be missing or an empty directory
+- restore refuses target symlinks, files, and non-empty directories
+- manifest paths must be relative normal paths with no absolute roots, prefixes, parent segments, current-directory segments, or alternate separators
+- all included file blob ids and object refs must be present before apply is allowed
+- existing target files are never overwritten
+- file bytes are written to a temporary file in the destination directory and then renamed into place
+- symlinks, unsupported nodes, excluded paths, and entries requiring user decisions are reported as skipped and are not materialized
+
+This is the local "make my code folder appear from the cache" foundation. It does not yet try to merge into an existing checkout, preserve permissions, restore symlinks, rehydrate generated dependencies, or compare Git state.
+
 ## Deferred
 
 This slice intentionally does not implement:
 
-- restore or materialization
 - daemon automation
 - filesystem watching
 - `.gitignore` parsing

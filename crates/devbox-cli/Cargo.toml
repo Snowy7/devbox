@@ -16,4 +16,5 @@ devbox-snapshot = { path = "../devbox-snapshot" }
 devbox-store = { path = "../devbox-store" }
 
 [dev-dependencies]
+rusqlite = "0.31"
 tempfile = "3"

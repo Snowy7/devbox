@@ -1,6 +1,9 @@
 use devbox_core::scanner::ProjectScanner;
-use devbox_core::PolicyDecision;
-use devbox_snapshot::SnapshotManifestBuilder;
+use devbox_core::{ManifestEntryKind, PolicyDecision};
+use devbox_snapshot::{
+    RestoreMaterializer, RestorePlan, RestoreSkippedEntry, RestoreTargetStatus, RestoreWrite,
+    SnapshotManifestBuilder,
+};
 use devbox_store::{
     local_project_id, path_to_store_string, BlobCache, ManifestEntryRecord, NewProject,
     NewSnapshot, NewSnapshotDraft, NewSnapshotManifestEntry, PersistedSnapshot, Store,
@@ -43,6 +46,13 @@ fn main() -> ExitCode {
 
 fn run_snapshot(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
+        Some("restore") => match snapshot_restore(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                ExitCode::from(1)
+            }
+        },
         Some("list") => match snapshot_list(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -89,6 +99,15 @@ struct SnapshotCreateArgs {
     cache_root: String,
     dry_run: bool,
     path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotRestoreArgs {
+    db_path: String,
+    cache_root: String,
+    target: String,
+    snapshot_id: String,
+    apply: bool,
 }
 
 fn parse_snapshot_create_args(args: &[String]) -> Result<SnapshotCreateArgs, String> {
@@ -141,6 +160,68 @@ fn parse_snapshot_create_args(args: &[String]) -> Result<SnapshotCreateArgs, Str
         cache_root,
         dry_run,
         path,
+    })
+}
+
+fn parse_snapshot_restore_args(args: &[String]) -> Result<SnapshotRestoreArgs, String> {
+    let mut db_path = None;
+    let mut cache_root = None;
+    let mut target = None;
+    let mut snapshot_id = None;
+    let mut dry_run = false;
+    let mut apply = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--cache" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--cache requires a path".to_string())?;
+                cache_root = Some(value.clone());
+            }
+            "--to" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--to requires a target directory".to_string())?;
+                target = Some(value.clone());
+            }
+            "--dry-run" => dry_run = true,
+            "--apply" => apply = true,
+            value if value.starts_with('-') => {
+                return Err(format!("unknown snapshot restore option '{value}'"));
+            }
+            value => {
+                if snapshot_id.replace(value.to_string()).is_some() {
+                    return Err("snapshot restore accepts exactly one snapshot id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    if dry_run && apply {
+        return Err("snapshot restore accepts only one of --dry-run or --apply".to_string());
+    }
+
+    Ok(SnapshotRestoreArgs {
+        db_path: db_path.ok_or_else(|| "snapshot restore requires --db <DB_PATH>".to_string())?,
+        cache_root: cache_root
+            .ok_or_else(|| "snapshot restore requires --cache <CACHE_ROOT>".to_string())?,
+        target: target.ok_or_else(|| "snapshot restore requires --to <TARGET_DIR>".to_string())?,
+        snapshot_id: snapshot_id
+            .ok_or_else(|| "snapshot restore requires a snapshot id".to_string())?,
+        apply,
     })
 }
 
@@ -222,6 +303,36 @@ fn snapshot_create(args: &SnapshotCreateArgs) -> Result<(), Box<dyn std::error::
 
     let persisted = store.persist_draft_snapshot(&draft)?;
     print_persisted_snapshot_summary(&persisted, db_path, &args.cache_root);
+
+    Ok(())
+}
+
+fn snapshot_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let args = parse_snapshot_restore_args(args).map_err(|message| {
+        format!(
+            "{message}\nUsage: devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> [--dry-run|--apply]"
+        )
+    })?;
+
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let persisted = store
+        .snapshot_with_entries(&args.snapshot_id)?
+        .ok_or_else(|| format!("snapshot not found: {}", args.snapshot_id))?;
+    let cache = BlobCache::open(&args.cache_root)?;
+    let plan = RestorePlan::from_persisted_snapshot(&persisted, &cache, &args.target)?;
+
+    if !args.apply {
+        print_restore_plan(&plan);
+        return Ok(());
+    }
+
+    if !plan.apply_allowed() {
+        return Err(restore_block_reason(&plan).into());
+    }
+
+    let summary = RestoreMaterializer::new(cache).apply(&plan)?;
+    print_restore_apply_result(&plan, summary.bytes_to_write);
 
     Ok(())
 }
@@ -358,6 +469,102 @@ fn print_snapshot_detail(persisted: &PersistedSnapshot) {
     }
 }
 
+fn print_restore_plan(plan: &RestorePlan) {
+    println!("Restore mode: dry-run");
+    println!("Snapshot id: {}", plan.snapshot_id());
+    println!("Target: {}", plan.target().display());
+    println!("Target status: {}", plan.target_status().as_str());
+    println!("Apply allowed: {}", plan.apply_allowed());
+    println!("Bytes to write: {}", plan.total_bytes());
+    println!("Directories to create: {}", plan.dirs_to_create().len());
+    for dir in plan.dirs_to_create() {
+        println!("DIR\t{}", path_to_store_string(dir));
+    }
+    println!("Files to write: {}", plan.files_to_write().len());
+    for file in plan.files_to_write() {
+        print_restore_file("FILE", file);
+    }
+    println!("Skipped entries: {}", plan.skipped_entries().len());
+    for entry in plan.skipped_entries() {
+        print_restore_skip(entry);
+    }
+    println!("Missing blobs: {}", plan.missing_blobs().len());
+    for missing in plan.missing_blobs() {
+        println!(
+            "MISSING\t{}\t{}\t{}\t{}",
+            path_to_store_string(&missing.path),
+            missing
+                .blob_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "-".to_string()),
+            missing.object_ref.as_deref().unwrap_or("-"),
+            missing.reason
+        );
+    }
+}
+
+fn print_restore_apply_result(plan: &RestorePlan, bytes_written: u64) {
+    println!("Restore mode: apply");
+    println!("Snapshot id: {}", plan.snapshot_id());
+    println!("Target: {}", plan.target().display());
+    println!("Directories created: {}", plan.dirs_to_create().len());
+    for dir in plan.dirs_to_create() {
+        println!("DIR\t{}", path_to_store_string(dir));
+    }
+    println!("Files written: {}", plan.files_to_write().len());
+    for file in plan.files_to_write() {
+        print_restore_file("FILE", file);
+    }
+    println!("Skipped entries: {}", plan.skipped_entries().len());
+    for entry in plan.skipped_entries() {
+        print_restore_skip(entry);
+    }
+    println!("Bytes written: {bytes_written}");
+}
+
+fn print_restore_file(prefix: &str, file: &RestoreWrite) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        prefix,
+        path_to_store_string(&file.path),
+        file.size_bytes,
+        file.blob_id,
+        file.object_ref
+    );
+}
+
+fn print_restore_skip(entry: &RestoreSkippedEntry) {
+    println!(
+        "SKIP\t{}\t{}\t{}\t{}",
+        path_to_store_string(&entry.path),
+        manifest_kind_value(&entry.kind),
+        entry.decision,
+        entry.reason
+    );
+}
+
+fn restore_block_reason(plan: &RestorePlan) -> String {
+    if !matches!(
+        plan.target_status(),
+        RestoreTargetStatus::Missing | RestoreTargetStatus::EmptyDirectory
+    ) {
+        return format!(
+            "restore apply blocked: target must be missing or empty; target status is {}",
+            plan.target_status().as_str()
+        );
+    }
+
+    if !plan.missing_blobs().is_empty() {
+        return format!(
+            "restore apply blocked: {} blob reference(s) are missing",
+            plan.missing_blobs().len()
+        );
+    }
+
+    "restore apply blocked".to_string()
+}
+
 fn summarize_entries(entries: &[ManifestEntryRecord]) -> (usize, usize, usize, usize, usize) {
     let mut included_files = 0;
     let mut included_directories = 0;
@@ -388,11 +595,15 @@ fn summarize_entries(entries: &[ManifestEntryRecord]) -> (usize, usize, usize, u
 }
 
 fn manifest_kind_name(entry: &ManifestEntryRecord) -> &'static str {
-    match entry.kind {
-        devbox_core::ManifestEntryKind::File => "file",
-        devbox_core::ManifestEntryKind::Directory => "directory",
-        devbox_core::ManifestEntryKind::Symlink => "symlink",
-        devbox_core::ManifestEntryKind::Unsupported => "unsupported",
+    manifest_kind_value(&entry.kind)
+}
+
+fn manifest_kind_value(kind: &ManifestEntryKind) -> &'static str {
+    match kind {
+        ManifestEntryKind::File => "file",
+        ManifestEntryKind::Directory => "directory",
+        ManifestEntryKind::Symlink => "symlink",
+        ManifestEntryKind::Unsupported => "unsupported",
     }
 }
 
@@ -419,6 +630,9 @@ fn print_snapshot_usage() {
     eprintln!("  devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>");
     eprintln!("  devbox snapshot list --db <DB_PATH>");
     eprintln!("  devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>");
+    eprintln!(
+        "  devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> [--dry-run|--apply]"
+    );
 }
 
 fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::error::Error>> {
@@ -693,7 +907,7 @@ fn print_help() {
     println!();
     println!("Commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
-    println!("  snapshot   Build, persist, list, and show local snapshot manifests");
+    println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
     println!("  restore    Placeholder for snapshot restore");
     println!("  explain    Placeholder for policy and sync explanations");

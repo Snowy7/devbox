@@ -1,3 +1,4 @@
+use rusqlite::{params, Connection};
 use std::fs;
 use std::process::{Command, Output};
 
@@ -47,6 +48,53 @@ fn snapshot_create_list_and_show_smoke() {
     assert!(show_stdout.contains("src/main.rs\tfile\tinclude"));
     assert!(show_stdout.contains("node_modules\tdirectory\texclude"));
     assert!(show_stdout.contains("blobs/b3/"));
+
+    let restore_dry_run = run_devbox([
+        "snapshot",
+        "restore",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--to",
+        fixture.target_path(),
+        snapshot_id,
+        "--dry-run",
+    ]);
+    assert_success(&restore_dry_run);
+    let restore_dry_run_stdout = stdout(&restore_dry_run);
+    assert!(restore_dry_run_stdout.contains("Restore mode: dry-run"));
+    assert!(restore_dry_run_stdout.contains("Apply allowed: true"));
+    assert!(restore_dry_run_stdout.contains("FILE\tsrc/main.rs"));
+    assert!(restore_dry_run_stdout.contains("SKIP\tnode_modules\tdirectory\texclude"));
+    assert!(!fixture.target_path_buf().exists());
+
+    let restore_apply = run_devbox([
+        "snapshot",
+        "restore",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--to",
+        fixture.target_path(),
+        snapshot_id,
+        "--apply",
+    ]);
+    assert_success(&restore_apply);
+    let restore_apply_stdout = stdout(&restore_apply);
+    assert!(restore_apply_stdout.contains("Restore mode: apply"));
+    assert!(restore_apply_stdout.contains("Files written: 2"));
+    assert!(restore_apply_stdout.contains("Skipped entries: 1"));
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("src/main.rs")).expect("restored source reads"),
+        "fn main() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("Cargo.toml")).expect("restored manifest reads"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n"
+    );
+    assert!(!fixture.target.join("node_modules").exists());
 }
 
 #[test]
@@ -67,6 +115,53 @@ fn snapshot_dry_run_stays_non_persisting() {
     assert!(output.contains("Draft snapshot id: "));
     assert!(output.contains("SQLite persistence: deferred"));
     assert!(!fixture.db_path_buf().exists());
+}
+
+#[test]
+fn snapshot_restore_rejects_tampered_current_dir_manifest_path() {
+    let fixture = SnapshotCliFixture::new();
+    fixture.write("src/main.rs", "fn main() {}\n");
+
+    let create = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&create);
+    let snapshot_id = stdout(&create)
+        .lines()
+        .find_map(|line| line.strip_prefix("Snapshot id: "))
+        .expect("snapshot id prints")
+        .to_string();
+
+    let conn = Connection::open(fixture.db_path()).expect("metadata database opens");
+    let changed = conn
+        .execute(
+            "UPDATE manifest_entries SET path = ?1 WHERE snapshot_id = ?2 AND path = ?3",
+            params!["src/./main.rs", snapshot_id, "src/main.rs"],
+        )
+        .expect("manifest path tampers");
+    assert_eq!(changed, 1);
+
+    let restore = run_devbox([
+        "snapshot",
+        "restore",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--to",
+        fixture.target_path(),
+        snapshot_id.as_str(),
+        "--dry-run",
+    ]);
+    assert_failure(&restore);
+
+    assert!(stderr(&restore).contains("unsafe manifest path"));
+    assert!(!fixture.target_path_buf().exists());
 }
 
 #[test]
@@ -149,6 +244,7 @@ struct SnapshotCliFixture {
     project: std::path::PathBuf,
     cache: std::path::PathBuf,
     db: std::path::PathBuf,
+    target: std::path::PathBuf,
 }
 
 impl SnapshotCliFixture {
@@ -157,6 +253,7 @@ impl SnapshotCliFixture {
         let project = dir.path().join("project");
         let cache = dir.path().join("cache");
         let db = dir.path().join("devbox.sqlite3");
+        let target = dir.path().join("target");
         fs::create_dir_all(&project).expect("project dir creates");
 
         Self {
@@ -164,6 +261,7 @@ impl SnapshotCliFixture {
             project,
             cache,
             db,
+            target,
         }
     }
 
@@ -189,6 +287,14 @@ impl SnapshotCliFixture {
 
     fn db_path_buf(&self) -> &std::path::Path {
         &self.db
+    }
+
+    fn target_path(&self) -> &str {
+        self.target.to_str().expect("test paths are UTF-8")
+    }
+
+    fn target_path_buf(&self) -> &std::path::Path {
+        &self.target
     }
 }
 

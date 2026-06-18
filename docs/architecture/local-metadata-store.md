@@ -47,11 +47,21 @@ The CLI surface for the persisted path is:
 devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
 devbox snapshot list --db <DB_PATH>
 devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>
+devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --dry-run
+devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --apply
 ```
 
 `devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>` remains non-persisting. Both dry-run and persisted creation reject a blob cache that sits inside the snapshot root before the cache can create directories.
 
 Persisting the same stable snapshot id twice currently returns a duplicate snapshot error. The project row is upserted so the local root metadata can be refreshed without rewriting existing snapshot rows.
+
+## Restore Read Boundary
+
+Restore uses SQLite as metadata lookup only. The CLI loads the persisted snapshot row and manifest entries through `Store::snapshot_with_entries`, then passes those records to `devbox-snapshot` with an opened local `BlobCache`.
+
+The store does not materialize files, interpret path safety, or read blob bytes. It remains responsible for preserving the manifest metadata and blob object references that make restore planning possible. Missing cache objects are detected by the restore planner before apply is allowed.
+
+The existing `restore_attempts` table is still reserved for a later operation log slice. This CLI foundation does not write restore attempt rows yet because there is no daemon operation lifecycle, retry model, or UI timeline consuming them.
 
 ## Migration Rules
 
@@ -78,7 +88,6 @@ Schema version `2` rebuilds `manifest_entries` with the same columns and constra
 
 This boundary does not implement:
 
-- restore planning or materialization
 - filesystem watching
 - cloud sync
 - encryption
