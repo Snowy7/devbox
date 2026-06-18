@@ -83,9 +83,11 @@ Current Phase 1 foundation status:
 - local sync preflight reconciles receiving device/project cursors with local and incoming
   snapshots, refuses divergent local/mock import or materialization, and persists readable conflict
   records without advancing the cursor
-- real cloud authentication, managed object-storage credential provisioning, wiring local sync flows
-  to hosted metadata, production pairing UX, explicit secret allow policy, automatic merge/apply
-  resolution, and conflict UI remain later Phase 1 work
+- local/mock publish/import/materialize can opt into in-process hosted metadata for manifest
+  discovery and server-side cursor compare-and-set
+- real cloud authentication, managed object-storage credential provisioning, production pairing UX,
+  explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and
+  production deployment hardening remain later Phase 1 work
 
 ## Content Addressing
 
@@ -192,11 +194,13 @@ project-a
 5. Create local snapshot manifest.
 6. Append operation log entry.
 7. Upload missing blobs and encrypted manifest.
-8. Update device cursor.
-9. On receiving device, compare local cursor and policy.
-10. Refuse divergent local and incoming snapshots with a readable conflict record before applying
+8. In hosted metadata mode, register published snapshot metadata.
+9. Update device cursor, using hosted compare-and-set first when metadata mode is enabled.
+10. On receiving device, discover the manifest object key through hosted metadata when enabled,
+    then compare local cursor and policy.
+11. Refuse divergent local and incoming snapshots with a readable conflict record before applying
     bytes.
-11. Materialize snapshot atomically with rollback when preflight and restore safety allow.
+12. Materialize snapshot atomically with rollback when preflight and restore safety allow.
 
 The first alpha workflow proves desktop-to-laptop continuation, but the account/device architecture
 must remain multi-device-capable. A local installation should have one current local device identity,

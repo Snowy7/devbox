@@ -14,13 +14,13 @@ This slice completes the first local/mock Phase 1 vertical path for second-devic
 This is still a local/mock foundation.
 
 It does not implement production account ownership proof, managed R2/S3 credential provisioning,
-production pairing UX, automatic conflict resolution, or Electron UI. A hosted metadata API
-foundation now exists for server-side metadata and compare-and-set cursors, but this materialization
-path is still local/mock and is not wired to that service. Local preflight now refuses divergent
-local/mock import/materialize paths and persists local conflict records, but it does not resolve or
-merge them. The manual smoke path can use `--mock-key-source-db` so a receiving local context can
-decrypt a publisher's locally encrypted objects without printing raw key material. That flag is a
-test/dev trust bootstrap, not a production key exchange.
+production pairing UX, automatic conflict resolution, or Electron UI. The materialization path can
+now opt into an in-process mock-dev hosted metadata store for manifest discovery and server-side
+cursor compare-and-set, but the default remains local/mock only. Local preflight now refuses
+divergent local/mock import/materialize paths and persists local conflict records, but it does not
+resolve or merge them. The manual smoke path can use `--mock-key-source-db` so a receiving local
+context can decrypt a publisher's locally encrypted objects without printing raw key material. That
+flag is a test/dev trust bootstrap, not a production key exchange.
 
 ## Domain Boundary
 
@@ -104,12 +104,18 @@ The same imported snapshot can also be materialized with:
 devbox snapshot restore --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --to <TARGET> <SNAPSHOT_ID> --apply
 ```
 
+## Hosted Metadata Opt-In
+
+For dev/test wiring, add `--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>` to publish.
+For import/materialize, also pass `--metadata-project <PROJECT_ID>` so the manifest object key is
+looked up from project-scoped hosted metadata instead of derived locally. Cursor advancement uses
+hosted compare-and-set first; if the hosted cursor is stale, the local cursor remains unchanged.
+
 ## Deferred
 
 Remaining Phase 1 work includes:
 
 - production account ownership and key exchange
-- wiring materialization to hosted metadata service and server-side cursor reconciliation
 - managed R2/S3 credential provisioning, rotation, and hosted object indexing
 - production pairing UX, recovery, and rotation
 - automatic conflict merge/apply resolution and user-facing conflict flows

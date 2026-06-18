@@ -83,8 +83,10 @@ precondition errors rather than raw SQLite messages.
 `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]` validates the local metadata
 service configuration without making a network request.
 
-The existing local-first CLI, local SQLite store, encrypted blob sync, S3-compatible provider, and
-local/mock materialization flows are not wired to the hosted metadata service in this slice.
+The local/mock publish, import, and materialize flows can now opt into an in-process mock-dev SQLite
+metadata store. That wiring registers published snapshot metadata, discovers manifest object keys by
+project/snapshot id, and advances device/project cursors with hosted compare-and-set semantics while
+keeping normal CI free of live network services.
 
 ## Future Postgres Boundary
 
@@ -106,7 +108,6 @@ Remaining Phase 1 work includes:
 - production sign-in and account ownership proof
 - managed R2/S3 credential provisioning and rotation
 - production pairing UX, recovery, and rotation
-- wiring sync publish/import/materialize flows to the hosted service
 - automatic conflict merge/apply resolution and user-facing conflict UI
 - Electron tray/status integration
 - production deployment hardening, observability, and abuse protection

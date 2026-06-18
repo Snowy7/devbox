@@ -14,8 +14,8 @@ The implementation is local-first:
 
 It does not add production auth, managed R2/S3 credential provisioning, Electron UI, automatic
 merge/apply resolution, Git replacement UX, or a hosted conflict service. A hosted metadata API
-foundation now models server-side compare-and-set cursors, but this preflight path remains local and
-is not wired to the service.
+foundation now models server-side compare-and-set cursors, and the opt-in mock-dev sync wiring can
+use that hosted cursor CAS. The preflight comparison and conflict records remain local.
 
 ## Preflight Semantics
 
@@ -54,6 +54,10 @@ On successful `sync import-snapshot`, the receiving device/project cursor advanc
 snapshot as before. `sync materialize` imports the bundle, blobs, and metadata without advancing the
 cursor, then commits the cursor only after restore planning and the requested `--apply` behavior
 succeed. If restore safety or apply fails, the cursor remains at the previous value.
+
+When hosted mock-dev metadata mode is enabled, cursor commit first sends the local expected cursor
+to hosted metadata compare-and-set. A stale hosted cursor conflict refuses the operation and leaves
+the local cursor unchanged.
 
 ## Secret and Metadata Safety
 

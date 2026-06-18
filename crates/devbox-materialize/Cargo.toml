@@ -11,6 +11,7 @@ blake3 = "1"
 devbox-auth = { path = "../devbox-auth" }
 devbox-conflict = { path = "../devbox-conflict" }
 devbox-core = { path = "../devbox-core" }
+devbox-metadata = { path = "../devbox-metadata" }
 devbox-snapshot = { path = "../devbox-snapshot" }
 devbox-store = { path = "../devbox-store" }
 devbox-sync = { path = "../devbox-sync" }

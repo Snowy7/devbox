@@ -63,13 +63,17 @@ Completed foundations:
 - local conflict-as-divergent-snapshot compare and persistence metadata
 - local sync preflight and cursor reconciliation that refuses divergent local/mock import or
   materialization and persists readable conflict records without advancing cursors
+- opt-in mock-dev hosted metadata wiring for publish/import/materialize manifest discovery and
+  server-side device/project cursor compare-and-set
 
 Remaining auth and pairing work:
 
 - production sign-in and account ownership proof
-- wiring local sync flows to the hosted metadata service
 - production pairing UX, recovery, and rotation flows
 - managed cloud object credentials, provisioning, and rotation
+- production hosted metadata service integration beyond the in-process mock-dev test boundary
+- production deployment hardening
+- Electron UI integration
 - explicit path-scoped secret allow/template/envelope policy
 - automatic conflict merge/apply resolution and user-facing conflict flows
 
