@@ -208,15 +208,8 @@ impl LocalFilesystemBlobProvider {
 impl RemoteBlobProvider for LocalFilesystemBlobProvider {
     fn put(&self, key: &ObjectKey, bytes: &[u8]) -> SyncResult<PutOutcome> {
         let final_path = self.path_for(key);
-        if final_path.exists() {
-            let existing = fs::read(&final_path)?;
-            if existing == bytes {
-                return Ok(PutOutcome {
-                    uploaded: false,
-                    size_bytes: existing.len() as u64,
-                });
-            }
-            return Err(SyncError::RemoteObjectAlreadyExists { key: key.clone() });
+        if let Some(outcome) = existing_put_outcome(&final_path, key, bytes)? {
+            return Ok(outcome);
         }
 
         if let Some(parent) = final_path.parent() {
@@ -233,9 +226,18 @@ impl RemoteBlobProvider for LocalFilesystemBlobProvider {
         }
         drop(temp_file);
 
-        if let Err(error) = fs::rename(&temp_path, &final_path) {
-            cleanup_temp_file(&temp_path);
-            return Err(error.into());
+        let result = commit_new_file_no_overwrite(&temp_path, &final_path);
+        cleanup_temp_file(&temp_path);
+        match result {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if let Some(outcome) = existing_put_outcome(&final_path, key, bytes)? {
+                    return Ok(outcome);
+                }
+
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
         }
 
         Ok(PutOutcome {
@@ -369,13 +371,15 @@ pub fn download_blob_to_cache(
         .get(object_key)?
         .ok_or_else(|| SyncError::MissingRemoteObject(object_key.clone()))?;
     let plaintext = decrypt_payload(key, object_key, &encrypted)?;
-    let blob = cache.write_bytes(&plaintext)?;
-    if blob.id() != expected_blob_id {
+    let actual_blob_id = BlobId::from_blake3_hex(blake3::hash(&plaintext).to_hex().to_string())
+        .expect("BLAKE3 returns a 64-character hex digest");
+    if &actual_blob_id != expected_blob_id {
         return Err(SyncError::BlobIdMismatch {
             expected: expected_blob_id.clone(),
-            actual: blob.id().clone(),
+            actual: actual_blob_id,
         });
     }
+    cache.write_bytes(&plaintext)?;
 
     Ok(DownloadedBlob {
         object_key: object_key.clone(),
@@ -456,6 +460,32 @@ fn cleanup_temp_file(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+fn existing_put_outcome(
+    final_path: &Path,
+    key: &ObjectKey,
+    bytes: &[u8],
+) -> SyncResult<Option<PutOutcome>> {
+    match fs::read(final_path) {
+        Ok(existing) if existing == bytes => Ok(Some(PutOutcome {
+            uploaded: false,
+            size_bytes: existing.len() as u64,
+        })),
+        Ok(_) => Err(SyncError::RemoteObjectAlreadyExists { key: key.clone() }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn commit_new_file_no_overwrite(source: &Path, destination: &Path) -> io::Result<()> {
+    match fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists || destination.exists() => {
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, error))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn hex_value(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
@@ -505,6 +535,28 @@ mod tests {
     }
 
     #[test]
+    fn no_overwrite_commit_refuses_to_replace_existing_object_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.tmp");
+        let destination = dir.path().join("object");
+        fs::write(&source, b"new encrypted bytes").expect("source writes");
+        fs::write(&destination, b"existing encrypted bytes").expect("destination writes");
+
+        let error = commit_new_file_no_overwrite(&source, &destination)
+            .expect_err("existing destination is not replaced");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&destination).expect("destination reads"),
+            b"existing encrypted bytes"
+        );
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"new encrypted bytes"
+        );
+    }
+
+    #[test]
     fn local_provider_rejects_unsafe_object_keys() {
         assert!(ObjectKey::new("../escape").is_err());
         assert!(ObjectKey::new("nested/../escape").is_err());
@@ -548,6 +600,47 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_download_does_not_commit_unexpected_blob_to_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let provider =
+            LocalFilesystemBlobProvider::open(dir.path().join("remote")).expect("provider opens");
+        let target_cache = BlobCache::open(dir.path().join("target-cache")).expect("cache opens");
+        let key = SyncKey::from_bytes([11; 32]);
+        let actual_plaintext = b"actual unexpected plaintext";
+        let actual_blob_id =
+            BlobId::from_blake3_hex(blake3::hash(actual_plaintext).to_hex().to_string())
+                .expect("valid actual blob id");
+        let expected_blob_id = BlobId::from_blake3_hex(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect("valid expected blob id");
+        let object_key = encrypted_blob_object_key(&expected_blob_id);
+        let encrypted =
+            encrypt_payload(&key, &object_key, actual_plaintext).expect("encryption works");
+        provider
+            .put(&object_key, &encrypted)
+            .expect("remote object writes");
+
+        let error = download_blob_to_cache(
+            &target_cache,
+            &provider,
+            &key,
+            &expected_blob_id,
+            &object_key,
+        )
+        .expect_err("mismatched blob id fails");
+
+        assert!(matches!(
+            error,
+            SyncError::BlobIdMismatch { expected, actual }
+                if expected == expected_blob_id && actual == actual_blob_id
+        ));
+        assert!(!target_cache.exists(&expected_blob_id));
+        assert!(!target_cache.exists(&actual_blob_id));
+        assert_eq!(cache_file_count(target_cache.root()), 0);
+    }
+
+    #[test]
     fn wrong_key_fails_to_decrypt() {
         let object_key = ObjectKey::new("encrypted/blob").expect("key parses");
         let first_key = SyncKey::from_bytes([1; 32]);
@@ -582,5 +675,28 @@ mod tests {
             SyncError::MissingRemoteObject(missing) if missing == object_key
         ));
         assert!(!cache.exists(&blob_id));
+    }
+
+    fn cache_file_count(root: &Path) -> usize {
+        count_files(&root.join("blobs"))
+    }
+
+    fn count_files(path: &Path) -> usize {
+        let mut count = 0;
+        let mut stack = vec![path.to_path_buf()];
+
+        while let Some(path) = stack.pop() {
+            for entry in fs::read_dir(path).expect("directory reads") {
+                let entry = entry.expect("directory entry reads");
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+
+        count
     }
 }
