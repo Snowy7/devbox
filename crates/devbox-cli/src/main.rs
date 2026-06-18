@@ -1,19 +1,16 @@
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::{ManifestEntryKind, PolicyDecision};
 use devbox_snapshot::{
-    LocalChangeFeedDiff, RestoreMaterializer, RestorePlan, RestoreSkippedEntry,
-    RestoreTargetStatus, RestoreWrite, SnapshotManifestBuilder,
+    preflight_cache_root, preflight_db_path, scan_local_change_feed, LocalChangeFeedScanOptions,
+    RestoreMaterializer, RestorePlan, RestoreSkippedEntry, RestoreTargetStatus, RestoreWrite,
+    SnapshotManifestBuilder,
 };
 use devbox_store::{
     local_project_id, path_to_store_string, BlobCache, LocalChangeKind, ManifestEntryRecord,
-    NewPendingLocalChange, NewProject, NewSnapshot, NewSnapshotDraft, NewSnapshotManifestEntry,
-    PendingLocalChangeRecord, PersistedSnapshot, Store,
+    NewProject, NewSnapshot, NewSnapshotDraft, NewSnapshotManifestEntry, PendingLocalChangeRecord,
+    PersistedSnapshot, Store,
 };
-use std::ffi::OsString;
-use std::fmt;
-use std::fs;
-use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -439,65 +436,20 @@ fn snapshot_create(args: &SnapshotCreateArgs) -> Result<(), Box<dyn std::error::
 }
 
 fn changes_scan(args: &ChangesScanArgs) -> Result<(), Box<dyn std::error::Error>> {
-    preflight_cache_root(Path::new(&args.cache_root), Path::new(&args.path))?;
-    preflight_db_path(Path::new(&args.db_path), Path::new(&args.path))?;
-
-    let cache = BlobCache::open(&args.cache_root)?;
-    let current = SnapshotManifestBuilder::new(cache).build_draft(&args.path)?;
-
-    let mut store = Store::open_file(&args.db_path)?;
-    store.apply_migrations()?;
-    let detected_at = store.current_timestamp()?;
-    let project_id = local_project_id(current.root()).to_string();
-    let root_path = current.root().display().to_string();
-    let display_name = current
-        .root()
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| root_path.clone());
-    let project_kind = project_kind_for_root(current.root());
-    let base = store.latest_snapshot_for_project(&project_id)?;
-    let diff = LocalChangeFeedDiff::compare(base.as_ref(), &current);
-    let change_ids = diff
-        .changes()
-        .iter()
-        .map(|change| change.stable_id(&project_id, diff.base_snapshot_id()))
-        .collect::<Vec<_>>();
-    let pending = diff
-        .changes()
-        .iter()
-        .enumerate()
-        .map(|(index, change)| NewPendingLocalChange {
-            id: &change_ids[index],
-            base_snapshot_id: diff.base_snapshot_id(),
-            relative_path: change.relative_path(),
-            kind: change.kind().clone(),
-            previous_blob_id: change.previous_blob_id(),
-            blob_id: change.blob_id(),
-            object_ref: change.object_ref(),
-            size_bytes: change.size_bytes(),
-        })
-        .collect::<Vec<_>>();
-
-    store.replace_pending_local_changes(
-        &NewProject {
-            id: &project_id,
-            root_path: &root_path,
-            kind: &project_kind,
-            display_name: &display_name,
-            discovered_at: &detected_at,
-        },
-        &pending,
-        &detected_at,
-    )?;
-
-    print_changes_scan_summary(
-        &project_id,
-        diff.base_snapshot_id(),
-        diff.summary(),
-        pending.len(),
+    let scan = scan_local_change_feed(&LocalChangeFeedScanOptions::new(
         &args.db_path,
         &args.cache_root,
+        &args.path,
+    ))?;
+    let db_path = scan.db_path().display().to_string();
+    let cache_root = scan.cache_root().display().to_string();
+    print_changes_scan_summary(
+        scan.project_id(),
+        scan.base_snapshot_id(),
+        scan.summary(),
+        scan.pending_operations(),
+        &db_path,
+        &cache_root,
     );
 
     Ok(())
@@ -920,160 +872,6 @@ fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::err
     Ok(Store::open_file(path)?)
 }
 
-#[derive(Debug)]
-enum SnapshotCliPreflightError {
-    Io {
-        path: PathBuf,
-        source: io::Error,
-    },
-    CacheInsideSnapshotRoot {
-        cache_root: PathBuf,
-        snapshot_root: PathBuf,
-    },
-    DatabaseInsideSnapshotRoot {
-        db_path: PathBuf,
-        snapshot_root: PathBuf,
-    },
-}
-
-impl fmt::Display for SnapshotCliPreflightError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "could not validate {}: {source}", path.display())
-            }
-            Self::CacheInsideSnapshotRoot {
-                cache_root,
-                snapshot_root,
-            } => write!(
-                f,
-                "blob cache root {} is inside snapshot root {}; choose a cache outside the project",
-                cache_root.display(),
-                snapshot_root.display()
-            ),
-            Self::DatabaseInsideSnapshotRoot {
-                db_path,
-                snapshot_root,
-            } => write!(
-                f,
-                "metadata database path {} is inside snapshot root {}; choose a database outside the project",
-                db_path.display(),
-                snapshot_root.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SnapshotCliPreflightError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::CacheInsideSnapshotRoot { .. } | Self::DatabaseInsideSnapshotRoot { .. } => None,
-        }
-    }
-}
-
-fn preflight_cache_root(
-    cache_root: &Path,
-    snapshot_root: &Path,
-) -> Result<(), SnapshotCliPreflightError> {
-    let snapshot_root = canonicalize_snapshot_root(snapshot_root)?;
-    let cache_root = resolve_without_creating(cache_root)?;
-
-    if cache_root == snapshot_root || cache_root.starts_with(&snapshot_root) {
-        return Err(SnapshotCliPreflightError::CacheInsideSnapshotRoot {
-            cache_root,
-            snapshot_root,
-        });
-    }
-
-    Ok(())
-}
-
-fn preflight_db_path(
-    db_path: &Path,
-    snapshot_root: &Path,
-) -> Result<(), SnapshotCliPreflightError> {
-    let snapshot_root = canonicalize_snapshot_root(snapshot_root)?;
-    let db_path = resolve_without_creating(db_path)?;
-
-    if db_path == snapshot_root || db_path.starts_with(&snapshot_root) {
-        return Err(SnapshotCliPreflightError::DatabaseInsideSnapshotRoot {
-            db_path,
-            snapshot_root,
-        });
-    }
-
-    Ok(())
-}
-
-fn canonicalize_snapshot_root(snapshot_root: &Path) -> Result<PathBuf, SnapshotCliPreflightError> {
-    fs::canonicalize(snapshot_root).map_err(|source| SnapshotCliPreflightError::Io {
-        path: snapshot_root.to_path_buf(),
-        source,
-    })
-}
-
-fn resolve_without_creating(path: &Path) -> Result<PathBuf, SnapshotCliPreflightError> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|source| SnapshotCliPreflightError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?
-            .join(path)
-    };
-    let absolute = lexical_normalize(&absolute);
-
-    if absolute.exists() {
-        return fs::canonicalize(&absolute).map_err(|source| SnapshotCliPreflightError::Io {
-            path: absolute,
-            source,
-        });
-    }
-
-    let mut existing = absolute.clone();
-    let mut missing = Vec::<OsString>::new();
-    while !existing.exists() {
-        let Some(name) = existing.file_name() else {
-            break;
-        };
-        missing.push(name.to_os_string());
-        if !existing.pop() {
-            break;
-        }
-    }
-
-    let mut resolved =
-        fs::canonicalize(&existing).map_err(|source| SnapshotCliPreflightError::Io {
-            path: absolute,
-            source,
-        })?;
-    for component in missing.iter().rev() {
-        resolved.push(component);
-    }
-
-    Ok(resolved)
-}
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-        }
-    }
-    normalized
-}
-
 fn run_status(args: &[String]) -> ExitCode {
     match args {
         [] => {
@@ -1197,6 +995,8 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use devbox_snapshot::SnapshotPreflightError;
+    use std::fs;
 
     #[test]
     fn preflight_rejects_in_tree_cache_without_creating_it() {
@@ -1210,7 +1010,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            SnapshotCliPreflightError::CacheInsideSnapshotRoot { .. }
+            SnapshotPreflightError::CacheInsideSnapshotRoot { .. }
         ));
         assert!(!cache_root.exists());
     }
@@ -1238,7 +1038,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            SnapshotCliPreflightError::DatabaseInsideSnapshotRoot { .. }
+            SnapshotPreflightError::DatabaseInsideSnapshotRoot { .. }
         ));
         assert!(!db_path.exists());
     }

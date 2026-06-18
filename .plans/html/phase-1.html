@@ -23,7 +23,7 @@
         <div>
           <div class="eyebrow">8 to 10 weeks</div>
           <h1>Prove desktop-to-laptop continuation.</h1>
-          <p class="lead">Take the local snapshot foundation and add encrypted sync, device pairing, second-device materialization, and a minimal control surface for trusted alpha users.</p>
+          <p class="lead">Take the local snapshot foundation through a local watcher first, then add encrypted sync, device pairing, second-device materialization, and a minimal control surface for trusted alpha users.</p>
         </div>
         <div class="callout">
           <strong>Exit gate:</strong> 25 alpha users complete the workflow with P50 project-ready time under 10 minutes and zero data loss or Git corruption incidents.
@@ -55,6 +55,7 @@
           <article class="card workstream blue-line">
             <h3>Client Sync</h3>
             <ul class="checklist">
+              <li>Local watcher feeds the pending operation log after debounced filesystem events.</li>
               <li>Upload queue, retry, resume, and backoff.</li>
               <li>Download and materialization queue.</li>
               <li>Device cursor reconciliation.</li>
@@ -123,4 +124,3 @@
     </main>
   </body>
 </html>
-
