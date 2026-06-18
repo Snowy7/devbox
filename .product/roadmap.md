@@ -1,0 +1,163 @@
+# Roadmap
+
+## Roadmap Principle
+
+Ship the narrowest product that proves workspace trust, while building the graph, policy, and sync foundations needed for teams, agents, and Git replacement.
+
+## Phase 0: Prototype Foundation
+
+Timeframe: 4 to 6 weeks
+
+Goal: prove local snapshot and restore safety.
+
+Deliverables:
+
+- local project scanner
+- default dev ignore rules
+- content-addressed local object store
+- snapshot manifest
+- restore command
+- Git repo detector
+- destructive test suite
+
+Exit criteria:
+
+- can snapshot and restore 20 representative repos
+- no Git corruption in test matrix
+- can restore uncommitted and untracked files
+- generated directories suppressed by policy
+
+## Phase 1: Personal Alpha
+
+Timeframe: 8 to 10 weeks
+
+Goal: two-device sync for trusted alpha users.
+
+Deliverables:
+
+- account/device pairing
+- encrypted object upload/download
+- second-device materialization
+- CLI: `init`, `status`, `devices`, `snapshot`, `restore`, `pause`
+- basic tray status
+- secret detection and block policy
+- conflict-as-divergent-snapshot model
+
+Exit criteria:
+
+- 25 alpha users complete desktop-to-laptop workflow
+- P50 second-device project ready under 10 minutes
+- zero data loss incidents
+- zero Git corruption incidents
+
+## Phase 2: Trust Beta
+
+Timeframe: 10 to 12 weeks
+
+Goal: make the product safe enough for paid personal beta.
+
+Deliverables:
+
+- timeline UI
+- project policy editor
+- rehydration hints
+- restore file/project/code-root
+- sync explain view
+- Windows/macOS/Linux watcher hardening
+- cost and cache controls
+- beta onboarding
+
+Exit criteria:
+
+- 500 beta users
+- 40% connect second device within 7 days
+- 30% weekly active synced projects
+- restore success above 95%
+- support load understood by issue category
+
+## Phase 3: Paid Pro
+
+Timeframe: 8 to 12 weeks after beta signal
+
+Goal: prove willingness to pay.
+
+Deliverables:
+
+- billing
+- storage limits
+- retention tiers
+- priority project selection
+- VS Code extension
+- import/migration assistant
+- public docs
+
+Exit criteria:
+
+- 1,000 paid users or strong equivalent waitlist conversion
+- churn reasons understood
+- storage cost per active user below pricing guardrail
+- activation and retention improve by cohort
+
+## Phase 4: Team Preview
+
+Goal: make individual trust useful to teams.
+
+Deliverables:
+
+- team accounts
+- managed policies
+- device approval
+- shared workspace links
+- audit log
+- retention controls
+- SSO preview
+- admin recovery
+
+Exit criteria:
+
+- 10 design partners
+- measured onboarding or recovery time saved
+- admin trust score positive
+- no increase in core safety incidents
+
+## Phase 5: Agent Workspaces
+
+Goal: make agents safe by default.
+
+Deliverables:
+
+- copy-on-write agent workstreams
+- agent workspace API
+- snapshot provenance
+- run/test result attachment
+- discard/merge agent work
+- semantic summaries
+- policy sandboxing
+
+Exit criteria:
+
+- agent workspace creation under 30 seconds for typical repo
+- agent changes reviewable without noisy micro-commits
+- accepted agent workstream rate improving
+- rollback success above 99%
+
+## Phase 6: Better Git Layer
+
+Goal: expose a new source-control UX without breaking Git compatibility.
+
+Deliverables:
+
+- workstream UI
+- Git import/export
+- semantic checkpoints
+- branchless local flow
+- GitHub/GitLab publishing
+- PR export
+- operation log search
+
+Exit criteria:
+
+- users perform meaningful workflows without manual branch/stash/worktree commands
+- teams can keep GitHub/GitLab as system of record while using Devbox locally
+- source-control layer increases retention and paid conversion
+

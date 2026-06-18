@@ -1,0 +1,10 @@
+scenario,definition,seats,annual_price_usd,revenue_usd,confidence
+narrow_personal_tam,Serious individual developers who may pay for multi-machine workspace continuity,18000000,120,2160000000,medium
+team_developer_tam,Professional/team developers who may use workspace continuity and policy,27000000,180,4860000000,medium-low
+agent_enabled_tam,Advanced seats needing agent-safe workspace infrastructure,9000000,300,2700000000,low
+initial_sam_low,GitHub-centric multi-machine developers in reachable early markets,5000000,120,600000000,medium
+initial_sam_high,GitHub-centric multi-machine developers in reachable early markets,10000000,180,1800000000,medium-low
+som_5yr_conservative,Paid personal and small-team adoption,50000,140,7000000,medium
+som_5yr_base,Solo wedge plus team preview traction,250000,180,45000000,medium-low
+som_5yr_upside,Team and agent workspace traction,500000,240,120000000,low
+

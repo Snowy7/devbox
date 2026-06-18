@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Devbox KPI Framework</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div class="eyebrow">KPI framework</div>
+        <h1>Measure the moment it just works.</h1>
+        <p class="lead">The north star is successful workspace continuations: cross-device resume sessions where the project is ready and the developer can act without blocking conflict or manual recovery.</p>
+        <nav>
+          <a href="index.html">Overview</a>
+          <a href="market.html">Market</a>
+          <a href="roadmap.html">Roadmap</a>
+          <a href="../kpi-framework.md">KPI MD</a>
+        </nav>
+      </header>
+
+      <section>
+        <h2>Primary Metrics</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Meaning</th>
+              <th>Target</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Activation to second device</td>
+              <td>New users who connect a second device and open a synced project within 7 days.</td>
+              <td>40% beta, 60% guided</td>
+            </tr>
+            <tr>
+              <td>Time to project ready</td>
+              <td>Second-device sign-in to first selected project ready.</td>
+              <td>P50 under 10 min, P90 under 30 min</td>
+            </tr>
+            <tr>
+              <td>Snapshot capture latency</td>
+              <td>Filesystem change to durable local snapshot.</td>
+              <td>P50 under 5 sec, P95 under 30 sec</td>
+            </tr>
+            <tr>
+              <td>Restore success rate</td>
+              <td>Restore attempts that complete without manual support.</td>
+              <td>95%+</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Trust Guardrails</h2>
+        <div class="grid">
+          <article class="card">
+            <span class="tag red">Critical</span>
+            <h3>Data loss</h3>
+            <p>Target: zero confirmed unrecoverable work caused by Devbox.</p>
+          </article>
+          <article class="card">
+            <span class="tag red">Critical</span>
+            <h3>Git corruption</h3>
+            <p>Target: zero repos made unusable by sync or restore.</p>
+          </article>
+          <article class="card">
+            <span class="tag red">Critical</span>
+            <h3>Secret leaks</h3>
+            <p>Target: zero sensitive files synced contrary to policy.</p>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        See ../kpi-framework.md and ../data/kpis.csv for the full metric definitions.
+      </footer>
+    </main>
+  </body>
+</html>
+

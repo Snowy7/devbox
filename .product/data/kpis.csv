@@ -1,0 +1,12 @@
+metric,category,definition,target
+successful_workspace_continuations,north_star,Cross-device resume sessions where project is ready and user acts within 30 minutes,Increase weekly by cohort
+activation_to_second_device,activation,New users who connect a second device and open a synced project within 7 days,40 percent beta and 60 percent guided
+time_to_project_ready,activation,Time from second-device sign-in to first project ready,P50 under 10 minutes and P90 under 30 minutes
+snapshot_capture_latency,reliability,Time from filesystem change to durable local snapshot,P50 under 5 seconds and P95 under 30 seconds
+restore_success_rate,reliability,Restore attempts that complete without manual support,95 percent or higher
+data_loss_incidents,guardrail,Confirmed unrecoverable work caused by Devbox,0
+git_corruption_incidents,guardrail,Repos made unusable by Devbox sync or restore,0
+secret_leak_incidents,guardrail,Sensitive file synced contrary to policy,0
+conflict_rate,quality,Divergent snapshots per 1000 synced change events,Declining by cohort
+weekly_active_synced_projects,retention,Projects with meaningful synced activity in a week,Increase weekly by cohort
+

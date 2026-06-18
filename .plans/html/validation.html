@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Devbox MVP Validation</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <div class="topbar">
+        <div class="brand"><span class="mark">V</span> MVP Validation</div>
+        <nav>
+          <a href="index.html">Overview</a>
+          <a href="phase-0.html">Phase 0</a>
+          <a href="phase-1.html">Phase 1</a>
+          <a href="phase-2.html">Phase 2</a>
+          <a href="architecture.html">Architecture</a>
+        </nav>
+      </div>
+
+      <section class="hero">
+        <div>
+          <div class="eyebrow">Evidence plan</div>
+          <h1>Ship only when trust metrics say yes.</h1>
+          <p class="lead">The MVP should be judged by safety, continuation success, restore reliability, and whether developers understand what Devbox is doing to their code folder.</p>
+        </div>
+        <div class="callout red">
+          <strong>Hard stop:</strong> any confirmed unrecoverable data loss, Git corruption, or secret leak blocks expansion until root cause and regression tests exist.
+        </div>
+      </section>
+
+      <section>
+        <h2>North Star</h2>
+        <div class="panel">
+          <h3>Successful Workspace Continuations</h3>
+          <p>Cross-device resume sessions where the project is ready, required files are available, no blocking conflict exists, and the user edits, runs, tests, commits, snapshots, or restores within 30 minutes.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Instrumentation</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Events</th>
+              <th>Decision</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Activation</td>
+              <td><code>device_connected</code>, <code>code_root_selected</code>, <code>project_ready</code></td>
+              <td>Is the onboarding flow creating the magic moment?</td>
+            </tr>
+            <tr>
+              <td>Reliability</td>
+              <td><code>snapshot_created</code>, <code>restore_started</code>, <code>restore_succeeded</code>, <code>restore_failed</code></td>
+              <td>Can users trust recovery?</td>
+            </tr>
+            <tr>
+              <td>Safety</td>
+              <td><code>secret_detected</code>, <code>git_state_captured</code>, <code>git_state_reconstructed</code></td>
+              <td>Are we protecting code and secrets?</td>
+            </tr>
+            <tr>
+              <td>Quality</td>
+              <td><code>conflict_created</code>, <code>conflict_resolved</code>, <code>rehydration_hint_succeeded</code></td>
+              <td>Are policy and conflict decisions understandable?</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Experiment Gates</h2>
+        <div class="grid">
+          <article class="card">
+            <span class="tag">Phase 0</span>
+            <h3>Local restore trust</h3>
+            <p>10 users restore real WIP in non-critical repos and describe it as safer than stash/WIP commits.</p>
+          </article>
+          <article class="card">
+            <span class="tag blue">Phase 1</span>
+            <h3>Second-device magic</h3>
+            <p>25 alpha users complete desktop-to-laptop continuation with no manual file movement.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Phase 2</span>
+            <h3>Paid beta readiness</h3>
+            <p>500 beta users, 40% second-device activation, 30% weekly active synced projects.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Launch Readiness</h2>
+        <ul class="checklist">
+          <li>Critical incident runbook exists and has been rehearsed.</li>
+          <li>Regression suite covers every known restore, Git, watcher, secret, and conflict bug.</li>
+          <li>Support bundle excludes source by default and redacts paths when requested.</li>
+          <li>R2 operation cost, local cache amplification, and storage per active user are visible.</li>
+          <li>Every user-visible warning has a next action.</li>
+          <li>The product can export or remove a project cleanly.</li>
+        </ul>
+      </section>
+
+      <footer>
+        The MVP passes when developers let it touch real work twice.
+      </footer>
+    </main>
+  </body>
+</html>
+

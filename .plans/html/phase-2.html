@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Phase 2 - Trust Beta</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <div class="topbar">
+        <div class="brand"><span class="mark">2</span> Trust Beta</div>
+        <nav>
+          <a href="index.html">Overview</a>
+          <a href="phase-0.html">Phase 0</a>
+          <a href="phase-1.html">Phase 1</a>
+          <a href="architecture.html">Architecture</a>
+          <a href="validation.html">Validation</a>
+        </nav>
+      </div>
+
+      <section class="hero">
+        <div>
+          <div class="eyebrow">10 to 12 weeks</div>
+          <h1>Turn the alpha into a product people trust.</h1>
+          <p class="lead">Phase 2 adds the Electron experience, timeline, policy editor, restore flows, conflict clarity, rehydration hints, and platform hardening needed for a paid personal beta.</p>
+        </div>
+        <div class="callout amber">
+          <strong>Exit gate:</strong> 500 beta users, 40% second-device activation, 30% weekly active synced projects, 95%+ restore success, and known support categories.
+        </div>
+      </section>
+
+      <section>
+        <h2>Product Surfaces</h2>
+        <div class="grid">
+          <article class="card workstream">
+            <h3>Electron Onboarding</h3>
+            <p>Select code root, approve policies, pair a second device, choose projects, and see sync readiness.</p>
+          </article>
+          <article class="card workstream blue-line">
+            <h3>Timeline and Restore</h3>
+            <p>Browse snapshots, restore file/project/code-root, compare changes, and recover safely.</p>
+          </article>
+          <article class="card workstream amber-line">
+            <h3>Policy Editor</h3>
+            <p>Explain ignored files, generated artifacts, secrets, rehydration steps, and per-project overrides.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Beta Deliverables</h2>
+        <ul class="checklist">
+          <li>Electron app with setup, project list, sync status, timeline, restore, conflict, and settings views.</li>
+          <li>Daemon local API over localhost, named pipe, or Unix domain socket with an authenticated client boundary.</li>
+          <li>Rehydration hints for Node, Python, Rust, Go, and Docker projects.</li>
+          <li>Sync explain view showing included, ignored, encrypted, blocked, and pending files.</li>
+          <li>Cross-platform watcher hardening for Windows, macOS, and Linux with periodic scanner reconciliation.</li>
+          <li>Storage controls: project priority, local cache size, retention window, and pause/resume.</li>
+          <li>Beta onboarding, docs, diagnostics, and support workflow.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Beta Readiness Checklist</h2>
+        <div class="grid two">
+          <article class="card">
+            <span class="tag red">Required</span>
+            <h3>Safety and Recovery</h3>
+            <ul class="checklist">
+              <li>Restore success above 95%.</li>
+              <li>Critical incident process documented.</li>
+              <li>Support bundle excludes source by default.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <span class="tag blue">Required</span>
+            <h3>Activation</h3>
+            <ul class="checklist">
+              <li>Second-device setup under 10 minutes P50.</li>
+              <li>Project readiness visible in UI.</li>
+              <li>Policy warnings are actionable.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <span class="tag amber">Required</span>
+            <h3>Cost</h3>
+            <ul class="checklist">
+              <li>Blob packing limits object operation cost.</li>
+              <li>Generated directories suppressed.</li>
+              <li>Storage per active user monitored.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <span class="tag">Required</span>
+            <h3>Trust UX</h3>
+            <ul class="checklist">
+              <li>Every sync decision is explainable.</li>
+              <li>Conflicts become divergent snapshots.</li>
+              <li>Manual pause is always available.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        Phase 2 is the line between impressive prototype and product people can live with.
+      </footer>
+    </main>
+  </body>
+</html>
+

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Phase 0 - Prototype Foundation</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <div class="topbar">
+        <div class="brand"><span class="mark">0</span> Prototype Foundation</div>
+        <nav>
+          <a href="index.html">Overview</a>
+          <a href="phase-1.html">Phase 1</a>
+          <a href="phase-2.html">Phase 2</a>
+          <a href="architecture.html">Architecture</a>
+          <a href="validation.html">Validation</a>
+        </nav>
+      </div>
+
+      <section class="hero">
+        <div>
+          <div class="eyebrow">4 to 6 weeks</div>
+          <h1>Make local snapshots boringly safe.</h1>
+          <p class="lead">Before cloud sync, prove Devbox can scan projects, classify files, snapshot WIP, restore safely, and avoid corrupting Git repos.</p>
+        </div>
+        <div class="callout green">
+          <strong>Exit gate:</strong> snapshot and restore 20 representative repos with no Git corruption, uncommitted work preserved, and generated directories suppressed by policy.
+        </div>
+      </section>
+
+      <section>
+        <h2>Workstreams</h2>
+        <div class="grid">
+          <article class="card workstream">
+            <h3>Scanner and Classifier</h3>
+            <p>Detect code roots, projects, Git repos, stack signals, generated directories, and secret candidates.</p>
+          </article>
+          <article class="card workstream blue-line">
+            <h3>Snapshot Engine</h3>
+            <p>Create manifests, hash chunks with BLAKE3, store content-addressed files, and record operations in SQLite.</p>
+          </article>
+          <article class="card workstream amber-line">
+            <h3>Restore Engine</h3>
+            <p>Restore file, project, and code-root state atomically with rollback and pre-restore safety checks.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Deliverables</h2>
+        <ul class="checklist">
+          <li>Rust workspace with daemon crate, CLI crate, core library, and integration test harness.</li>
+          <li>SQLite schema for projects, snapshots, manifests, chunks, operations, policies, and restore attempts.</li>
+          <li>Default dev policy for `node_modules`, `.next`, `dist`, `target`, `.venv`, `.cache`, and common build outputs.</li>
+          <li>Git detector that records repo root, HEAD, dirty state, ignored state, remotes, submodules, and worktree shape.</li>
+          <li>CLI commands: `devbox scan`, `devbox snapshot`, `devbox status`, `devbox restore`, `devbox explain`.</li>
+          <li>Destructive test matrix for restore, interrupted writes, symlinks, permissions, case conflicts, and Git status.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Week Shape</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Week</th>
+              <th>Focus</th>
+              <th>Proof</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1</td>
+              <td>Repo layout, scanner, policy skeleton, SQLite migrations.</td>
+              <td>Can scan a code root and classify projects.</td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td>Manifest model, hashing, local object cache.</td>
+              <td>Can create deterministic snapshots.</td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td>Restore engine, atomic materialization, rollback.</td>
+              <td>Can restore modified and untracked files.</td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td>Git safety, generated artifact suppression, secret block prompts.</td>
+              <td>Git status remains valid after restore.</td>
+            </tr>
+            <tr>
+              <td>5-6</td>
+              <td>Test hardening and alpha demo path.</td>
+              <td>20 representative repos pass the safety matrix.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <footer>
+        Phase 0 is not a toy. It is the trust foundation for everything after it.
+      </footer>
+    </main>
+  </body>
+</html>
+

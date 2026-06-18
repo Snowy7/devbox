@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Devbox MVP Plan</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <div class="topbar">
+        <div class="brand"><span class="mark">D</span> Devbox MVP</div>
+        <nav>
+          <a href="phase-0.html">Phase 0</a>
+          <a href="phase-1.html">Phase 1</a>
+          <a href="phase-2.html">Phase 2</a>
+          <a href="architecture.html">Architecture</a>
+          <a href="validation.html">Validation</a>
+        </nav>
+      </div>
+
+      <section class="hero">
+        <div>
+          <div class="eyebrow">MVP plan</div>
+          <h1>Prove the code folder can safely follow the developer.</h1>
+          <p class="lead">The MVP is a trust product: local snapshots first, two-device sync second, polished restore and conflict UX third. Teams, agents, and better Git come after the workspace graph is trusted.</p>
+        </div>
+        <div class="diagram" aria-label="MVP system diagram">
+          <div class="node"><span class="node-icon">1</span><div><strong>Rust daemon</strong><br><span class="muted">Watch, classify, snapshot, restore.</span></div></div>
+          <div class="node"><span class="node-icon">2</span><div><strong>SQLite + local cache</strong><br><span class="muted">Metadata and content-addressed chunks.</span></div></div>
+          <div class="node"><span class="node-icon">3</span><div><strong>R2 blob storage</strong><br><span class="muted">Encrypted immutable blob packs.</span></div></div>
+          <div class="node"><span class="node-icon">4</span><div><strong>Electron UI</strong><br><span class="muted">Setup, status, timeline, restore.</span></div></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Phase Map</h2>
+        <div class="timeline">
+          <div class="phase-row">
+            <div class="phase-id">Phase 0</div>
+            <div><strong>Prototype Foundation.</strong> Local scanner, policies, snapshots, restore, Git detector, destructive tests.</div>
+            <a class="phase-link" href="phase-0.html">Open plan</a>
+          </div>
+          <div class="phase-row">
+            <div class="phase-id">Phase 1</div>
+            <div><strong>Personal Alpha.</strong> Account pairing, encrypted sync, second-device materialization, CLI, conflict snapshots.</div>
+            <a class="phase-link" href="phase-1.html">Open plan</a>
+          </div>
+          <div class="phase-row">
+            <div class="phase-id">Phase 2</div>
+            <div><strong>Trust Beta.</strong> Electron app, timeline UI, policy editor, rehydration hints, restore quality.</div>
+            <a class="phase-link" href="phase-2.html">Open plan</a>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>MVP Gates</h2>
+        <div class="grid four">
+          <article class="card">
+            <span class="tag red">Safety</span>
+            <div class="metric">0</div>
+            <p class="muted">data loss, Git corruption, and secret leak incidents.</p>
+          </article>
+          <article class="card">
+            <span class="tag">Restore</span>
+            <div class="metric">95%+</div>
+            <p class="muted">restore success before beta scale.</p>
+          </article>
+          <article class="card">
+            <span class="tag blue">Ready</span>
+            <div class="metric">&lt;10m</div>
+            <p class="muted">P50 second-device project ready target.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Alpha</span>
+            <div class="metric">25</div>
+            <p class="muted">users complete desktop-to-laptop workflow.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Build Stack</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Layer</th>
+              <th>Choice</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Core daemon</td>
+              <td>Rust + Tokio</td>
+              <td>Long-running, filesystem-heavy, concurrent, safety-critical local software.</td>
+            </tr>
+            <tr>
+              <td>Desktop app</td>
+              <td>Electron + React + TypeScript</td>
+              <td>Fast UI iteration, mature tray/update ecosystem, clean control-panel boundary.</td>
+            </tr>
+            <tr>
+              <td>Local state</td>
+              <td>SQLite + content-addressed files</td>
+              <td>Transactional metadata with blobs stored as files, not database BLOBs.</td>
+            </tr>
+            <tr>
+              <td>Cloud</td>
+              <td>Rust API + Postgres + R2</td>
+              <td>Postgres for metadata, R2 for encrypted immutable blob packs.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <footer>
+        Source strategy lives in ../../.product. This folder is the MVP execution view.
+      </footer>
+    </main>
+  </body>
+</html>
+

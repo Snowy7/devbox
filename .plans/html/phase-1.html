@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Phase 1 - Personal Alpha</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <div class="topbar">
+        <div class="brand"><span class="mark">1</span> Personal Alpha</div>
+        <nav>
+          <a href="index.html">Overview</a>
+          <a href="phase-0.html">Phase 0</a>
+          <a href="phase-2.html">Phase 2</a>
+          <a href="architecture.html">Architecture</a>
+          <a href="validation.html">Validation</a>
+        </nav>
+      </div>
+
+      <section class="hero">
+        <div>
+          <div class="eyebrow">8 to 10 weeks</div>
+          <h1>Prove desktop-to-laptop continuation.</h1>
+          <p class="lead">Take the local snapshot foundation and add encrypted sync, device pairing, second-device materialization, and a minimal control surface for trusted alpha users.</p>
+        </div>
+        <div class="callout">
+          <strong>Exit gate:</strong> 25 alpha users complete the workflow with P50 project-ready time under 10 minutes and zero data loss or Git corruption incidents.
+        </div>
+      </section>
+
+      <section>
+        <h2>Alpha Workflow</h2>
+        <div class="diagram">
+          <div class="node"><span class="node-icon">A</span><div><strong>Install on desktop</strong><br><span class="muted">Select code root and create initial snapshots.</span></div></div>
+          <div class="node"><span class="node-icon">B</span><div><strong>Pair laptop</strong><br><span class="muted">Approve device, exchange keys, choose project.</span></div></div>
+          <div class="node"><span class="node-icon">C</span><div><strong>Materialize project</strong><br><span class="muted">Download encrypted packs, apply manifest, verify Git.</span></div></div>
+          <div class="node"><span class="node-icon">D</span><div><strong>Keep coding</strong><br><span class="muted">Edit, run, restore, and sync back safely.</span></div></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Deliverables</h2>
+        <div class="grid two">
+          <article class="card workstream">
+            <h3>Sync Backend</h3>
+            <ul class="checklist">
+              <li>Rust API with device pairing and auth.</li>
+              <li>Postgres metadata for accounts, devices, projects, manifests, and cursors.</li>
+              <li>R2 blob backend behind a provider interface.</li>
+              <li>Encrypted immutable blob pack upload and download.</li>
+            </ul>
+          </article>
+          <article class="card workstream blue-line">
+            <h3>Client Sync</h3>
+            <ul class="checklist">
+              <li>Upload queue, retry, resume, and backoff.</li>
+              <li>Download and materialization queue.</li>
+              <li>Device cursor reconciliation.</li>
+              <li>Conflict-as-divergent-snapshot handling.</li>
+            </ul>
+          </article>
+          <article class="card workstream amber-line">
+            <h3>CLI and Minimal UI</h3>
+            <ul class="checklist">
+              <li>`devbox init`, `devices`, `sync`, `pause`, `restore`.</li>
+              <li>Minimal Electron shell for onboarding and status.</li>
+              <li>Tray state: idle, syncing, paused, warning.</li>
+              <li>Support bundle without source content by default.</li>
+            </ul>
+          </article>
+          <article class="card workstream red-line">
+            <h3>Safety</h3>
+            <ul class="checklist">
+              <li>Secrets blocked unless policy says otherwise.</li>
+              <li>Git verification after materialization.</li>
+              <li>Atomic writes with rollback.</li>
+              <li>Manual pause and project exclusion.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Alpha Metrics</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Target</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Completed continuations</td>
+              <td>25 users</td>
+              <td>Shows the core promise works outside our machines.</td>
+            </tr>
+            <tr>
+              <td>P50 project ready</td>
+              <td>Under 10 minutes</td>
+              <td>Tests whether sync feels magical enough.</td>
+            </tr>
+            <tr>
+              <td>Snapshot upload success</td>
+              <td>99% after retries</td>
+              <td>Protects confidence in background sync.</td>
+            </tr>
+            <tr>
+              <td>Critical incidents</td>
+              <td>0</td>
+              <td>Trust is the product.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <footer>
+        Phase 1 is the first time Devbox earns the phrase "it just worked."
+      </footer>
+    </main>
+  </body>
+</html>
+

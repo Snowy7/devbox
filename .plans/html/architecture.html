@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Devbox MVP Architecture</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <div class="topbar">
+        <div class="brand"><span class="mark">A</span> MVP Architecture</div>
+        <nav>
+          <a href="index.html">Overview</a>
+          <a href="phase-0.html">Phase 0</a>
+          <a href="phase-1.html">Phase 1</a>
+          <a href="phase-2.html">Phase 2</a>
+          <a href="validation.html">Validation</a>
+        </nav>
+      </div>
+
+      <section class="hero">
+        <div>
+          <div class="eyebrow">Foundation</div>
+          <h1>Build a source-control-grade sync engine with an Electron control panel.</h1>
+          <p class="lead">The daemon owns correctness. The desktop app owns product experience. The backend coordinates metadata. R2 stores encrypted immutable blob packs.</p>
+        </div>
+        <div class="callout green">
+          <strong>Boundary rule:</strong> Electron never directly mutates workspace state. It talks to the daemon, and the daemon is the only local writer for Devbox metadata.
+        </div>
+      </section>
+
+      <section>
+        <h2>System Shape</h2>
+        <pre><code>Electron UI
+  -> local daemon API
+Rust daemon
+  -> watcher + scanner
+  -> policy engine
+  -> snapshot engine
+  -> SQLite metadata
+  -> local content-addressed cache
+  -> sync client
+Rust backend
+  -> Postgres metadata
+  -> R2 encrypted blob packs</code></pre>
+      </section>
+
+      <section>
+        <h2>Repo Layout</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>apps/desktop</code></td><td>Electron + React + TypeScript desktop app.</td></tr>
+            <tr><td><code>crates/devbox-daemon</code></td><td>Long-running local daemon.</td></tr>
+            <tr><td><code>crates/devbox-cli</code></td><td>Command-line interface using clap.</td></tr>
+            <tr><td><code>crates/devbox-core</code></td><td>Shared snapshot, policy, manifest, and storage types.</td></tr>
+            <tr><td><code>crates/devbox-git</code></td><td>Git detection, verification, and adapter logic.</td></tr>
+            <tr><td><code>services/api</code></td><td>Rust backend API, likely axum.</td></tr>
+            <tr><td><code>infra/local</code></td><td>Docker Compose for Postgres, MinIO, and local services.</td></tr>
+            <tr><td><code>tests/fixtures</code></td><td>Representative repos and destructive restore fixtures.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Storage Responsibilities</h2>
+        <div class="grid">
+          <article class="card">
+            <span class="tag">SQLite</span>
+            <h3>Local metadata</h3>
+            <p>Projects, snapshots, manifests, chunks, operations, policies, conflicts, cursors, restore attempts.</p>
+          </article>
+          <article class="card">
+            <span class="tag blue">Filesystem</span>
+            <h3>Local blobs</h3>
+            <p>Content-addressed chunk and pack files. SQLite points to them; it does not store code blobs.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">R2</span>
+            <h3>Remote blobs</h3>
+            <p>Encrypted immutable blob packs behind a replaceable S3-compatible provider interface.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>MVP Interfaces</h2>
+        <ul class="checklist">
+          <li><code>SnapshotStore</code>: create, read, diff, restore snapshots.</li>
+          <li><code>BlobStore</code>: put, get, head, delete encrypted blob packs.</li>
+          <li><code>PolicyEngine</code>: classify include, ignore, block, encrypt, or rehydrate decisions.</li>
+          <li><code>GitAdapter</code>: inspect repo state, verify materialization, and avoid dumb-syncing `.git`.</li>
+          <li><code>DaemonApi</code>: status, projects, timeline, restore, settings, warnings, pause.</li>
+        </ul>
+      </section>
+
+      <footer>
+        Keep every layer replaceable except the trust model: immutable snapshots, explainable policy, safe restore.
+      </footer>
+    </main>
+  </body>
+</html>
+

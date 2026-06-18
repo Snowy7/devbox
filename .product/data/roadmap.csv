@@ -1,0 +1,9 @@
+phase,name,timeframe,goal,exit_criteria
+0,Prototype Foundation,4-6 weeks,Prove local snapshot and restore safety,"20 repos restored; no Git corruption; untracked files restored"
+1,Personal Alpha,8-10 weeks,Two-device sync for trusted users,"25 alpha users; P50 ready under 10 minutes; zero data loss"
+2,Trust Beta,10-12 weeks,Safe enough for paid personal beta,"500 beta users; 40 percent second-device activation; restore success above 95 percent"
+3,Paid Pro,8-12 weeks after beta,Prove willingness to pay,"1000 paid users target; storage cost controlled; cohort retention improving"
+4,Team Preview,TBD,Make individual trust useful to teams,"10 design partners; measured onboarding or recovery time saved"
+5,Agent Workspaces,TBD,Make agents safe by default,"Agent workspace creation under 30 seconds; rollback above 99 percent"
+6,Better Git Layer,TBD,Expose new source-control UX with Git compatibility,"Meaningful workflows without manual branch/stash/worktree commands"
+

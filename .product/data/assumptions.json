@@ -1,0 +1,31 @@
+{
+  "updated": "2026-06-18",
+  "product": "Devbox",
+  "core_thesis": "Your code folder, everywhere.",
+  "foundation_thesis": "A durable workspace graph with Git as a compatibility adapter.",
+  "market_anchors": {
+    "github_developers_2025": 180000000,
+    "software_development_tools_market_2026_usd": 7440000000,
+    "version_control_market_2026_usd": 1720000000,
+    "application_development_software_market_2025_usd": 309530000000
+  },
+  "pricing": {
+    "free": "one device, local snapshots, limited restore",
+    "pro_monthly_usd": 10,
+    "team_monthly_usd_per_user": 15,
+    "business_monthly_usd_per_user": 25
+  },
+  "mvp_non_goals": [
+    "replace Git",
+    "host code review",
+    "build a cloud IDE",
+    "support real-time collaborative editing",
+    "sync every dependency directory"
+  ],
+  "trust_guardrails": [
+    "zero data loss incidents",
+    "zero Git corruption incidents",
+    "zero secret leak incidents"
+  ]
+}
+
