@@ -362,6 +362,14 @@ pub fn import_snapshot(
     request: &ImportSnapshotRequest,
     provider: &impl RemoteBlobProvider,
 ) -> MaterializeResult<ImportedSnapshotBundle> {
+    import_snapshot_inner(request, provider, true)
+}
+
+fn import_snapshot_inner(
+    request: &ImportSnapshotRequest,
+    provider: &impl RemoteBlobProvider,
+    advance_cursor: bool,
+) -> MaterializeResult<ImportedSnapshotBundle> {
     let mut receiver_store = open_store(&request.db_path)?;
     let receiver_identity = receiver_store
         .local_identity()?
@@ -436,30 +444,32 @@ pub fn import_snapshot(
         true
     };
 
-    let updated_at = receiver_store.current_timestamp()?;
-    let cursor = DeviceProjectCursor {
-        account_id: receiver_identity.account_id.clone(),
-        device_id: receiver_identity.device_id.clone(),
-        project_id: envelope.project.id.clone(),
-        cursor_value: envelope.snapshot.id.clone(),
-        updated_at: updated_at.clone(),
+    let cursor_updated_at = if advance_cursor {
+        advance_import_cursor(
+            &receiver_store,
+            &receiver_identity.account_id,
+            &receiver_identity.device_id,
+            &envelope.project.id,
+            &envelope.snapshot.id,
+        )?
+    } else {
+        "-".to_string()
     };
-    receiver_store.upsert_device_project_cursor(&cursor)?;
 
     Ok(ImportedSnapshotBundle {
         source_account_id: envelope.account_id,
         receiver_account_id: receiver_identity.account_id,
         receiver_device_id: receiver_identity.device_id,
         project_id: envelope.project.id,
-        snapshot_id: envelope.snapshot.id,
+        snapshot_id: envelope.snapshot.id.clone(),
         manifest_object_key,
         snapshot_inserted,
         blob_count: envelope.included_blobs.len(),
         downloaded_blob_count,
         plaintext_blob_bytes,
         remote_blob_bytes,
-        cursor_value: cursor.cursor_value,
-        cursor_updated_at: updated_at,
+        cursor_value: envelope.snapshot.id,
+        cursor_updated_at,
     })
 }
 
@@ -467,7 +477,7 @@ pub fn materialize_snapshot(
     request: &MaterializationRequest,
     provider: &impl RemoteBlobProvider,
 ) -> MaterializeResult<MaterializationOutcome> {
-    let import = import_snapshot(
+    let mut import = import_snapshot_inner(
         &ImportSnapshotRequest {
             db_path: request.db_path.clone(),
             cache_root: request.cache_root.clone(),
@@ -475,6 +485,7 @@ pub fn materialize_snapshot(
             snapshot_id: request.snapshot_id.clone(),
         },
         provider,
+        false,
     )?;
 
     let store = open_store(&request.db_path)?;
@@ -492,6 +503,13 @@ pub fn materialize_snapshot(
         RestoreMaterializer::new(cache).apply(&plan)?;
         applied = true;
     }
+    import.cursor_updated_at = advance_import_cursor(
+        &store,
+        &import.receiver_account_id,
+        &import.receiver_device_id,
+        &import.project_id,
+        &import.snapshot_id,
+    )?;
 
     Ok(MaterializationOutcome {
         import,
@@ -525,6 +543,26 @@ fn sync_key_for_import(
     };
 
     Ok(SyncKey::from_hex(&key_hex)?)
+}
+
+fn advance_import_cursor(
+    store: &Store,
+    account_id: &str,
+    device_id: &str,
+    project_id: &str,
+    snapshot_id: &str,
+) -> MaterializeResult<String> {
+    let updated_at = store.current_timestamp()?;
+    let cursor = DeviceProjectCursor {
+        account_id: account_id.to_string(),
+        device_id: device_id.to_string(),
+        project_id: project_id.to_string(),
+        cursor_value: snapshot_id.to_string(),
+        updated_at: updated_at.clone(),
+    };
+    store.upsert_device_project_cursor(&cursor)?;
+
+    Ok(updated_at)
 }
 
 fn sync_preflight_in_store(
@@ -1155,6 +1193,7 @@ mod tests {
         };
 
         let first = import_snapshot(&request, &provider).expect("first import");
+        assert_receiver_cursor(&fixture, &first.project_id, &first.snapshot_id);
         let blob_path = single_cache_blob(&fixture.receiver_cache);
         fs::remove_file(&blob_path).expect("receiver cache blob deletes");
         let second = import_snapshot(&request, &provider).expect("second import");
@@ -1394,6 +1433,8 @@ mod tests {
         fs::create_dir_all(&fixture.target).expect("target creates");
         fs::write(fixture.target.join("keep.txt"), "keep").expect("existing file writes");
         let snapshot_id = fixture.persist_source_snapshot();
+        let project_id = project_id_for_snapshot(&fixture.source_db, &snapshot_id);
+        set_receiver_cursor(&fixture, &project_id, "snapshot-before-materialize");
         let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
         publish_snapshot(
             &PublishSnapshotRequest {
@@ -1426,6 +1467,7 @@ mod tests {
             fs::read_to_string(fixture.target.join("keep.txt")).expect("existing file reads"),
             "keep"
         );
+        assert_receiver_cursor(&fixture, &project_id, "snapshot-before-materialize");
     }
 
     #[test]
@@ -1688,6 +1730,16 @@ mod tests {
                 updated_at: store.current_timestamp().expect("timestamp reads"),
             })
             .expect("cursor persists");
+    }
+
+    fn project_id_for_snapshot(db_path: &Path, snapshot_id: &str) -> String {
+        Store::open_file(db_path)
+            .expect("store opens")
+            .snapshot_with_entries(snapshot_id)
+            .expect("snapshot reads")
+            .expect("snapshot exists")
+            .project
+            .id
     }
 
     fn assert_receiver_cursor(fixture: &FoundationFixture, project_id: &str, expected: &str) {

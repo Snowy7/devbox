@@ -48,8 +48,10 @@ applies after a safe import: non-empty targets, unsafe paths, missing blobs, sym
 entries, generated paths, and secret-blocked entries remain blocked or skipped by the restore
 engine.
 
-On successful safe import/materialization, the receiving device/project cursor advances to the
-imported snapshot as before. On conflict, the cursor remains at the previous value.
+On successful `sync import-snapshot`, the receiving device/project cursor advances to the imported
+snapshot as before. `sync materialize` imports the bundle, blobs, and metadata without advancing the
+cursor, then commits the cursor only after restore planning and the requested `--apply` behavior
+succeed. If restore safety or apply fails, the cursor remains at the previous value.
 
 ## Secret and Metadata Safety
 

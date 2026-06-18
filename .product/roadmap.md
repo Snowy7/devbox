@@ -54,7 +54,7 @@ Completed foundations:
 - local/mock auth session, pairing invitation, approved-device trust, key envelope, revocation, and
   cursor primitives
 - local/mock second-device materialization through an encrypted local filesystem remote, including
-  publish/import, receiving cursor update, and safe restore-engine apply
+  publish/import, deferred materialize cursor commit, and safe restore-engine apply
 - local high-confidence secret detection and block-by-default policy before snapshot blobs become
   uploadable
 - local conflict-as-divergent-snapshot compare and persistence metadata

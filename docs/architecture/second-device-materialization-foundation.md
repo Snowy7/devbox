@@ -61,10 +61,10 @@ not a final cloud layout.
 
 ## Import And Cursor
 
-Import decrypts the bundle manifest, checks the receiving local device/project cursor and latest
-local snapshot, downloads all included file blobs into the receiving `BlobCache` only when preflight
-allows, persists the project/snapshot/manifest rows into the receiving SQLite database, and updates
-the receiving local device/project cursor to the imported snapshot id.
+`sync import-snapshot` decrypts the bundle manifest, checks the receiving local device/project
+cursor and latest local snapshot, downloads all included file blobs into the receiving `BlobCache`
+only when preflight allows, persists the project/snapshot/manifest rows into the receiving SQLite
+database, and updates the receiving local device/project cursor to the imported snapshot id.
 
 Import is idempotent for an already persisted snapshot id. Re-running import can refill missing
 receiver cache blobs while leaving the existing snapshot metadata intact.
@@ -76,7 +76,9 @@ cursor unchanged, and does not download file blobs into the receiver cache.
 ## Materialization
 
 `devbox sync materialize` imports first, then delegates planning and apply to
-`devbox-snapshot` restore logic. The existing restore safety rules still apply:
+`devbox-snapshot` restore logic. Its internal import does not advance the cursor; materialize
+commits the cursor only after restore planning and the requested `--apply` behavior succeed. The
+existing restore safety rules still apply:
 
 - targets must be missing or empty directories for apply
 - existing files are never overwritten
