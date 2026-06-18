@@ -42,7 +42,8 @@ Rust daemon
   -> local content-addressed cache
   -> sync client + encrypted object transport
 Rust backend
-  -> Postgres metadata
+  -> metadata API foundation for accounts/devices/projects/manifests/cursors
+  -> SQLite dev/test store now, Postgres production boundary later
   -> R2 encrypted blob packs</code></pre>
       </section>
 
@@ -59,6 +60,7 @@ Rust backend
             <tr><td><code>apps/desktop</code></td><td>Electron + React + TypeScript desktop app.</td></tr>
             <tr><td><code>crates/devbox-daemon</code></td><td>Long-running local daemon.</td></tr>
             <tr><td><code>crates/devbox-cli</code></td><td>Command-line interface using clap.</td></tr>
+            <tr><td><code>crates/devbox-metadata</code></td><td>Hosted metadata API foundation with mock-dev auth, SQLite dev/test storage, and compare-and-set cursors.</td></tr>
             <tr><td><code>crates/devbox-core</code></td><td>Shared snapshot, policy, manifest, and storage types.</td></tr>
             <tr><td><code>crates/devbox-git</code></td><td>Git detection, verification, and adapter logic.</td></tr>
             <tr><td><code>services/api</code></td><td>Rust backend API, likely axum.</td></tr>
@@ -105,13 +107,14 @@ Rust backend
         <ul class="checklist">
           <li>Local identity and key material support encrypted object sync foundations.</li>
           <li>S3-compatible encrypted blob transport can target R2, AWS S3, or MinIO without printing or storing raw credentials.</li>
+          <li>The hosted metadata API foundation models server-side accounts, devices, projects, published snapshot manifests, and compare-and-set cursors behind a mock-dev auth boundary.</li>
           <li>A local identity is not cloud authentication or account ownership proof.</li>
           <li>The local/mock auth foundation models account session state, device approval, key envelopes, revocation, and device/project cursors in SQLite.</li>
           <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a second SQLite/cache context, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
           <li>Local conflict records compare and persist divergent snapshot rows without source bytes.</li>
           <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>
-          <li>Production sign-in, hosted metadata, recovery, managed object-storage credential provisioning, explicit secret allow policy, automatic merge/apply resolution, and conflict UI remain deferred.</li>
+          <li>Production sign-in, hosted metadata sync-flow wiring, recovery, managed object-storage credential provisioning, explicit secret allow policy, automatic merge/apply resolution, and conflict UI remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
         </ul>
       </section>

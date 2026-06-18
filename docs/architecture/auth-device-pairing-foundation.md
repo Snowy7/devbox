@@ -15,9 +15,10 @@ This slice adds the next Phase 1 trust foundation after local identity and encry
 This is not production authentication.
 
 The implementation uses the existing local SQLite metadata store and a local/mock provider boundary.
-It does not add OAuth, hosted sign-in, account billing identity, a deployed metadata service,
-production recovery flows, managed R2/S3 credential provisioning, or second-device project
-materialization.
+It does not add OAuth, hosted sign-in, account billing identity, production recovery flows, managed
+R2/S3 credential provisioning, or second-device project materialization. A later hosted metadata API
+foundation now models server-side device/project cursors separately, but this local/mock auth
+boundary remains non-production.
 
 A mock auth session proves that local account ownership state can be represented and queried. It is
 not a cloud session and must not be treated as durable proof outside the local metadata boundary.
@@ -83,7 +84,7 @@ record and do not advance the cursor.
 Remaining Phase 1 work includes:
 
 - production account ownership proof
-- hosted metadata API and server-side cursors
+- production hosted auth integration for the metadata API
 - real cloud object storage credentials
 - production pairing UX and recovery
 - production second-device project materialization UX

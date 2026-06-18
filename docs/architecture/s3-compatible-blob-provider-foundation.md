@@ -8,10 +8,11 @@ behind the same `RemoteBlobProvider` boundary used by the local filesystem provi
 
 This is object transport only.
 
-It does not add production sign-in, hosted metadata, server-side device/project cursors, managed R2
-credential provisioning, production pairing UX, Electron UI, or conflict resolution. Clients still
-need a trusted local identity and key material before encrypted objects can be published or read.
-Metadata discovery and cursor arbitration remain later Phase 1 service work.
+It does not add production sign-in, managed R2 credential provisioning, production pairing UX,
+Electron UI, or conflict resolution. Clients still need a trusted local identity and key material
+before encrypted objects can be published or read. A hosted metadata API foundation now models
+metadata discovery and server-side compare-and-set cursors, but this object provider is not wired to
+that service yet.
 
 ## Provider Model
 
@@ -99,7 +100,7 @@ probe against the remote.
 
 Remaining Phase 1 work includes:
 
-- hosted metadata service for manifests, device registry, and server-side cursors
+- wiring the hosted metadata service into manifest discovery and cursor arbitration
 - production sign-in and account ownership proof
 - managed R2 credential provisioning and rotation
 - production pairing UX and recovery flows

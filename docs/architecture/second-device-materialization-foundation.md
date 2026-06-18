@@ -13,13 +13,14 @@ This slice completes the first local/mock Phase 1 vertical path for second-devic
 
 This is still a local/mock foundation.
 
-It does not implement production account ownership proof, hosted metadata, managed R2/S3 credential
-provisioning, server-side cursors, production pairing UX, automatic conflict resolution, or
-Electron UI. Local preflight now refuses divergent local/mock import/materialize paths and persists
-local conflict records, but it does not resolve or merge them. The manual smoke path can use
-`--mock-key-source-db` so a receiving local context can decrypt a publisher's locally encrypted
-objects without printing raw key material. That flag is a test/dev trust bootstrap, not a
-production key exchange.
+It does not implement production account ownership proof, managed R2/S3 credential provisioning,
+production pairing UX, automatic conflict resolution, or Electron UI. A hosted metadata API
+foundation now exists for server-side metadata and compare-and-set cursors, but this materialization
+path is still local/mock and is not wired to that service. Local preflight now refuses divergent
+local/mock import/materialize paths and persists local conflict records, but it does not resolve or
+merge them. The manual smoke path can use `--mock-key-source-db` so a receiving local context can
+decrypt a publisher's locally encrypted objects without printing raw key material. That flag is a
+test/dev trust bootstrap, not a production key exchange.
 
 ## Domain Boundary
 
@@ -108,7 +109,7 @@ devbox snapshot restore --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --to <TARGET
 Remaining Phase 1 work includes:
 
 - production account ownership and key exchange
-- hosted metadata service and server-side cursor reconciliation
+- wiring materialization to hosted metadata service and server-side cursor reconciliation
 - managed R2/S3 credential provisioning, rotation, and hosted object indexing
 - production pairing UX, recovery, and rotation
 - automatic conflict merge/apply resolution and user-facing conflict flows
