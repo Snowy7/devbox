@@ -68,6 +68,8 @@ one trusted device. `Store::persist_pairing_approval` also claims invitations wi
 Schema version `9` adds recovery grants, device rotation intents, and key-envelope rotation
 generation. Recovery grants store redacted references only, not recovery code plaintext. Rotation
 updates the encrypted key envelope for an approved device and records the completed generation.
+Recovery consumption is pending-only, consumed grants reject later revoke/consume attempts, and
+rotation completion claims a persisted pending intent by expiry and key-envelope generation.
 
 ## CLI Smoke Path
 

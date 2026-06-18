@@ -3046,8 +3046,12 @@ fn devices_rotate_key_envelope(
         current_generation: current.rotation_generation,
     })?;
     store.upsert_device_rotation_intent(&intent)?;
-    let (completed, envelope) =
-        store.rotate_key_envelope_for_device(&intent, &identity.sync_key_hex, &now)?;
+    let (completed, envelope) = store.rotate_key_envelope_for_device(
+        &intent,
+        &identity.sync_key_hex,
+        &now,
+        now_unix_seconds(),
+    )?;
 
     println!("Device key-envelope rotation: completed");
     print_device_rotation_intent(&completed);

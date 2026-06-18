@@ -20,8 +20,14 @@ building Electron UI, live OAuth login, provider-backed recovery, or hosted depl
 
 Recovery grants store redacted references such as `recovery-ref:...` or `grant-ref:...`. They do not
 store recovery-code plaintext, pairing secrets, device keys, account sync keys, bearer tokens, token
-hashes, or object credentials. Key-envelope rotation rewrites the encrypted envelope for an approved
-device and increments the generation while keeping plaintext keys local and unprinted.
+hashes, or object credentials. Recovery grant consumption is pending-only: consumed grants cannot be
+consumed again and cannot be revoked; already-revoked grants remain idempotent on repeated revoke.
+
+Key-envelope rotation rewrites the encrypted envelope for an approved device and increments the
+generation while keeping plaintext keys local and unprinted. Rotation completion is pending-only and
+expiry-aware. The store path claims a persisted pending intent in the same transaction as the
+envelope update, requires the account/device and expected key-envelope generation to match, and
+rejects never-persisted, completed, expired, or stale-generation intents.
 
 ## CLI Smoke Surface
 
