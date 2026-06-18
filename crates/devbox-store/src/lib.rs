@@ -1053,6 +1053,32 @@ impl Store {
         }
     }
 
+    pub fn latest_snapshot_for_project_excluding(
+        &self,
+        project_id: &str,
+        excluded_snapshot_id: &str,
+    ) -> StoreResult<Option<PersistedSnapshot>> {
+        let snapshot_id = self
+            .conn
+            .query_row(
+                r#"
+                SELECT id
+                FROM snapshots
+                WHERE project_id = ?1 AND id != ?2
+                ORDER BY created_at DESC, id ASC
+                LIMIT 1
+                "#,
+                params![project_id, excluded_snapshot_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        match snapshot_id {
+            Some(snapshot_id) => self.snapshot_with_entries(&snapshot_id),
+            None => Ok(None),
+        }
+    }
+
     pub fn replace_pending_local_changes(
         &mut self,
         project: &NewProject<'_>,

@@ -79,11 +79,15 @@ devbox conflicts dismiss --db <DB_PATH> <CONFLICT_ID>
 The output is plain text and tabular so future daemon/sync code can call the same model before
 refusing unsafe overwrites.
 
+`devbox sync preflight` and the local/mock import/materialize path now call this model when the
+receiving device cursor and local snapshot diverge from an incoming snapshot. Blocked preflight
+persists the same idempotent conflict record, prints the conflict id and summary counts, refuses the
+sync operation, and leaves the cursor unchanged.
+
 ## Deferred
 
 Remaining work includes:
 
-- automatic sync preflight integration with device cursor reconciliation
 - merge planning and apply semantics
 - user-facing conflict UI
 - hosted conflict metadata and cross-device conflict service

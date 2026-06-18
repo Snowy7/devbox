@@ -9,8 +9,9 @@ use devbox_conflict::{
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision};
 use devbox_materialize::{
-    import_snapshot, materialize_snapshot, publish_snapshot, ImportSnapshotRequest,
-    MaterializationRequest, PublishSnapshotRequest,
+    import_snapshot, materialize_snapshot, publish_snapshot, sync_preflight, ImportSnapshotRequest,
+    MaterializationRequest, MaterializeError, PublishSnapshotRequest, SyncPreflightOutcome,
+    SyncPreflightRequest,
 };
 use devbox_snapshot::{
     is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
@@ -324,6 +325,15 @@ struct SyncMaterializeArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncPreflightArgs {
+    db_path: String,
+    project_id: String,
+    base_snapshot_id: Option<String>,
+    local_snapshot_id: String,
+    incoming_snapshot_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SyncCursorArgs {
     db_path: String,
     project_id: String,
@@ -470,6 +480,16 @@ fn run_sync(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("preflight") => match parse_sync_preflight_args(&args[1..])
+            .and_then(|args| sync_preflight_command(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_sync_usage();
+                ExitCode::from(1)
+            }
+        },
         Some("upload") => match parse_sync_blob_args(&args[1..])
             .and_then(|args| sync_upload(&args).map_err(|error| error.to_string()))
         {
@@ -519,7 +539,7 @@ fn run_sync(args: &[String]) -> ExitCode {
         },
         _ => {
             eprintln!(
-                "devbox: sync requires publish-snapshot, import-snapshot, materialize, upload, download, or cursor"
+                "devbox: sync requires publish-snapshot, import-snapshot, materialize, preflight, upload, download, or cursor"
             );
             print_sync_usage();
             ExitCode::from(2)
@@ -932,6 +952,73 @@ fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, S
             .ok_or_else(|| "sync materialize requires a snapshot id".to_string())?,
         mock_key_source_db,
         apply,
+    })
+}
+
+fn parse_sync_preflight_args(args: &[String]) -> Result<SyncPreflightArgs, String> {
+    let mut db_path = None;
+    let mut project_id = None;
+    let mut base_snapshot_id = None;
+    let mut local_snapshot_id = None;
+    let mut incoming_snapshot_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--project" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--project requires an id".to_string())?;
+                project_id = Some(value.clone());
+            }
+            "--base" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--base requires a snapshot id".to_string())?;
+                base_snapshot_id = Some(value.clone());
+            }
+            "--local" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--local requires a snapshot id".to_string())?;
+                local_snapshot_id = Some(value.clone());
+            }
+            "--incoming" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--incoming requires a snapshot id".to_string())?;
+                incoming_snapshot_id = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown sync preflight option '{value}'"));
+            }
+            _ => return Err("sync preflight accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(SyncPreflightArgs {
+        db_path: db_path.ok_or_else(|| "sync preflight requires --db <DB_PATH>".to_string())?,
+        project_id: project_id
+            .ok_or_else(|| "sync preflight requires --project <PROJECT_ID>".to_string())?,
+        base_snapshot_id,
+        local_snapshot_id: local_snapshot_id
+            .ok_or_else(|| "sync preflight requires --local <LOCAL_SNAPSHOT_ID>".to_string())?,
+        incoming_snapshot_id: incoming_snapshot_id.ok_or_else(|| {
+            "sync preflight requires --incoming <INCOMING_SNAPSHOT_ID>".to_string()
+        })?,
     })
 }
 
@@ -1566,7 +1653,7 @@ fn sync_publish_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::err
 
 fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
     let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
-    let imported = import_snapshot(
+    let imported = match import_snapshot(
         &ImportSnapshotRequest {
             db_path: PathBuf::from(&args.db_path),
             cache_root: PathBuf::from(&args.cache_root),
@@ -1574,7 +1661,14 @@ fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::erro
             snapshot_id: args.snapshot_id.clone(),
         },
         &provider,
-    )?;
+    ) {
+        Ok(imported) => imported,
+        Err(MaterializeError::PreflightBlocked(outcome)) => {
+            print_sync_preflight_outcome(&outcome);
+            return Err("sync import-snapshot refused by local preflight".into());
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     println!("Sync import snapshot: decrypted into local/mock second context");
     println!("Source account id: {}", imported.source_account_id);
@@ -1608,7 +1702,7 @@ fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::erro
 
 fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
-    let outcome = materialize_snapshot(
+    let outcome = match materialize_snapshot(
         &MaterializationRequest {
             db_path: PathBuf::from(&args.db_path),
             cache_root: PathBuf::from(&args.cache_root),
@@ -1618,7 +1712,14 @@ fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error
             apply: args.apply,
         },
         &provider,
-    )?;
+    ) {
+        Ok(outcome) => outcome,
+        Err(MaterializeError::PreflightBlocked(outcome)) => {
+            print_sync_preflight_outcome(&outcome);
+            return Err("sync materialize refused by local preflight".into());
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     println!("Sync materialize snapshot");
     println!("Mode: {}", if args.apply { "apply" } else { "dry-run" });
@@ -1654,6 +1755,23 @@ fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error
     println!(
         "Boundary: local/mock second-device foundation; production backend/R2/UI not configured"
     );
+
+    Ok(())
+}
+
+fn sync_preflight_command(args: &SyncPreflightArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let outcome = sync_preflight(&SyncPreflightRequest {
+        db_path: PathBuf::from(&args.db_path),
+        project_id: args.project_id.clone(),
+        base_snapshot_id: args.base_snapshot_id.clone(),
+        local_snapshot_id: Some(args.local_snapshot_id.clone()),
+        incoming_snapshot_id: args.incoming_snapshot_id.clone(),
+    })?;
+
+    print_sync_preflight_outcome(&outcome);
+    if outcome.is_blocked() {
+        return Err("sync preflight blocked".into());
+    }
 
     Ok(())
 }
@@ -2343,6 +2461,65 @@ fn print_conflict_detail(
     }
 }
 
+fn print_sync_preflight_outcome(outcome: &SyncPreflightOutcome) {
+    println!("Preflight: {}", outcome.status.as_str());
+    println!("Project id: {}", outcome.project_id);
+    println!(
+        "Base snapshot id: {}",
+        outcome.base_snapshot_id.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Local snapshot id: {}",
+        outcome.local_snapshot_id.as_deref().unwrap_or("-")
+    );
+    println!("Incoming snapshot id: {}", outcome.incoming_snapshot_id);
+
+    if let Some(conflict) = &outcome.conflict {
+        println!("Conflict id: {}", conflict.conflict.id);
+        println!("Rows: {}", conflict.conflict.row_count);
+        println!("Same: {}", conflict.conflict.same_count);
+        println!("Local only: {}", conflict.conflict.local_only_count);
+        println!("Incoming only: {}", conflict.conflict.incoming_only_count);
+        println!("Local deleted: {}", conflict.conflict.local_deleted_count);
+        println!(
+            "Incoming deleted: {}",
+            conflict.conflict.incoming_deleted_count
+        );
+        println!(
+            "Both modified same: {}",
+            conflict.conflict.both_modified_same_count
+        );
+        println!(
+            "Both modified different: {}",
+            conflict.conflict.both_modified_different_count
+        );
+        println!(
+            "Policy excluded: {}",
+            conflict.conflict.policy_excluded_count
+        );
+        println!(
+            "Policy deferred: {}",
+            conflict.conflict.policy_deferred_count
+        );
+        println!("Policy blocked: {}", conflict.conflict.policy_blocked_count);
+        println!("Unsupported: {}", conflict.conflict.unsupported_count);
+    } else {
+        println!("Conflict id: -");
+        println!("Rows: 0");
+        println!("Same: 0");
+        println!("Local only: 0");
+        println!("Incoming only: 0");
+        println!("Local deleted: 0");
+        println!("Incoming deleted: 0");
+        println!("Both modified same: 0");
+        println!("Both modified different: 0");
+        println!("Policy excluded: 0");
+        println!("Policy deferred: 0");
+        println!("Policy blocked: 0");
+        println!("Unsupported: 0");
+    }
+}
+
 fn optional_blob_id(blob_id: Option<&BlobId>) -> String {
     blob_id
         .map(ToString::to_string)
@@ -2573,6 +2750,9 @@ fn print_sync_usage() {
     );
     eprintln!(
         "  devbox sync materialize --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> --to <TARGET_DIR> [--mock-key-source-db <PUBLISHER_DB>] <SNAPSHOT_ID> [--dry-run|--apply]"
+    );
+    eprintln!(
+        "  devbox sync preflight --db <DB_PATH> --project <PROJECT_ID> --local <LOCAL_SNAPSHOT_ID> --incoming <INCOMING_SNAPSHOT_ID> [--base <BASE_SNAPSHOT_ID>]"
     );
     eprintln!(
         "  devbox sync upload --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> <BLOB_ID> [--object-key <KEY>]"

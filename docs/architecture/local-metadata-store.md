@@ -122,6 +122,11 @@ snapshot ids, status, summary counts, blob ids, sizes, policy decisions, and red
 but not source file bytes. Conflict creation is idempotent for the same project/base/local/incoming
 tuple.
 
+The local/mock sync preflight path uses these rows with `device_project_cursors`. When the receiving
+device's cursor/base, latest local snapshot, and incoming snapshot indicate divergence, Devbox
+persists an idempotent conflict record and refuses import/materialization without advancing the
+cursor or downloading receiver file blobs.
+
 ## Deferred
 
 This boundary does not implement:

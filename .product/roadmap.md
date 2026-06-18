@@ -54,10 +54,12 @@ Completed foundations:
 - local/mock auth session, pairing invitation, approved-device trust, key envelope, revocation, and
   cursor primitives
 - local/mock second-device materialization through an encrypted local filesystem remote, including
-  publish/import, receiving cursor update, and safe restore-engine apply
+  publish/import, deferred materialize cursor commit, and safe restore-engine apply
 - local high-confidence secret detection and block-by-default policy before snapshot blobs become
   uploadable
 - local conflict-as-divergent-snapshot compare and persistence metadata
+- local sync preflight and cursor reconciliation that refuses divergent local/mock import or
+  materialization and persists readable conflict records without advancing cursors
 
 Remaining auth and pairing work:
 
@@ -66,7 +68,7 @@ Remaining auth and pairing work:
 - production pairing UX, recovery, and rotation flows
 - real cloud object credentials
 - explicit path-scoped secret allow/template/envelope policy
-- automatic conflict merge, sync refusal integration, and user-facing conflict flows
+- automatic conflict merge/apply resolution and user-facing conflict flows
 
 Exit criteria:
 

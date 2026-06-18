@@ -59,8 +59,8 @@
               <li>Upload queue, retry, resume, and backoff.</li>
               <li>Local/mock publish, import, and materialize foundation through encrypted local remote.</li>
               <li>Download and materialization queue.</li>
-              <li>Device cursor reconciliation.</li>
-              <li>Conflict-as-divergent-snapshot handling.</li>
+              <li>Local device cursor reconciliation before import/materialization.</li>
+              <li>Conflict-as-divergent-snapshot refusal records for divergent local/mock sync.</li>
             </ul>
           </article>
           <article class="card workstream amber-line">
@@ -93,10 +93,11 @@
           <li>The account/device model remains multi-device-capable even though one installation has one current local device.</li>
           <li>Encrypted blob upload and download work through a local filesystem remote provider without cloud credentials.</li>
           <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
-          <li>Local/mock second-device materialization now proves encrypted publish/import, receiving cursor update, and safe restore-engine apply.</li>
+          <li>Local/mock second-device materialization now proves encrypted publish/import, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret detection blocks detected files before blob-cache writes and uploadable local/mock sync blobs.</li>
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
-          <li>Production cloud authentication, hosted metadata, real R2/S3 credentials, production pairing UX, automatic merge, and conflict UI remain later Phase 1 work.</li>
+          <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
+          <li>Production cloud authentication, hosted metadata, real R2/S3 credentials, production pairing UX, automatic merge/apply resolution, and conflict UI remain later Phase 1 work.</li>
         </ul>
       </section>
 
