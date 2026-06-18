@@ -11,3 +11,4 @@ name = "devbox"
 path = "src/main.rs"
 
 [dependencies]
+devbox-core = { path = "../devbox-core" }

@@ -47,6 +47,19 @@ __pycache__/
 .venv/
 venv/
 
+# Test fixtures intentionally include generated-artifact directory names.
+!crates/devbox-core/tests/fixtures/**/node_modules/
+!crates/devbox-core/tests/fixtures/**/node_modules/**
+!crates/devbox-core/tests/fixtures/**/dist/
+!crates/devbox-core/tests/fixtures/**/dist/**
+!crates/devbox-core/tests/fixtures/**/target/
+!crates/devbox-core/tests/fixtures/**/target/**
+!crates/devbox-core/tests/fixtures/**/.venv/
+!crates/devbox-core/tests/fixtures/**/.venv/**
+!crates/devbox-core/tests/fixtures/**/__pycache__/
+!crates/devbox-core/tests/fixtures/**/__pycache__/**
+!crates/devbox-core/tests/fixtures/**/*.pyc
+
 # Local devbox data
 .devbox/
 .devbox-cache/

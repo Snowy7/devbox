@@ -1,5 +1,7 @@
 //! Core Devbox domain types.
 
+pub mod scanner;
+
 use std::fmt;
 use std::path::PathBuf;
 
