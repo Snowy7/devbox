@@ -165,13 +165,15 @@ fn snapshot_dry_run(cache_root: &str, path: &str) -> Result<(), Box<dyn std::err
 
 fn snapshot_create(args: &SnapshotCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
     preflight_cache_root(Path::new(&args.cache_root), Path::new(&args.path))?;
-    let cache = BlobCache::open(&args.cache_root)?;
-    let snapshot = SnapshotManifestBuilder::new(cache).build_draft(&args.path)?;
-
     let db_path = args
         .db_path
         .as_deref()
         .expect("persistent snapshot args require a db path");
+    preflight_db_path(Path::new(db_path), Path::new(&args.path))?;
+
+    let cache = BlobCache::open(&args.cache_root)?;
+    let snapshot = SnapshotManifestBuilder::new(cache).build_draft(&args.path)?;
+
     let mut store = Store::open_file(db_path)?;
     store.apply_migrations()?;
     let created_at = store.current_timestamp()?;
@@ -232,7 +234,7 @@ fn snapshot_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Usage: devbox snapshot list --db <DB_PATH>".into());
     }
 
-    let store = Store::open_file(db_path)?;
+    let store = open_existing_metadata_store(db_path)?;
     store.apply_migrations()?;
     let snapshots = store.list_snapshots()?;
 
@@ -259,7 +261,7 @@ fn snapshot_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Usage: devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>".into());
     }
 
-    let store = Store::open_file(db_path)?;
+    let store = open_existing_metadata_store(db_path)?;
     store.apply_migrations()?;
     let persisted = store
         .snapshot_with_entries(snapshot_id)?
@@ -419,6 +421,15 @@ fn print_snapshot_usage() {
     eprintln!("  devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>");
 }
 
+fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::error::Error>> {
+    let path = Path::new(db_path);
+    if !path.is_file() {
+        return Err(format!("metadata database does not exist: {}", path.display()).into());
+    }
+
+    Ok(Store::open_file(path)?)
+}
+
 #[derive(Debug)]
 enum SnapshotCliPreflightError {
     Io {
@@ -427,6 +438,10 @@ enum SnapshotCliPreflightError {
     },
     CacheInsideSnapshotRoot {
         cache_root: PathBuf,
+        snapshot_root: PathBuf,
+    },
+    DatabaseInsideSnapshotRoot {
+        db_path: PathBuf,
         snapshot_root: PathBuf,
     },
 }
@@ -446,6 +461,15 @@ impl fmt::Display for SnapshotCliPreflightError {
                 cache_root.display(),
                 snapshot_root.display()
             ),
+            Self::DatabaseInsideSnapshotRoot {
+                db_path,
+                snapshot_root,
+            } => write!(
+                f,
+                "metadata database path {} is inside snapshot root {}; choose a database outside the project",
+                db_path.display(),
+                snapshot_root.display()
+            ),
         }
     }
 }
@@ -454,7 +478,7 @@ impl std::error::Error for SnapshotCliPreflightError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
-            Self::CacheInsideSnapshotRoot { .. } => None,
+            Self::CacheInsideSnapshotRoot { .. } | Self::DatabaseInsideSnapshotRoot { .. } => None,
         }
     }
 }
@@ -463,11 +487,7 @@ fn preflight_cache_root(
     cache_root: &Path,
     snapshot_root: &Path,
 ) -> Result<(), SnapshotCliPreflightError> {
-    let snapshot_root =
-        fs::canonicalize(snapshot_root).map_err(|source| SnapshotCliPreflightError::Io {
-            path: snapshot_root.to_path_buf(),
-            source,
-        })?;
+    let snapshot_root = canonicalize_snapshot_root(snapshot_root)?;
     let cache_root = resolve_without_creating(cache_root)?;
 
     if cache_root == snapshot_root || cache_root.starts_with(&snapshot_root) {
@@ -478,6 +498,30 @@ fn preflight_cache_root(
     }
 
     Ok(())
+}
+
+fn preflight_db_path(
+    db_path: &Path,
+    snapshot_root: &Path,
+) -> Result<(), SnapshotCliPreflightError> {
+    let snapshot_root = canonicalize_snapshot_root(snapshot_root)?;
+    let db_path = resolve_without_creating(db_path)?;
+
+    if db_path == snapshot_root || db_path.starts_with(&snapshot_root) {
+        return Err(SnapshotCliPreflightError::DatabaseInsideSnapshotRoot {
+            db_path,
+            snapshot_root,
+        });
+    }
+
+    Ok(())
+}
+
+fn canonicalize_snapshot_root(snapshot_root: &Path) -> Result<PathBuf, SnapshotCliPreflightError> {
+    fs::canonicalize(snapshot_root).map_err(|source| SnapshotCliPreflightError::Io {
+        path: snapshot_root.to_path_buf(),
+        source,
+    })
 }
 
 fn resolve_without_creating(path: &Path) -> Result<PathBuf, SnapshotCliPreflightError> {
@@ -690,5 +734,33 @@ mod tests {
         preflight_cache_root(&cache_root, &root).expect("outside cache root is accepted");
 
         assert!(!cache_root.exists());
+    }
+
+    #[test]
+    fn preflight_rejects_in_tree_db_without_creating_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).expect("project dir creates");
+        let db_path = root.join("devbox.sqlite3");
+
+        let error = preflight_db_path(&db_path, &root).expect_err("in-tree db path is rejected");
+
+        assert!(matches!(
+            error,
+            SnapshotCliPreflightError::DatabaseInsideSnapshotRoot { .. }
+        ));
+        assert!(!db_path.exists());
+    }
+
+    #[test]
+    fn preflight_allows_outside_db_without_creating_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).expect("project dir creates");
+        let db_path = dir.path().join("devbox.sqlite3");
+
+        preflight_db_path(&db_path, &root).expect("outside db path is accepted");
+
+        assert!(!db_path.exists());
     }
 }
