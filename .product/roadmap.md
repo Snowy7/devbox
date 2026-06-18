@@ -46,6 +46,19 @@ Deliverables:
 - secret detection and block policy
 - conflict-as-divergent-snapshot model
 
+Completed foundations:
+
+- local watcher daemon feeding the pending operation log
+- local account/current-device identity and key material
+- encrypted remote blob transport through a local filesystem provider
+
+Remaining auth and pairing work:
+
+- sign-in and account ownership proof
+- device approval, key exchange/envelopes, and revocation
+- server-side device/project cursors and hosted metadata
+- second-device materialization and conflict flows
+
 Exit criteria:
 
 - 25 alpha users complete desktop-to-laptop workflow

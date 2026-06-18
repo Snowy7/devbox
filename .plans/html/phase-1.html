@@ -49,7 +49,7 @@
               <li>Rust API with device pairing and auth.</li>
               <li>Postgres metadata for accounts, devices, projects, manifests, and cursors.</li>
               <li>R2 blob backend behind a provider interface.</li>
-              <li>Encrypted immutable blob pack upload and download.</li>
+              <li>Encrypted immutable blob upload and download. Local filesystem provider foundation is complete; R2/S3 credentials are deferred.</li>
             </ul>
           </article>
           <article class="card workstream blue-line">
@@ -81,6 +81,17 @@
             </ul>
           </article>
         </div>
+      </section>
+
+      <section>
+        <h2>Current Foundation</h2>
+        <ul class="checklist">
+          <li>Local watcher feeds the pending operation log.</li>
+          <li>Local account and current-device identity initialize idempotently in SQLite.</li>
+          <li>The account/device model remains multi-device-capable even though one installation has one current local device.</li>
+          <li>Encrypted blob upload and download work through a local filesystem remote provider without cloud credentials.</li>
+          <li>Cloud authentication, device approval, key exchange/envelopes, revocation, server-side cursors, and second-device materialization remain next Phase 1 work.</li>
+        </ul>
       </section>
 
       <section>

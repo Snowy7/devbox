@@ -1,21 +1,17 @@
 [package]
-name = "devbox-cli"
+name = "devbox-sync"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "devbox"
-path = "src/main.rs"
-
 [dependencies]
+blake3 = "1"
+chacha20poly1305 = "0.10"
 devbox-core = { path = "../devbox-core" }
-devbox-snapshot = { path = "../devbox-snapshot" }
 devbox-store = { path = "../devbox-store" }
-devbox-sync = { path = "../devbox-sync" }
+getrandom = "0.2"
 
 [dev-dependencies]
-rusqlite = "0.31"
 tempfile = "3"

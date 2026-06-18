@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -19,6 +19,8 @@ const SUMMARY_TABLES: &[&str] = &[
     "chunks",
     "operations",
     "pending_local_changes",
+    "local_accounts",
+    "local_devices",
     "policies",
     "policy_evaluations",
     "restore_attempts",
@@ -127,6 +129,10 @@ impl Store {
 
         if version < 3 {
             self.conn.execute_batch(MIGRATION_3_PENDING_LOCAL_CHANGES)?;
+        }
+
+        if version < 4 {
+            self.conn.execute_batch(MIGRATION_4_LOCAL_IDENTITY)?;
         }
 
         Ok(())
@@ -287,6 +293,122 @@ impl Store {
             .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |row| {
                 row.get(0)
             })
+            .map_err(StoreError::from)
+    }
+
+    pub fn ensure_local_identity(
+        &mut self,
+        options: &EnsureLocalIdentityOptions<'_>,
+    ) -> StoreResult<LocalIdentityRecord> {
+        if let Some(identity) = self.local_identity()? {
+            return Ok(identity);
+        }
+
+        let created_at = self.current_timestamp()?;
+        let account_id = random_prefixed_id("account")?;
+        let device_id = random_prefixed_id("device")?;
+        let sync_key_hex = random_key_hex()?;
+        let device_key_hex = random_key_hex()?;
+        let display_name = options
+            .device_name
+            .filter(|name| !name.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or("local device");
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO local_accounts (id, display_name, sync_key_hex, created_at)
+            VALUES (?1, 'local account', ?2, ?3)
+            "#,
+            params![account_id, sync_key_hex, created_at],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO local_devices (
+                id,
+                account_id,
+                display_name,
+                device_key_hex,
+                is_local,
+                created_at,
+                last_seen_at
+            )
+            VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+            "#,
+            params![
+                device_id,
+                account_id,
+                display_name,
+                device_key_hex,
+                created_at,
+            ],
+        )?;
+        tx.commit()?;
+
+        self.local_identity()?.ok_or_else(|| {
+            StoreError::InvalidMigrationState("local identity was not persisted".to_string())
+        })
+    }
+
+    pub fn local_identity(&self) -> StoreResult<Option<LocalIdentityRecord>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    a.id,
+                    d.id,
+                    d.display_name,
+                    a.created_at,
+                    d.created_at,
+                    d.last_seen_at,
+                    a.sync_key_hex,
+                    d.device_key_hex
+                FROM local_accounts a
+                JOIN local_devices d ON d.account_id = a.id
+                WHERE d.is_local = 1
+                ORDER BY d.created_at ASC, d.id ASC
+                LIMIT 1
+                "#,
+                [],
+                |row| {
+                    Ok(LocalIdentityRecord {
+                        account_id: row.get(0)?,
+                        device_id: row.get(1)?,
+                        device_name: row.get(2)?,
+                        account_created_at: row.get(3)?,
+                        device_created_at: row.get(4)?,
+                        last_seen_at: row.get(5)?,
+                        sync_key_hex: row.get(6)?,
+                        device_key_hex: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_devices(&self) -> StoreResult<Vec<DeviceRecord>> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT id, account_id, display_name, is_local, created_at, last_seen_at
+            FROM local_devices
+            ORDER BY is_local DESC, created_at ASC, id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            let is_local: u8 = row.get(3)?;
+            Ok(DeviceRecord {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                display_name: row.get(2)?,
+                is_local: is_local == 1,
+                created_at: row.get(4)?,
+                last_seen_at: row.get(5)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
 
@@ -743,6 +865,33 @@ pub struct TableCount {
     pub rows: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnsureLocalIdentityOptions<'a> {
+    pub device_name: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalIdentityRecord {
+    pub account_id: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub account_created_at: String,
+    pub device_created_at: String,
+    pub last_seen_at: String,
+    pub sync_key_hex: String,
+    pub device_key_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRecord {
+    pub id: String,
+    pub account_id: String,
+    pub display_name: String,
+    pub is_local: bool,
+    pub created_at: String,
+    pub last_seen_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewProject<'a> {
     pub id: &'a str,
@@ -957,6 +1106,34 @@ pub fn path_to_store_string(path: &Path) -> String {
     } else {
         parts.join("/")
     }
+}
+
+fn random_prefixed_id(prefix: &str) -> StoreResult<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        StoreError::InvalidMigrationState(format!("failed to generate local identity id: {error}"))
+    })?;
+    Ok(format!("{prefix}-{}", hex_encode(&bytes)))
+}
+
+fn random_key_hex() -> StoreResult<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        StoreError::InvalidMigrationState(format!(
+            "failed to generate local identity key material: {error}"
+        ))
+    })?;
+    Ok(hex_encode(&bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn kind_to_store(kind: &ManifestEntryKind) -> &'static str {
@@ -1241,6 +1418,40 @@ PRAGMA user_version = 3;
 COMMIT;
 "#;
 
+const MIGRATION_4_LOCAL_IDENTITY: &str = r#"
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS local_accounts (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    sync_key_hex TEXT NOT NULL CHECK (length(sync_key_hex) = 64),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS local_devices (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    device_key_hex TEXT NOT NULL CHECK (length(device_key_hex) = 64),
+    is_local INTEGER NOT NULL CHECK (is_local IN (0, 1)),
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_local_devices_one_local
+    ON local_devices(is_local)
+    WHERE is_local = 1;
+CREATE INDEX IF NOT EXISTS idx_local_devices_account
+    ON local_devices(account_id);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (4, 'local_account_device_identity');
+
+PRAGMA user_version = 4;
+
+COMMIT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1285,6 +1496,106 @@ mod tests {
             reopened.schema_version().expect("version reads"),
             CURRENT_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn local_identity_init_is_idempotent() {
+        let mut store = migrated_store();
+
+        let first = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Laptop"),
+            })
+            .expect("identity initializes");
+        let second = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Desktop"),
+            })
+            .expect("identity reuses existing rows");
+
+        assert_eq!(first, second);
+        assert_eq!(first.device_name, "Laptop");
+        assert!(first.account_id.starts_with("account-"));
+        assert!(first.device_id.starts_with("device-"));
+        assert_eq!(first.sync_key_hex.len(), 64);
+        assert_eq!(first.device_key_hex.len(), 64);
+
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "local_accounts"), 1);
+        assert_eq!(count(&summary, "local_devices"), 1);
+    }
+
+    #[test]
+    fn local_devices_list_marks_the_local_device() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Workstation"),
+            })
+            .expect("identity initializes");
+
+        let devices = store.list_devices().expect("devices list");
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, identity.device_id);
+        assert_eq!(devices[0].account_id, identity.account_id);
+        assert_eq!(devices[0].display_name, "Workstation");
+        assert!(devices[0].is_local);
+    }
+
+    #[test]
+    fn local_device_schema_supports_many_known_devices_for_one_account() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+
+        for name in ["Build box", "Travel laptop"] {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO local_devices (
+                        id,
+                        account_id,
+                        display_name,
+                        device_key_hex,
+                        is_local,
+                        created_at,
+                        last_seen_at
+                    )
+                    VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)
+                    "#,
+                    params![
+                        format!("device-known-{}", name.replace(' ', "-").to_lowercase()),
+                        identity.account_id,
+                        name,
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "2026-06-18T12:00:00Z",
+                    ],
+                )
+                .expect("known device row inserts");
+        }
+
+        let devices = store.list_devices().expect("devices list");
+
+        assert_eq!(devices.len(), 3);
+        assert_eq!(
+            devices
+                .iter()
+                .filter(|device| device.account_id == identity.account_id)
+                .count(),
+            3
+        );
+        assert_eq!(devices.iter().filter(|device| device.is_local).count(), 1);
+        assert!(devices
+            .iter()
+            .any(|device| device.display_name == "Build box" && !device.is_local));
+        assert!(devices
+            .iter()
+            .any(|device| device.display_name == "Travel laptop" && !device.is_local));
     }
 
     #[test]

@@ -62,6 +62,14 @@ Cloud:
 - account/device registry
 - optional relay for peer-to-peer sync later
 
+Current Phase 1 foundation status:
+
+- local watcher feeds the pending operation log
+- local account/current-device identity exists in SQLite
+- encrypted immutable blob upload/download works through a local filesystem provider
+- real cloud authentication, device approval, key envelopes, revocation, and server-side cursors are
+  the next auth/device-pairing slice
+
 ## Content Addressing
 
 Every durable file content chunk should be addressed by hash.
@@ -167,6 +175,10 @@ project-a
 9. On receiving device, compare local cursor and policy.
 10. Materialize snapshot atomically with rollback.
 
+The first alpha workflow proves desktop-to-laptop continuation, but the account/device architecture
+must remain multi-device-capable. A local installation should have one current local device identity,
+while an account can accumulate many approved devices over time.
+
 ## Rehydration
 
 The product should avoid syncing heavy dependency directories by default. It should make rehydration visible:
@@ -226,4 +238,3 @@ New primitives:
 - snapshots instead of stashes
 - copy-on-write spaces instead of worktrees
 - operation log instead of reflog archaeology
-

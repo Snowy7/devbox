@@ -98,6 +98,122 @@ fn snapshot_create_list_and_show_smoke() {
 }
 
 #[test]
+fn init_is_idempotent_and_devices_list_current_local_device() {
+    let fixture = SnapshotCliFixture::new();
+
+    let first = run_devbox([
+        "init",
+        "--db",
+        fixture.db_path(),
+        "--device-name",
+        "Current machine",
+    ]);
+    assert_success(&first);
+    let first_stdout = stdout(&first);
+    assert!(first_stdout.contains("Local identity initialized"));
+    assert!(first_stdout.contains("Current device name: Current machine"));
+    assert!(first_stdout.contains("Cloud authentication: not configured"));
+    assert!(first_stdout.contains("Key material: stored locally; not printed"));
+    assert!(!first_stdout.contains("sync_key"));
+    assert!(!first_stdout.contains("device_key"));
+
+    let second = run_devbox([
+        "init",
+        "--db",
+        fixture.db_path(),
+        "--device-name",
+        "Ignored later name",
+    ]);
+    assert_success(&second);
+    let second_stdout = stdout(&second);
+    assert!(second_stdout.contains("Current device name: Current machine"));
+    assert_eq!(
+        prefixed_value(&first_stdout, "Account id: "),
+        prefixed_value(&second_stdout, "Account id: ")
+    );
+    assert_eq!(
+        prefixed_value(&first_stdout, "Current device id: "),
+        prefixed_value(&second_stdout, "Current device id: ")
+    );
+
+    let devices = run_devbox(["devices", "list", "--db", fixture.db_path()]);
+    assert_success(&devices);
+    let devices_stdout = stdout(&devices);
+    assert!(devices_stdout.contains("Device id\tAccount id\tCurrent local\tName"));
+    assert!(devices_stdout.contains("\ttrue\tCurrent machine\t"));
+}
+
+#[test]
+fn sync_upload_and_download_encrypts_remote_object_bytes() {
+    let fixture = SnapshotCliFixture::new();
+    let plaintext = "hello encrypted sync foundation\n";
+    fixture.write("README.md", plaintext);
+
+    assert_success(&run_devbox(["init", "--db", fixture.db_path()]));
+    let create = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&create);
+    let snapshot_id = stdout(&create)
+        .lines()
+        .find_map(|line| line.strip_prefix("Snapshot id: "))
+        .expect("snapshot id prints")
+        .to_string();
+    let show = run_devbox([
+        "snapshot",
+        "show",
+        "--db",
+        fixture.db_path(),
+        snapshot_id.as_str(),
+    ]);
+    assert_success(&show);
+    let blob_id = blob_id_for_path(&stdout(&show), "README.md");
+
+    let upload = run_devbox([
+        "sync",
+        "upload",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        blob_id.as_str(),
+    ]);
+    assert_success(&upload);
+    let upload_stdout = stdout(&upload);
+    assert!(upload_stdout.contains("Sync upload: encrypted local-remote object"));
+    assert!(upload_stdout.contains("Cloud authentication: not configured"));
+    let object_key = prefixed_value(&upload_stdout, "Object key: ");
+    let remote_bytes = fs::read(remote_object_path(fixture.remote_path_buf(), &object_key))
+        .expect("remote object reads");
+    assert!(!remote_bytes
+        .windows(plaintext.len())
+        .any(|window| window == plaintext.as_bytes()));
+
+    let download = run_devbox([
+        "sync",
+        "download",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.download_cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        blob_id.as_str(),
+    ]);
+    assert_success(&download);
+    let restored = fs::read_to_string(cache_blob_path(fixture.download_cache_path_buf(), &blob_id))
+        .expect("downloaded cache blob reads");
+    assert_eq!(restored, plaintext);
+}
+
+#[test]
 fn snapshot_dry_run_stays_non_persisting() {
     let fixture = SnapshotCliFixture::new();
     fixture.write("README.md", "hello\n");
@@ -358,7 +474,9 @@ struct SnapshotCliFixture {
     _dir: tempfile::TempDir,
     project: std::path::PathBuf,
     cache: std::path::PathBuf,
+    download_cache: std::path::PathBuf,
     db: std::path::PathBuf,
+    remote: std::path::PathBuf,
     target: std::path::PathBuf,
 }
 
@@ -367,7 +485,9 @@ impl SnapshotCliFixture {
         let dir = tempfile::tempdir().expect("temp dir");
         let project = dir.path().join("project");
         let cache = dir.path().join("cache");
+        let download_cache = dir.path().join("download-cache");
         let db = dir.path().join("devbox.sqlite3");
+        let remote = dir.path().join("remote");
         let target = dir.path().join("target");
         fs::create_dir_all(&project).expect("project dir creates");
 
@@ -375,7 +495,9 @@ impl SnapshotCliFixture {
             _dir: dir,
             project,
             cache,
+            download_cache,
             db,
+            remote,
             target,
         }
     }
@@ -398,6 +520,22 @@ impl SnapshotCliFixture {
 
     fn db_path(&self) -> &str {
         self.db.to_str().expect("test paths are UTF-8")
+    }
+
+    fn remote_path(&self) -> &str {
+        self.remote.to_str().expect("test paths are UTF-8")
+    }
+
+    fn remote_path_buf(&self) -> &std::path::Path {
+        &self.remote
+    }
+
+    fn download_cache_path(&self) -> &str {
+        self.download_cache.to_str().expect("test paths are UTF-8")
+    }
+
+    fn download_cache_path_buf(&self) -> &std::path::Path {
+        &self.download_cache
     }
 
     fn db_path_buf(&self) -> &std::path::Path {
@@ -456,4 +594,40 @@ fn pending_change_row_count(db_path: &str) -> u64 {
         row.get(0)
     })
     .expect("pending change count reads")
+}
+
+fn prefixed_value(output: &str, prefix: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .expect("prefixed value prints")
+        .to_string()
+}
+
+fn blob_id_for_path(output: &str, path: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() >= 5 && fields[0] == path {
+                Some(fields[4].to_string())
+            } else {
+                None
+            }
+        })
+        .expect("blob id is present")
+}
+
+fn remote_object_path(root: &std::path::Path, object_key: &str) -> std::path::PathBuf {
+    object_key
+        .split('/')
+        .fold(root.join("objects"), |path, segment| path.join(segment))
+}
+
+fn cache_blob_path(root: &std::path::Path, blob_id: &str) -> std::path::PathBuf {
+    root.join("blobs")
+        .join("b3")
+        .join(&blob_id[0..2])
+        .join(&blob_id[2..4])
+        .join(blob_id)
 }

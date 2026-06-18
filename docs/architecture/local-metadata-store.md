@@ -65,7 +65,7 @@ The existing `restore_attempts` table is still reserved for a later operation lo
 
 ## Migration Rules
 
-`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `2`.
+`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `4`.
 
 The initial migration creates:
 
@@ -84,13 +84,23 @@ The initial migration creates:
 
 Schema version `2` rebuilds `manifest_entries` with the same columns and constraints, but expands `entry_kind` to include `unsupported`. That keeps SQLite aligned with the domain manifest model used by the builder for deferred filesystem node types.
 
+Schema version `3` adds `pending_local_changes` for the watcher-backed local operation feed.
+
+Schema version `4` adds local identity tables:
+
+- `local_accounts`
+- `local_devices`
+
+This is local-only identity for encrypted sync foundations, not cloud authentication. One
+installation has one current local device (`is_local = 1`), but the account/device schema allows
+many known non-local devices under the same account for later pairing and approval work.
+
 ## Deferred
 
 This boundary does not implement:
 
-- filesystem watching
-- cloud sync
-- encryption
+- cloud authentication, sign-in, account ownership proof, or device approval
+- device revocation or backend account/device cursors
 - compression
 - packfiles
 - cache eviction or garbage collection
