@@ -353,6 +353,7 @@ name = "devbox-metadata"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "devbox-auth",
  "http",
  "rusqlite",
  "serde",

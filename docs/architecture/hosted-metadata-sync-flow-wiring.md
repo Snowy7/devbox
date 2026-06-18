@@ -23,7 +23,9 @@ That account/project scope lets the receiver discover the manifest object key fr
 by `(account_id, project_id, snapshot_id)` before decrypting the encrypted bundle. In the current
 mock-dev CLI path, `--mock-key-source-db <PUBLISHER_DB>` can provide the publisher account id for
 the same local trust bootstrap that provides the decryption key. The default path remains local/mock
-only and still derives the manifest object key locally.
+only and still derives the manifest object key locally. Production-shaped account/session proof
+primitives now exist for future hosted authentication, but this sync wiring still does not enforce a
+live OAuth-backed account session.
 
 ## Publish Semantics
 
@@ -68,7 +70,7 @@ unsafe endpoint material.
 
 This is personal-alpha wiring, not a production SaaS backend. Deferred work remains:
 
-- production OAuth/sign-in and account ownership proof
+- live OAuth/OIDC sign-in and hosted account ownership proof verification
 - managed object credential provisioning and rotation
 - production deployment hardening and observability
 - Electron tray/status UI

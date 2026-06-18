@@ -96,11 +96,12 @@
           <li>Hosted metadata API/store/handler foundations model accounts, devices, projects, published snapshot manifests, and server-side compare-and-set device/project cursors.</li>
           <li>Publish/import/materialize can opt into in-process mock-dev hosted metadata for manifest discovery and server-side cursor compare-and-set.</li>
           <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
+          <li>Production-shaped account ownership proof and account session primitives model provider subject/email/domain proof, token-hash sessions, expiration, revocation, and no-network CLI/dev persistence.</li>
           <li>Local/mock second-device materialization now proves encrypted publish/import, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret detection blocks detected files before blob-cache writes and uploadable local/mock sync blobs.</li>
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
           <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
-          <li>Production cloud authentication, managed object-storage credential provisioning, production pairing UX, production hosted metadata integration, automatic merge/apply resolution, conflict UI, Electron UI, and deployment hardening remain later Phase 1 work.</li>
+          <li>Live OAuth/login integration, managed object-storage credential provisioning, production pairing UX, production hosted metadata auth enforcement, automatic merge/apply resolution, conflict UI, Electron UI, and deployment hardening remain later Phase 1 work.</li>
         </ul>
       </section>
 

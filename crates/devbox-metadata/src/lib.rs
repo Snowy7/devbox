@@ -11,6 +11,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
+use devbox_auth::{
+    hash_session_token_hex, revoke_account_session as revoke_auth_account_session,
+    validate_account_ownership_proof, validate_account_session_hash, AccountOwnershipProof,
+    AccountSession, AuthenticatedAccountSession,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -42,6 +47,8 @@ pub enum MetadataError {
     PoisonedStore,
     MissingMockDevIdentity,
     IdentityMismatch,
+    InvalidAccountProof(String),
+    InvalidAccountSession(String),
     NotFound { entity: &'static str, id: String },
     CursorPreconditionFailed { current_cursor: Option<String> },
     InvalidRequest(String),
@@ -59,6 +66,8 @@ impl fmt::Display for MetadataError {
                 )
             }
             Self::IdentityMismatch => f.write_str("mock-dev identity mismatch"),
+            Self::InvalidAccountProof(message) => f.write_str(message),
+            Self::InvalidAccountSession(message) => f.write_str(message),
             Self::NotFound { entity, id } => write!(f, "{entity} not found: {id}"),
             Self::CursorPreconditionFailed { current_cursor } => write!(
                 f,
@@ -77,6 +86,8 @@ impl std::error::Error for MetadataError {
             Self::PoisonedStore
             | Self::MissingMockDevIdentity
             | Self::IdentityMismatch
+            | Self::InvalidAccountProof(_)
+            | Self::InvalidAccountSession(_)
             | Self::NotFound { .. }
             | Self::CursorPreconditionFailed { .. }
             | Self::InvalidRequest(_) => None,
@@ -93,11 +104,13 @@ impl From<rusqlite::Error> for MetadataError {
 impl IntoResponse for MetadataError {
     fn into_response(self) -> Response {
         let status = match &self {
-            Self::MissingMockDevIdentity | Self::IdentityMismatch => StatusCode::UNAUTHORIZED,
+            Self::MissingMockDevIdentity
+            | Self::IdentityMismatch
+            | Self::InvalidAccountSession(_) => StatusCode::UNAUTHORIZED,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::CursorPreconditionFailed { .. } => StatusCode::CONFLICT,
             Self::Sqlite(error) if is_sqlite_constraint(error) => StatusCode::BAD_REQUEST,
-            Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidAccountProof(_) | Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::Sqlite(_) | Self::PoisonedStore => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = ErrorResponse {
@@ -287,6 +300,28 @@ pub struct MetadataServiceCheck {
 }
 
 pub trait MetadataStore {
+    fn upsert_account_ownership_proof(
+        &mut self,
+        proof: AccountOwnershipProof,
+    ) -> MetadataResult<AccountRecord>;
+    fn account_for_provider_subject(
+        &self,
+        provider_kind: &str,
+        provider_issuer: &str,
+        provider_subject: &str,
+    ) -> MetadataResult<Option<AccountRecord>>;
+    fn upsert_account_session(&mut self, session: AccountSession)
+        -> MetadataResult<AccountSession>;
+    fn account_session(&self, session_id: &str) -> MetadataResult<Option<AccountSession>>;
+    fn account_session_by_hash(
+        &self,
+        session_token_hash_hex: &str,
+    ) -> MetadataResult<Option<AccountSession>>;
+    fn revoke_account_session(
+        &mut self,
+        session_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<AccountSession>;
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord>;
     fn upsert_project(&mut self, request: UpsertProjectRequest) -> MetadataResult<ProjectRecord>;
     fn publish_snapshot(
@@ -314,6 +349,10 @@ pub trait MetadataStore {
 #[derive(Debug, Default)]
 pub struct InMemoryMetadataStore {
     accounts: BTreeMap<String, AccountRecord>,
+    account_proofs: BTreeMap<String, AccountOwnershipProof>,
+    account_provider_index: BTreeMap<(String, String, String), String>,
+    account_sessions: BTreeMap<String, AccountSession>,
+    account_session_hash_index: BTreeMap<String, String>,
     devices: BTreeMap<(String, String), DeviceRecord>,
     projects: BTreeMap<(String, String), ProjectRecord>,
     snapshots: BTreeMap<(String, String, String), PublishedSnapshotRecord>,
@@ -321,6 +360,160 @@ pub struct InMemoryMetadataStore {
 }
 
 impl MetadataStore for InMemoryMetadataStore {
+    fn upsert_account_ownership_proof(
+        &mut self,
+        proof: AccountOwnershipProof,
+    ) -> MetadataResult<AccountRecord> {
+        validate_account_ownership_proof(&proof, 0).map_err(auth_proof_error)?;
+        let provider_key = provider_tuple_key(
+            &proof.provider_kind,
+            &proof.provider_issuer,
+            &proof.provider_subject,
+        );
+        if let Some(existing_account_id) = self.account_provider_index.get(&provider_key) {
+            if existing_account_id != &proof.account_id {
+                return Err(MetadataError::InvalidRequest(
+                    "provider subject is already linked to another account".to_string(),
+                ));
+            }
+        }
+        if let Some(previous) = self.account_proofs.get(&proof.account_id) {
+            let previous_key = provider_tuple_key(
+                &previous.provider_kind,
+                &previous.provider_issuer,
+                &previous.provider_subject,
+            );
+            if previous_key != provider_key
+                && self.account_sessions.values().any(|session| {
+                    session.account_id == previous.account_id
+                        && session.provider_kind == previous.provider_kind
+                        && session.provider_issuer == previous.provider_issuer
+                        && session.provider_subject == previous.provider_subject
+                })
+            {
+                return Err(MetadataError::InvalidRequest(
+                    "account ownership proof cannot change provider tuple while sessions reference the previous proof".to_string(),
+                ));
+            }
+        }
+        let display_name = proof
+            .verified_email
+            .as_deref()
+            .or(proof.verified_domain.as_deref())
+            .unwrap_or("verified account")
+            .to_string();
+        let account = self
+            .accounts
+            .entry(proof.account_id.clone())
+            .or_insert_with(|| AccountRecord {
+                account_id: proof.account_id.clone(),
+                display_name: display_name.clone(),
+                created_at: proof.proof_issued_at.clone(),
+                updated_at: proof.proof_issued_at.clone(),
+            });
+        account.display_name = display_name;
+        account.updated_at = proof.proof_issued_at.clone();
+        if let Some(previous) = self.account_proofs.get(&proof.account_id) {
+            self.account_provider_index.remove(&provider_tuple_key(
+                &previous.provider_kind,
+                &previous.provider_issuer,
+                &previous.provider_subject,
+            ));
+        }
+        self.account_proofs
+            .insert(proof.account_id.clone(), proof.clone());
+        self.account_provider_index
+            .insert(provider_key, proof.account_id.clone());
+        Ok(account.clone())
+    }
+
+    fn account_for_provider_subject(
+        &self,
+        provider_kind: &str,
+        provider_issuer: &str,
+        provider_subject: &str,
+    ) -> MetadataResult<Option<AccountRecord>> {
+        let account_id = self
+            .account_provider_index
+            .get(&provider_tuple_key(
+                provider_kind,
+                provider_issuer,
+                provider_subject,
+            ))
+            .cloned();
+        Ok(account_id.and_then(|account_id| self.accounts.get(&account_id).cloned()))
+    }
+
+    fn upsert_account_session(
+        &mut self,
+        session: AccountSession,
+    ) -> MetadataResult<AccountSession> {
+        ensure_session_hash(&session)?;
+        let provider_key = provider_tuple_key(
+            &session.provider_kind,
+            &session.provider_issuer,
+            &session.provider_subject,
+        );
+        if self.account_provider_index.get(&provider_key) != Some(&session.account_id) {
+            return Err(MetadataError::InvalidRequest(
+                "account ownership proof must be registered before session".to_string(),
+            ));
+        }
+        if let Some(existing_session_id) = self
+            .account_session_hash_index
+            .get(&session.session_token_hash_hex)
+        {
+            if existing_session_id != &session.session_id {
+                return Err(MetadataError::InvalidRequest(
+                    "account session token hash is already registered".to_string(),
+                ));
+            }
+        }
+        if let Some(previous) = self.account_sessions.get(&session.session_id) {
+            self.account_session_hash_index
+                .remove(&previous.session_token_hash_hex);
+        }
+        self.account_sessions
+            .insert(session.session_id.clone(), session.clone());
+        self.account_session_hash_index.insert(
+            session.session_token_hash_hex.clone(),
+            session.session_id.clone(),
+        );
+        Ok(session)
+    }
+
+    fn account_session(&self, session_id: &str) -> MetadataResult<Option<AccountSession>> {
+        Ok(self.account_sessions.get(session_id).cloned())
+    }
+
+    fn account_session_by_hash(
+        &self,
+        session_token_hash_hex: &str,
+    ) -> MetadataResult<Option<AccountSession>> {
+        Ok(self
+            .account_session_hash_index
+            .get(session_token_hash_hex)
+            .and_then(|session_id| self.account_sessions.get(session_id))
+            .cloned())
+    }
+
+    fn revoke_account_session(
+        &mut self,
+        session_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<AccountSession> {
+        let session = self
+            .account_sessions
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "account session",
+                id: session_id.to_string(),
+            })?;
+        let revoked = revoke_auth_account_session(&session, revoked_at).map_err(auth_error)?;
+        self.upsert_account_session(revoked)
+    }
+
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord> {
         ensure_no_secret_material(&request)?;
         let account = self
@@ -496,6 +689,42 @@ impl SqliteMetadataStore {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS metadata_account_ownership_proofs (
+                account_id TEXT PRIMARY KEY,
+                provider_kind TEXT NOT NULL,
+                provider_issuer TEXT NOT NULL,
+                provider_subject TEXT NOT NULL,
+                verified_email TEXT,
+                verified_domain TEXT,
+                proof_state TEXT NOT NULL CHECK (proof_state = 'verified'),
+                proof_issued_at TEXT NOT NULL,
+                proof_expires_at_unix INTEGER NOT NULL CHECK (proof_expires_at_unix > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK (verified_email IS NOT NULL OR verified_domain IS NOT NULL),
+                UNIQUE (account_id, provider_kind, provider_issuer, provider_subject),
+                UNIQUE (provider_kind, provider_issuer, provider_subject),
+                FOREIGN KEY (account_id) REFERENCES metadata_accounts(account_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS metadata_account_sessions (
+                session_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                provider_kind TEXT NOT NULL,
+                provider_issuer TEXT NOT NULL,
+                provider_subject TEXT NOT NULL,
+                session_token_hash_hex TEXT NOT NULL CHECK (length(session_token_hash_hex) = 64),
+                session_state TEXT NOT NULL CHECK (session_state IN ('active', 'revoked')),
+                created_at TEXT NOT NULL,
+                expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+                revoked_at TEXT,
+                last_seen_at TEXT NOT NULL,
+                UNIQUE (session_token_hash_hex),
+                FOREIGN KEY (account_id, provider_kind, provider_issuer, provider_subject)
+                    REFERENCES metadata_account_ownership_proofs(account_id, provider_kind, provider_issuer, provider_subject)
+                    ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS metadata_devices (
                 account_id TEXT NOT NULL,
                 device_id TEXT NOT NULL,
@@ -544,6 +773,13 @@ impl SqliteMetadataStore {
                 FOREIGN KEY (account_id, device_id) REFERENCES metadata_devices(account_id, device_id) ON DELETE CASCADE,
                 FOREIGN KEY (account_id, project_id) REFERENCES metadata_projects(account_id, project_id) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_metadata_account_ownership_provider_subject
+                ON metadata_account_ownership_proofs(provider_kind, provider_issuer, provider_subject);
+            CREATE INDEX IF NOT EXISTS idx_metadata_account_sessions_account_state
+                ON metadata_account_sessions(account_id, session_state, expires_at_unix);
+            CREATE INDEX IF NOT EXISTS idx_metadata_account_sessions_hash
+                ON metadata_account_sessions(session_token_hash_hex);
             "#,
         )?;
         Ok(())
@@ -551,6 +787,230 @@ impl SqliteMetadataStore {
 }
 
 impl MetadataStore for SqliteMetadataStore {
+    fn upsert_account_ownership_proof(
+        &mut self,
+        proof: AccountOwnershipProof,
+    ) -> MetadataResult<AccountRecord> {
+        validate_account_ownership_proof(&proof, 0).map_err(auth_proof_error)?;
+        let display_name = proof
+            .verified_email
+            .as_deref()
+            .or(proof.verified_domain.as_deref())
+            .unwrap_or("verified account");
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO metadata_accounts (account_id, display_name, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?3)
+            ON CONFLICT(account_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                updated_at = excluded.updated_at
+            "#,
+            params![proof.account_id, display_name, proof.proof_issued_at],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO metadata_account_ownership_proofs (
+                account_id,
+                provider_kind,
+                provider_issuer,
+                provider_subject,
+                verified_email,
+                verified_domain,
+                proof_state,
+                proof_issued_at,
+                proof_expires_at_unix,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?8, ?8)
+            ON CONFLICT(account_id) DO UPDATE SET
+                provider_kind = excluded.provider_kind,
+                provider_issuer = excluded.provider_issuer,
+                provider_subject = excluded.provider_subject,
+                verified_email = excluded.verified_email,
+                verified_domain = excluded.verified_domain,
+                proof_state = excluded.proof_state,
+                proof_issued_at = excluded.proof_issued_at,
+                proof_expires_at_unix = excluded.proof_expires_at_unix,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                proof.account_id,
+                proof.provider_kind,
+                proof.provider_issuer,
+                proof.provider_subject,
+                proof.verified_email,
+                proof.verified_domain,
+                proof.proof_state,
+                proof.proof_issued_at,
+                proof.proof_expires_at_unix,
+            ],
+        )?;
+        tx.commit()?;
+        self.account(&proof.account_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "account",
+                id: proof.account_id,
+            })
+    }
+
+    fn account_for_provider_subject(
+        &self,
+        provider_kind: &str,
+        provider_issuer: &str,
+        provider_subject: &str,
+    ) -> MetadataResult<Option<AccountRecord>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    a.account_id,
+                    a.display_name,
+                    a.created_at,
+                    a.updated_at
+                FROM metadata_accounts a
+                JOIN metadata_account_ownership_proofs p
+                    ON p.account_id = a.account_id
+                WHERE p.provider_kind = ?1
+                    AND p.provider_issuer = ?2
+                    AND p.provider_subject = ?3
+                "#,
+                params![provider_kind, provider_issuer, provider_subject],
+                account_from_row,
+            )
+            .optional()
+            .map_err(MetadataError::from)
+    }
+
+    fn upsert_account_session(
+        &mut self,
+        session: AccountSession,
+    ) -> MetadataResult<AccountSession> {
+        ensure_session_hash(&session)?;
+        self.ensure_account_proof_exists(
+            &session.account_id,
+            &session.provider_kind,
+            &session.provider_issuer,
+            &session.provider_subject,
+        )?;
+        self.conn.execute(
+            r#"
+            INSERT INTO metadata_account_sessions (
+                session_id,
+                account_id,
+                provider_kind,
+                provider_issuer,
+                provider_subject,
+                session_token_hash_hex,
+                session_state,
+                created_at,
+                expires_at_unix,
+                revoked_at,
+                last_seen_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(session_id) DO UPDATE SET
+                provider_kind = excluded.provider_kind,
+                provider_issuer = excluded.provider_issuer,
+                provider_subject = excluded.provider_subject,
+                session_token_hash_hex = excluded.session_token_hash_hex,
+                session_state = excluded.session_state,
+                expires_at_unix = excluded.expires_at_unix,
+                revoked_at = excluded.revoked_at,
+                last_seen_at = excluded.last_seen_at
+            "#,
+            params![
+                session.session_id,
+                session.account_id,
+                session.provider_kind,
+                session.provider_issuer,
+                session.provider_subject,
+                session.session_token_hash_hex,
+                session.session_state,
+                session.created_at,
+                session.expires_at_unix,
+                session.revoked_at,
+                session.last_seen_at,
+            ],
+        )?;
+        self.account_session(&session.session_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "account session",
+                id: session.session_id,
+            })
+    }
+
+    fn account_session(&self, session_id: &str) -> MetadataResult<Option<AccountSession>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    session_id,
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    session_token_hash_hex,
+                    session_state,
+                    created_at,
+                    expires_at_unix,
+                    revoked_at,
+                    last_seen_at
+                FROM metadata_account_sessions
+                WHERE session_id = ?1
+                "#,
+                params![session_id],
+                account_session_from_row,
+            )
+            .optional()
+            .map_err(MetadataError::from)
+    }
+
+    fn account_session_by_hash(
+        &self,
+        session_token_hash_hex: &str,
+    ) -> MetadataResult<Option<AccountSession>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    session_id,
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    session_token_hash_hex,
+                    session_state,
+                    created_at,
+                    expires_at_unix,
+                    revoked_at,
+                    last_seen_at
+                FROM metadata_account_sessions
+                WHERE session_token_hash_hex = ?1
+                "#,
+                params![session_token_hash_hex],
+                account_session_from_row,
+            )
+            .optional()
+            .map_err(MetadataError::from)
+    }
+
+    fn revoke_account_session(
+        &mut self,
+        session_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<AccountSession> {
+        let session = self
+            .account_session(session_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "account session",
+                id: session_id.to_string(),
+            })?;
+        let revoked = revoke_auth_account_session(&session, revoked_at).map_err(auth_error)?;
+        self.upsert_account_session(revoked)
+    }
+
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord> {
         ensure_no_secret_material(&request)?;
         let tx = self.conn.transaction()?;
@@ -797,6 +1257,21 @@ impl MetadataStore for SqliteMetadataStore {
 }
 
 impl SqliteMetadataStore {
+    fn account(&self, account_id: &str) -> MetadataResult<Option<AccountRecord>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT account_id, display_name, created_at, updated_at
+                FROM metadata_accounts
+                WHERE account_id = ?1
+                "#,
+                params![account_id],
+                account_from_row,
+            )
+            .optional()
+            .map_err(MetadataError::from)
+    }
+
     fn device(&self, account_id: &str, device_id: &str) -> MetadataResult<Option<DeviceRecord>> {
         self.conn
             .query_row(
@@ -856,6 +1331,36 @@ impl SqliteMetadataStore {
         } else {
             Err(MetadataError::InvalidRequest(
                 "account must be registered before project".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_account_proof_exists(
+        &self,
+        account_id: &str,
+        provider_kind: &str,
+        provider_issuer: &str,
+        provider_subject: &str,
+    ) -> MetadataResult<()> {
+        let exists = self.conn.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM metadata_account_ownership_proofs
+                WHERE account_id = ?1
+                    AND provider_kind = ?2
+                    AND provider_issuer = ?3
+                    AND provider_subject = ?4
+            )
+            "#,
+            params![account_id, provider_kind, provider_issuer, provider_subject],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "account ownership proof must be registered before session".to_string(),
             ))
         }
     }
@@ -1049,6 +1554,20 @@ fn authorize_identity(
     Ok(())
 }
 
+pub fn authenticate_account_session<S: MetadataStore>(
+    store: &S,
+    raw_session_token: &str,
+    now_unix: i64,
+) -> MetadataResult<AuthenticatedAccountSession> {
+    let session_hash = hash_session_token_hex(raw_session_token);
+    let session = store
+        .account_session_by_hash(&session_hash)?
+        .ok_or_else(|| {
+            MetadataError::InvalidAccountSession("account session not found".to_string())
+        })?;
+    validate_account_session_hash(&session, &session_hash, now_unix).map_err(auth_error)
+}
+
 fn required_header(headers: &HeaderMap, name: &'static str) -> MetadataResult<String> {
     let value = headers
         .get(name)
@@ -1074,6 +1593,45 @@ fn ensure_no_secret_material<T: Serialize>(value: &T) -> MetadataResult<()> {
         ));
     }
     Ok(())
+}
+
+fn ensure_session_hash(session: &AccountSession) -> MetadataResult<()> {
+    if session.session_token_hash_hex.len() != 64 {
+        return Err(MetadataError::InvalidRequest(
+            "account session token hash must be 64 hex characters".to_string(),
+        ));
+    }
+    if session
+        .session_token_hash_hex
+        .as_bytes()
+        .iter()
+        .any(|byte| !byte.is_ascii_hexdigit())
+    {
+        return Err(MetadataError::InvalidRequest(
+            "account session token hash must be 64 hex characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn provider_tuple_key(
+    provider_kind: &str,
+    provider_issuer: &str,
+    provider_subject: &str,
+) -> (String, String, String) {
+    (
+        provider_kind.to_string(),
+        provider_issuer.to_string(),
+        provider_subject.to_string(),
+    )
+}
+
+fn auth_error(error: devbox_auth::AuthError) -> MetadataError {
+    MetadataError::InvalidAccountSession(error.to_string())
+}
+
+fn auth_proof_error(error: devbox_auth::AuthError) -> MetadataError {
+    MetadataError::InvalidAccountProof(error.to_string())
 }
 
 fn ensure_in_memory_snapshot_dependencies(
@@ -1177,6 +1735,31 @@ fn is_sqlite_constraint(error: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(sqlite_error, _)
             if sqlite_error.code == rusqlite::ErrorCode::ConstraintViolation
     )
+}
+
+fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
+    Ok(AccountRecord {
+        account_id: row.get(0)?,
+        display_name: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
+fn account_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSession> {
+    Ok(AccountSession {
+        session_id: row.get(0)?,
+        account_id: row.get(1)?,
+        provider_kind: row.get(2)?,
+        provider_issuer: row.get(3)?,
+        provider_subject: row.get(4)?,
+        session_token_hash_hex: row.get(5)?,
+        session_state: row.get(6)?,
+        created_at: row.get(7)?,
+        expires_at_unix: row.get(8)?,
+        revoked_at: row.get(9)?,
+        last_seen_at: row.get(10)?,
+    })
 }
 
 fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishedSnapshotRecord> {
@@ -1288,6 +1871,209 @@ mod tests {
             })
             .expect("cursor persists");
         assert_eq!(cursor.cursor_value.as_deref(), Some("snapshot-a"));
+    }
+
+    #[test]
+    fn hosted_account_session_boundary_authenticates_by_hash_and_revokes() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        let proof = account_proof();
+        let account = store
+            .upsert_account_ownership_proof(proof.clone())
+            .expect("proof upserts account");
+        assert_eq!(account.account_id, ACCOUNT);
+        assert_eq!(account.display_name, "user@example.com");
+
+        let session = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        let session_id = session.session_id.clone();
+        let session_hash = session.session_token_hash_hex.clone();
+        store
+            .upsert_account_session(session)
+            .expect("session upserts");
+
+        let provider_account = store
+            .account_for_provider_subject(
+                "oidc-dev",
+                "https://issuer.devbox.local",
+                "provider-subject-123",
+            )
+            .expect("provider lookup reads")
+            .expect("provider account exists");
+        assert_eq!(provider_account.account_id, ACCOUNT);
+
+        let context =
+            authenticate_account_session(&store, raw_token, 102).expect("session authenticates");
+        assert_eq!(context.account_id, ACCOUNT);
+        assert_eq!(context.session_id, session_id);
+        assert_eq!(
+            store
+                .account_session_by_hash(&session_hash)
+                .expect("hash lookup reads")
+                .expect("session exists")
+                .session_id,
+            session_id
+        );
+
+        let debug_session = format!(
+            "{:?}",
+            store
+                .account_session(&session_id)
+                .expect("session reads")
+                .expect("session exists")
+        );
+        assert!(!debug_session.contains(raw_token));
+        assert!(!debug_session.contains(&session_hash));
+
+        let revoked = store
+            .revoke_account_session(&session_id, "2026-06-18T10:02:00Z")
+            .expect("session revokes");
+        assert_eq!(revoked.session_state, "revoked");
+        assert!(matches!(
+            authenticate_account_session(&store, raw_token, 103),
+            Err(MetadataError::InvalidAccountSession(_))
+        ));
+    }
+
+    #[test]
+    fn in_memory_account_session_requires_registered_ownership_proof() {
+        let raw_token = "raw-hosted-session-token";
+        let proof = account_proof();
+        let session = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        let mut store = InMemoryMetadataStore::default();
+
+        let missing_proof = store
+            .upsert_account_session(session.clone())
+            .expect_err("session requires proof first");
+        assert_eq!(
+            missing_proof.to_string(),
+            "account ownership proof must be registered before session"
+        );
+
+        store
+            .upsert_account_ownership_proof(proof)
+            .expect("proof upserts");
+        store
+            .upsert_account_session(session)
+            .expect("session upserts after proof");
+        assert_eq!(
+            authenticate_account_session(&store, raw_token, 102)
+                .expect("session authenticates")
+                .account_id,
+            ACCOUNT
+        );
+    }
+
+    #[test]
+    fn in_memory_account_proof_rejects_duplicate_provider_tuple() {
+        let mut store = InMemoryMetadataStore::default();
+        let proof = account_proof();
+        store
+            .upsert_account_ownership_proof(proof.clone())
+            .expect("first proof upserts");
+        let duplicate_provider = AccountOwnershipProof {
+            account_id: "account-other".to_string(),
+            ..proof
+        };
+
+        let error = store
+            .upsert_account_ownership_proof(duplicate_provider)
+            .expect_err("duplicate provider tuple is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "provider subject is already linked to another account"
+        );
+    }
+
+    #[test]
+    fn in_memory_account_session_requires_matching_provider_tuple() {
+        let raw_token = "raw-hosted-session-token";
+        let proof = account_proof();
+        let mut session = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        session.provider_subject = "unproven-provider-subject".to_string();
+        let mut store = InMemoryMetadataStore::default();
+        store
+            .upsert_account_ownership_proof(proof)
+            .expect("proof upserts");
+
+        let error = store
+            .upsert_account_session(session)
+            .expect_err("session provider tuple must match proof");
+
+        assert_eq!(
+            error.to_string(),
+            "account ownership proof must be registered before session"
+        );
+    }
+
+    #[test]
+    fn in_memory_account_session_rejects_duplicate_token_hash() {
+        let raw_token = "raw-hosted-session-token";
+        let proof = account_proof();
+        let first = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("first session creates");
+        let second = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:02:00Z",
+            102,
+            600,
+        )
+        .expect("second session creates");
+        assert_ne!(first.session_id, second.session_id);
+        assert_eq!(first.session_token_hash_hex, second.session_token_hash_hex);
+        let mut store = InMemoryMetadataStore::default();
+        store
+            .upsert_account_ownership_proof(proof)
+            .expect("proof upserts");
+        store
+            .upsert_account_session(first)
+            .expect("first session upserts");
+
+        let error = store
+            .upsert_account_session(second)
+            .expect_err("duplicate token hash is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "account session token hash is already registered"
+        );
+    }
+
+    #[test]
+    fn proof_rebind_with_existing_session_is_rejected_for_in_memory_and_sqlite() {
+        let mut in_memory = InMemoryMetadataStore::default();
+        assert_proof_rebind_with_existing_session_is_rejected(&mut in_memory);
+
+        let mut sqlite = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        assert_proof_rebind_with_existing_session_is_rejected(&mut sqlite);
     }
 
     #[test]
@@ -1776,6 +2562,56 @@ mod tests {
             .expect("project upserts");
     }
 
+    fn assert_proof_rebind_with_existing_session_is_rejected<S: MetadataStore>(store: &mut S) {
+        let raw_token = "raw-hosted-session-token";
+        let original = account_proof();
+        let rebound = account_proof_with_subject("provider-subject-rebound");
+        assert_eq!(original.account_id, rebound.account_id);
+        assert_ne!(original.provider_subject, rebound.provider_subject);
+
+        store
+            .upsert_account_ownership_proof(original.clone())
+            .expect("original proof upserts");
+        let session = devbox_auth::create_account_session(
+            &original,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        store
+            .upsert_account_session(session)
+            .expect("session upserts");
+
+        store
+            .upsert_account_ownership_proof(rebound)
+            .expect_err("proof rebind with existing session is rejected");
+
+        assert!(store
+            .account_for_provider_subject(
+                "oidc-dev",
+                "https://issuer.devbox.local",
+                "provider-subject-123",
+            )
+            .expect("old provider lookup works")
+            .is_some());
+        assert!(store
+            .account_for_provider_subject(
+                "oidc-dev",
+                "https://issuer.devbox.local",
+                "provider-subject-rebound",
+            )
+            .expect("new provider lookup works")
+            .is_none());
+        assert_eq!(
+            authenticate_account_session(store, raw_token, 102)
+                .expect("original session remains authenticatable")
+                .provider_subject,
+            "provider-subject-123"
+        );
+    }
+
     fn device_request() -> UpsertDeviceRequest {
         UpsertDeviceRequest {
             account_id: ACCOUNT.to_string(),
@@ -1809,6 +2645,24 @@ mod tests {
             published_by_device_id: DEVICE.to_string(),
             published_at: "2026-06-18T10:03:00Z".to_string(),
         }
+    }
+
+    fn account_proof() -> AccountOwnershipProof {
+        account_proof_with_subject("provider-subject-123")
+    }
+
+    fn account_proof_with_subject(provider_subject: &str) -> AccountOwnershipProof {
+        devbox_auth::create_account_ownership_proof(devbox_auth::AccountOwnershipProofInput {
+            account_id: ACCOUNT,
+            provider_kind: "oidc-dev",
+            provider_issuer: "https://issuer.devbox.local",
+            provider_subject,
+            verified_email: Some("user@example.com"),
+            verified_domain: Some("example.com"),
+            proof_issued_at: "2026-06-18T10:00:00Z",
+            proof_expires_at_unix: 1_000,
+        })
+        .expect("proof creates")
     }
 
     fn json_request<T: Serialize>(

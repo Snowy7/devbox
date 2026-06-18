@@ -24,8 +24,10 @@ This repository currently contains the product foundation and MVP planning artif
   accounts, devices, projects, published snapshot manifests, and server-side compare-and-set
   cursors with SQLite for dev/tests. The local/mock publish, import, and materialize flows can now
   opt into an in-process mock-dev SQLite metadata store for manifest discovery and cursor
-  compare-and-set without network services. Production sign-in, managed credentials, deployment
-  hardening, Electron UI, automatic conflict resolution, and conflict UI remain later Phase 1 work.
+  compare-and-set without network services. A production-shaped account ownership proof and account
+  session boundary now models provider subject/email/domain proof, token-hash sessions, expiration,
+  and revocation without live OAuth. Live sign-in, managed credentials, deployment hardening,
+  Electron UI, automatic conflict resolution, and conflict UI remain later Phase 1 work.
 
 ## Local MVP Surface
 
@@ -35,6 +37,9 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>`
 - `devbox changes list --db <DB_PATH> [--project <PROJECT_ID>]`
 - `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]`
+- `devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN>`
+- `devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>`
+- `devbox auth revoke-session --db <DB_PATH> <SESSION_ID>`
 
 Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
@@ -44,7 +49,8 @@ Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
 For import/materialize, the hosted metadata account scope is either passed explicitly with
 `--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
-local/mock trust bootstrap. Production account proof remains deferred.
+local/mock trust bootstrap. Production-shaped account/session proof primitives exist, but live
+provider login and production hosted auth enforcement remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

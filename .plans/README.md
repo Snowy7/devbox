@@ -22,6 +22,8 @@ local conflict-as-divergent-snapshot compare/persist metadata are in place. Loca
 uses device/project cursors to refuse divergent local/mock import and materialization before file
 blobs are downloaded or applied, while persisting readable conflict records. Publish/import/materialize
 can now opt into in-process mock-dev hosted metadata for published manifest discovery and
-server-side cursor compare-and-set. Production cloud authentication, managed object-storage
-credential provisioning, production pairing UX, explicit secret allow policy, automatic merge/apply
-resolution, conflict UI, Electron UI, and production deployment hardening remain later Phase 1 work.
+server-side cursor compare-and-set. Production-shaped account ownership proof and account session
+models now cover provider subject/email/domain proof, token-hash sessions, expiration, revocation,
+and no-network CLI/dev persistence. Live OAuth/login integration, managed object-storage credential
+provisioning, production pairing UX, explicit secret allow policy, automatic merge/apply resolution,
+conflict UI, Electron UI, and production deployment hardening remain later Phase 1 work.
