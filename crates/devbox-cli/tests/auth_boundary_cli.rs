@@ -69,6 +69,145 @@ fn mock_verified_bootstrap_and_proof_check_never_print_or_persist_raw_token() {
     assert!(!db_text.contains(raw_token));
 }
 
+#[test]
+fn managed_object_credential_lease_cli_never_prints_or_persists_raw_cloud_material() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("metadata.sqlite3");
+    let session_token = "raw-managed-session-token-should-not-appear";
+    let raw_access_key = "aws_access_key_id_should_not_appear";
+    let raw_secret_key = "aws_secret_access_key_should_not_appear";
+    let raw_provider_token = "cloudflare_api_token_should_not_appear";
+    let raw_credential_hash = "credential_hash_should_not_appear";
+    let devbox = env!("CARGO_BIN_EXE_devbox");
+
+    let create = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "mock-create",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--verified-email",
+            "user@example.com",
+            "--project",
+            "project-devbox",
+            "--lease",
+            "lease-alpha",
+            "--provider-kind",
+            "r2",
+            "--endpoint",
+            "https://account.r2.cloudflarestorage.com",
+            "--bucket",
+            "devbox-alpha",
+            "--prefix",
+            "accounts/account-managed-user-example-com/projects/project-devbox",
+            "--ttl-seconds",
+            "3600",
+        ])
+        .output()
+        .expect("lease create runs");
+    assert!(create.status.success(), "{}", stderr(&create));
+    let create_stdout = stdout(&create);
+    assert!(create_stdout.contains("Managed object credential lease: mock-created"));
+    assert!(create_stdout
+        .contains("Credential reference: mock-managed-object-ref:lease-alpha:generation-0"));
+    assert!(create_stdout.contains("Boundary: no live Cloudflare/AWS provisioning"));
+
+    let check = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "check",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--project",
+            "project-devbox",
+            "--lease",
+            "lease-alpha",
+            "--require-capabilities",
+            "read,head",
+        ])
+        .output()
+        .expect("lease check runs");
+    assert!(check.status.success(), "{}", stderr(&check));
+    assert!(stdout(&check).contains("Managed object credential lease: active"));
+
+    let rotate = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "rotate",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--project",
+            "project-devbox",
+            "--lease",
+            "lease-alpha",
+        ])
+        .output()
+        .expect("lease rotate runs");
+    assert!(rotate.status.success(), "{}", stderr(&rotate));
+    assert!(stdout(&rotate).contains("Generation: 1"));
+
+    let revoke = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "revoke",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--project",
+            "project-devbox",
+            "--lease",
+            "lease-alpha",
+        ])
+        .output()
+        .expect("lease revoke runs");
+    assert!(revoke.status.success(), "{}", stderr(&revoke));
+    assert!(stdout(&revoke).contains("Managed object credential lease: revoked"));
+
+    let combined_output = [
+        stdout(&create),
+        stderr(&create),
+        stdout(&check),
+        stderr(&check),
+        stdout(&rotate),
+        stderr(&rotate),
+        stdout(&revoke),
+        stderr(&revoke),
+    ]
+    .join("\n");
+    for forbidden in [
+        session_token,
+        raw_access_key,
+        raw_secret_key,
+        raw_provider_token,
+        raw_credential_hash,
+    ] {
+        assert!(!combined_output.contains(forbidden));
+    }
+
+    let db_bytes = std::fs::read(&db_path).expect("db bytes read");
+    let db_text = String::from_utf8_lossy(&db_bytes);
+    for forbidden in [
+        session_token,
+        raw_access_key,
+        raw_secret_key,
+        raw_provider_token,
+        raw_credential_hash,
+    ] {
+        assert!(!db_text.contains(forbidden));
+    }
+}
+
 fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }

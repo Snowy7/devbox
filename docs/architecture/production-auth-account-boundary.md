@@ -52,6 +52,7 @@ The local store supports:
 - account session lookup by id or hash
 - account session revocation
 - resolving a presented session token into an authenticated account/session context
+- resolving active managed object credential leases inside the authenticated account/session scope
 
 Existing hosted metadata HTTP handlers still require the local-only mock-dev headers:
 
@@ -87,7 +88,7 @@ This is not production sign-in UI. Remaining Phase 1 work still includes:
 - live OAuth/OIDC provider integration
 - hosted login/callback handling
 - production pairing UX, recovery, and rotation
-- managed object-storage credential provisioning and rotation
+- live managed object-storage credential provisioning and rotation against Cloudflare/AWS APIs
 - production deployment hardening and abuse protection
 - Electron onboarding/status UI
 - automatic conflict merge/apply resolution and conflict UI

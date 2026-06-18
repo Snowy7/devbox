@@ -16,7 +16,12 @@ use devbox_materialize::{
     sync_preflight, HostedMetadataImportOptions, ImportSnapshotRequest, MaterializationRequest,
     MaterializeError, PublishSnapshotRequest, SyncPreflightOutcome, SyncPreflightRequest,
 };
-use devbox_metadata::{MetadataAuthMode, MetadataServiceConfig, SqliteMetadataStore};
+use devbox_metadata::{
+    active_managed_object_credential_lease_for_session, authenticate_account_session,
+    redacted_managed_object_remote_config, ManagedObjectCapability,
+    ManagedObjectCredentialLeaseRequest, ManagedObjectProviderKind, MetadataAuthMode,
+    MetadataServiceConfig, MetadataStore, SqliteMetadataStore,
+};
 use devbox_snapshot::{
     is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
     LocalChangeFeedScanOptions, RestoreMaterializer, RestorePlan, RestoreSkippedEntry,
@@ -475,6 +480,85 @@ struct MetadataCheckArgs {
     auth_mode: MetadataAuthMode,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct MetadataCredentialLeaseArgs {
+    db_path: String,
+    session_token: String,
+    account_id: Option<String>,
+    verified_email: Option<String>,
+    verified_domain: Option<String>,
+    project_id: Option<String>,
+    lease_id: String,
+    provider_kind: ManagedObjectProviderKind,
+    endpoint: String,
+    bucket: String,
+    region: String,
+    prefix: Option<String>,
+    capabilities: Vec<ManagedObjectCapability>,
+    ttl_seconds: i64,
+}
+
+impl std::fmt::Debug for MetadataCredentialLeaseArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataCredentialLeaseArgs")
+            .field("db_path", &self.db_path)
+            .field("session_token", &"<redacted>")
+            .field("account_id", &self.account_id)
+            .field("verified_email", &self.verified_email)
+            .field("verified_domain", &self.verified_domain)
+            .field("project_id", &self.project_id)
+            .field("lease_id", &self.lease_id)
+            .field("provider_kind", &self.provider_kind)
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("capabilities", &self.capabilities)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct MetadataCredentialLeaseLookupArgs {
+    db_path: String,
+    session_token: String,
+    project_id: Option<String>,
+    lease_id: String,
+    required_capabilities: Vec<ManagedObjectCapability>,
+}
+
+impl std::fmt::Debug for MetadataCredentialLeaseLookupArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataCredentialLeaseLookupArgs")
+            .field("db_path", &self.db_path)
+            .field("session_token", &"<redacted>")
+            .field("project_id", &self.project_id)
+            .field("lease_id", &self.lease_id)
+            .field("required_capabilities", &self.required_capabilities)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct MetadataCredentialLeaseMutateArgs {
+    db_path: String,
+    session_token: String,
+    project_id: Option<String>,
+    lease_id: String,
+}
+
+impl std::fmt::Debug for MetadataCredentialLeaseMutateArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataCredentialLeaseMutateArgs")
+            .field("db_path", &self.db_path)
+            .field("session_token", &"<redacted>")
+            .field("project_id", &self.project_id)
+            .field("lease_id", &self.lease_id)
+            .finish()
+    }
+}
+
 fn run_init(args: &[String]) -> ExitCode {
     match parse_init_args(args)
         .and_then(|args| init_identity(&args).map_err(|error| error.to_string()))
@@ -635,8 +719,63 @@ fn run_metadata(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("credential-lease") => match args.get(1).map(String::as_str) {
+            Some("mock-create") => {
+                match parse_metadata_credential_lease_create_args(&args[2..]).and_then(|args| {
+                    metadata_credential_lease_mock_create(&args).map_err(|error| error.to_string())
+                }) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        eprintln!("devbox: {error}");
+                        print_metadata_usage();
+                        ExitCode::from(1)
+                    }
+                }
+            }
+            Some("check") => {
+                match parse_metadata_credential_lease_lookup_args(&args[2..]).and_then(|args| {
+                    metadata_credential_lease_check(&args).map_err(|error| error.to_string())
+                }) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        eprintln!("devbox: {error}");
+                        print_metadata_usage();
+                        ExitCode::from(1)
+                    }
+                }
+            }
+            Some("revoke") => match parse_metadata_credential_lease_mutate_args(&args[2..])
+                .and_then(|args| {
+                    metadata_credential_lease_revoke(&args).map_err(|error| error.to_string())
+                }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_metadata_usage();
+                    ExitCode::from(1)
+                }
+            },
+            Some("rotate") => match parse_metadata_credential_lease_mutate_args(&args[2..])
+                .and_then(|args| {
+                    metadata_credential_lease_rotate(&args).map_err(|error| error.to_string())
+                }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_metadata_usage();
+                    ExitCode::from(1)
+                }
+            },
+            _ => {
+                eprintln!(
+                    "devbox: metadata credential-lease requires mock-create, check, revoke, or rotate"
+                );
+                print_metadata_usage();
+                ExitCode::from(2)
+            }
+        },
         _ => {
-            eprintln!("devbox: metadata requires check");
+            eprintln!("devbox: metadata requires check or credential-lease");
             print_metadata_usage();
             ExitCode::from(2)
         }
@@ -1400,6 +1539,243 @@ fn parse_metadata_check_args(args: &[String]) -> Result<MetadataCheckArgs, Strin
         endpoint: endpoint.ok_or_else(|| "metadata check requires --endpoint <URL>".to_string())?,
         auth_mode,
     })
+}
+
+fn parse_metadata_credential_lease_create_args(
+    args: &[String],
+) -> Result<MetadataCredentialLeaseArgs, String> {
+    let mut db_path = None;
+    let mut session_token = None;
+    let mut account_id = None;
+    let mut verified_email = None;
+    let mut verified_domain = None;
+    let mut project_id = None;
+    let mut lease_id = None;
+    let mut provider_kind = ManagedObjectProviderKind::R2;
+    let mut endpoint = None;
+    let mut bucket = None;
+    let mut region = "auto".to_string();
+    let mut prefix = None;
+    let mut capabilities = vec![
+        ManagedObjectCapability::Read,
+        ManagedObjectCapability::Write,
+        ManagedObjectCapability::List,
+        ManagedObjectCapability::Head,
+    ];
+    let mut ttl_seconds = 3600_i64;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--session-token" => {
+                index += 1;
+                session_token = args.get(index).cloned();
+            }
+            "--account" => {
+                index += 1;
+                account_id = args.get(index).cloned();
+            }
+            "--verified-email" => {
+                index += 1;
+                verified_email = args.get(index).cloned();
+            }
+            "--verified-domain" => {
+                index += 1;
+                verified_domain = args.get(index).cloned();
+            }
+            "--project" => {
+                index += 1;
+                project_id = args.get(index).cloned();
+            }
+            "--lease" => {
+                index += 1;
+                lease_id = args.get(index).cloned();
+            }
+            "--provider-kind" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    "--provider-kind requires r2, s3, or minio-compatible".to_string()
+                })?;
+                provider_kind = value
+                    .parse()
+                    .map_err(|error: devbox_metadata::MetadataError| error.to_string())?;
+            }
+            "--endpoint" => {
+                index += 1;
+                endpoint = args.get(index).cloned();
+            }
+            "--bucket" => {
+                index += 1;
+                bucket = args.get(index).cloned();
+            }
+            "--region" => {
+                index += 1;
+                region = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "--region requires a value".to_string())?;
+            }
+            "--prefix" => {
+                index += 1;
+                prefix = args.get(index).cloned();
+            }
+            "--capabilities" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--capabilities requires a comma-separated list".to_string())?;
+                capabilities = parse_managed_object_capabilities(value)?;
+            }
+            "--ttl-seconds" => {
+                index += 1;
+                ttl_seconds = parse_positive_i64(args.get(index), "--ttl-seconds")?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown metadata credential-lease option '{value}'"
+                ));
+            }
+            _ => return Err("metadata credential-lease accepts only flags".to_string()),
+        }
+        index += 1;
+    }
+
+    if verified_email.is_none() && verified_domain.is_none() {
+        return Err(
+            "metadata credential-lease mock-create requires --verified-email or --verified-domain"
+                .to_string(),
+        );
+    }
+    if ttl_seconds <= 0 {
+        return Err("--ttl-seconds must be positive".to_string());
+    }
+
+    Ok(MetadataCredentialLeaseArgs {
+        db_path: db_path
+            .ok_or_else(|| "metadata credential-lease requires --db <DB_PATH>".to_string())?,
+        session_token: session_token.ok_or_else(|| {
+            "metadata credential-lease requires --session-token <TOKEN>".to_string()
+        })?,
+        account_id,
+        verified_email,
+        verified_domain,
+        project_id,
+        lease_id: lease_id.unwrap_or_else(|| "lease-dev-managed-object".to_string()),
+        provider_kind,
+        endpoint: endpoint
+            .ok_or_else(|| "metadata credential-lease requires --endpoint <URL>".to_string())?,
+        bucket: bucket
+            .ok_or_else(|| "metadata credential-lease requires --bucket <BUCKET>".to_string())?,
+        region,
+        prefix,
+        capabilities,
+        ttl_seconds,
+    })
+}
+
+fn parse_metadata_credential_lease_lookup_args(
+    args: &[String],
+) -> Result<MetadataCredentialLeaseLookupArgs, String> {
+    let mut base = parse_metadata_credential_lease_mutate_args(args)?;
+    let mut required_capabilities = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--require-capabilities" {
+            index += 1;
+            let value = args.get(index).ok_or_else(|| {
+                "--require-capabilities requires a comma-separated list".to_string()
+            })?;
+            required_capabilities = parse_managed_object_capabilities(value)?;
+        }
+        index += 1;
+    }
+    Ok(MetadataCredentialLeaseLookupArgs {
+        db_path: base.db_path,
+        session_token: base.session_token,
+        project_id: base.project_id.take(),
+        lease_id: base.lease_id,
+        required_capabilities,
+    })
+}
+
+fn parse_metadata_credential_lease_mutate_args(
+    args: &[String],
+) -> Result<MetadataCredentialLeaseMutateArgs, String> {
+    let mut db_path = None;
+    let mut session_token = None;
+    let mut project_id = None;
+    let mut lease_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--session-token" => {
+                index += 1;
+                session_token = args.get(index).cloned();
+            }
+            "--project" => {
+                index += 1;
+                project_id = args.get(index).cloned();
+            }
+            "--lease" => {
+                index += 1;
+                lease_id = args.get(index).cloned();
+            }
+            "--require-capabilities" => {
+                index += 1;
+                if args.get(index).is_none() {
+                    return Err(
+                        "--require-capabilities requires a comma-separated list".to_string()
+                    );
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown metadata credential-lease option '{value}'"
+                ));
+            }
+            _ => return Err("metadata credential-lease accepts only flags".to_string()),
+        }
+        index += 1;
+    }
+
+    Ok(MetadataCredentialLeaseMutateArgs {
+        db_path: db_path
+            .ok_or_else(|| "metadata credential-lease requires --db <DB_PATH>".to_string())?,
+        session_token: session_token.ok_or_else(|| {
+            "metadata credential-lease requires --session-token <TOKEN>".to_string()
+        })?,
+        project_id,
+        lease_id: lease_id
+            .ok_or_else(|| "metadata credential-lease requires --lease <LEASE_ID>".to_string())?,
+    })
+}
+
+fn parse_managed_object_capabilities(value: &str) -> Result<Vec<ManagedObjectCapability>, String> {
+    let mut capabilities = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|error: devbox_metadata::MetadataError| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if capabilities.is_empty() {
+        return Err("--capabilities requires at least one capability".to_string());
+    }
+    capabilities.sort();
+    capabilities.dedup();
+    Ok(capabilities)
 }
 
 fn parse_sync_metadata_arg(
@@ -2936,6 +3312,213 @@ fn metadata_check(args: &MetadataCheckArgs) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+fn metadata_credential_lease_mock_create(
+    args: &MetadataCredentialLeaseArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let now_unix = now_unix_seconds();
+    let now = format!("unix:{now_unix}");
+    let account_id = args.account_id.clone().unwrap_or_else(|| {
+        dev_mock_account_id(
+            args.verified_email
+                .as_deref()
+                .or(args.verified_domain.as_deref())
+                .unwrap_or("dev-account"),
+        )
+    });
+    let provider_subject = format!("managed-object-dev:{account_id}");
+    let proof = create_account_ownership_proof(AccountOwnershipProofInput {
+        account_id: &account_id,
+        provider_kind: "oidc-dev",
+        provider_issuer: "https://devbox.local/mock-managed-object-lease",
+        provider_subject: &provider_subject,
+        verified_email: args.verified_email.as_deref(),
+        verified_domain: args.verified_domain.as_deref(),
+        proof_issued_at: &now,
+        proof_expires_at_unix: now_unix + 86_400,
+    })?;
+    store.upsert_account_ownership_proof(proof.clone())?;
+    if store
+        .account_session_by_hash(&devbox_auth::hash_session_token_hex(&args.session_token))?
+        .is_none()
+    {
+        let session = create_account_session(
+            &proof,
+            &args.session_token,
+            &now,
+            now_unix,
+            args.ttl_seconds,
+        )?;
+        store.upsert_account_session(session)?;
+    }
+    if let Some(project_id) = &args.project_id {
+        store.upsert_project(devbox_metadata::UpsertProjectRequest {
+            account_id: account_id.clone(),
+            project_id: project_id.clone(),
+            display_name: project_id.clone(),
+            root_hint: "mock-dev-managed-object-lease".to_string(),
+            project_kind: "mock-dev".to_string(),
+            updated_at: now.clone(),
+        })?;
+    }
+    let lease =
+        store.upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+            account_id,
+            project_id: args.project_id.clone(),
+            lease_id: args.lease_id.clone(),
+            provider_kind: args.provider_kind,
+            endpoint: args.endpoint.clone(),
+            bucket: args.bucket.clone(),
+            region: args.region.clone(),
+            prefix: args.prefix.clone(),
+            credential_reference: mock_credential_reference(&args.lease_id, 0),
+            credential_fingerprint: Some(mock_credential_fingerprint_reference(&args.lease_id, 0)),
+            capabilities: args.capabilities.clone(),
+            issued_at: now,
+            expires_at_unix: now_unix + args.ttl_seconds,
+            rotation_generation: 0,
+        })?;
+
+    println!("Managed object credential lease: mock-created");
+    print_managed_object_credential_lease(&lease)?;
+    println!(
+        "Boundary: no live Cloudflare/AWS provisioning; raw object credentials are not stored or printed"
+    );
+
+    Ok(())
+}
+
+fn metadata_credential_lease_check(
+    args: &MetadataCredentialLeaseLookupArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let lease = active_managed_object_credential_lease_for_session(
+        &store,
+        &args.session_token,
+        args.project_id.as_deref(),
+        &args.lease_id,
+        &args.required_capabilities,
+        now_unix_seconds(),
+    )?;
+
+    println!("Managed object credential lease: active");
+    print_managed_object_credential_lease(&lease)?;
+    println!("Active use: accepted for authenticated account/session scope");
+
+    Ok(())
+}
+
+fn metadata_credential_lease_revoke(
+    args: &MetadataCredentialLeaseMutateArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let now_unix = now_unix_seconds();
+    let session = authenticate_account_session(&store, &args.session_token, now_unix)?;
+    let revoked = store.revoke_managed_object_credential_lease(
+        &session.account_id,
+        args.project_id.as_deref(),
+        &args.lease_id,
+        &format!("unix:{now_unix}"),
+    )?;
+
+    println!("Managed object credential lease: revoked");
+    print_managed_object_credential_lease(&revoked)?;
+
+    Ok(())
+}
+
+fn metadata_credential_lease_rotate(
+    args: &MetadataCredentialLeaseMutateArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let now_unix = now_unix_seconds();
+    let current = active_managed_object_credential_lease_for_session(
+        &store,
+        &args.session_token,
+        args.project_id.as_deref(),
+        &args.lease_id,
+        &[],
+        now_unix,
+    )?;
+    let next_generation = current.rotation_generation + 1;
+    let rotated = store.rotate_managed_object_credential_lease(
+        &current.account_id,
+        current.project_id.as_deref(),
+        &current.lease_id,
+        mock_credential_reference(&current.lease_id, next_generation),
+        Some(mock_credential_fingerprint_reference(
+            &current.lease_id,
+            next_generation,
+        )),
+        &format!("unix:{now_unix}"),
+    )?;
+
+    println!("Managed object credential lease: rotated");
+    print_managed_object_credential_lease(&rotated)?;
+
+    Ok(())
+}
+
+fn print_managed_object_credential_lease(
+    lease: &devbox_metadata::ManagedObjectCredentialLeaseRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let redacted = redacted_managed_object_remote_config(lease)?;
+    println!("Account id: {}", lease.account_id);
+    println!("Project id: {}", lease.project_id.as_deref().unwrap_or("-"));
+    println!("Lease id: {}", lease.lease_id);
+    println!("Provider kind: {}", lease.provider_kind);
+    println!("Endpoint host: {}", redacted.endpoint_host);
+    println!("Bucket: {}", lease.bucket);
+    println!("Region: {}", lease.region);
+    println!("Prefix: {}", lease.prefix.as_deref().unwrap_or("-"));
+    println!(
+        "Capabilities: {}",
+        cli_capabilities_to_string(&lease.capabilities)
+    );
+    println!("Generation: {}", lease.rotation_generation);
+    println!("Issued at: {}", lease.issued_at);
+    println!("Expires at unix: {}", lease.expires_at_unix);
+    println!(
+        "Revocation status: {}",
+        lease.revoked_at.as_deref().unwrap_or("active")
+    );
+    println!("Credential reference: {}", lease.credential_reference);
+    println!("Resolved remote config: {redacted}");
+    Ok(())
+}
+
+fn cli_capabilities_to_string(capabilities: &[ManagedObjectCapability]) -> String {
+    capabilities
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn mock_credential_reference(lease_id: &str, generation: u64) -> String {
+    format!("mock-managed-object-ref:{lease_id}:generation-{generation}")
+}
+
+fn mock_credential_fingerprint_reference(lease_id: &str, generation: u64) -> String {
+    format!("mock-fingerprint-ref:{lease_id}:generation-{generation}")
+}
+
+fn dev_mock_account_id(value: &str) -> String {
+    let suffix = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    format!("account-managed-{}", suffix)
+}
+
 fn sync_object_key(
     blob_id: &BlobId,
     explicit_key: Option<&str>,
@@ -3890,6 +4473,21 @@ fn print_sync_usage() {
 fn print_metadata_usage() {
     eprintln!("Usage:");
     eprintln!("  devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]");
+    eprintln!(
+        "  devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET> [--provider-kind r2|s3|minio-compatible] [--region <REGION>] [--prefix <PREFIX>] [--capabilities read,write,list,head] [--ttl-seconds <SECONDS>]"
+    );
+    eprintln!(
+        "  devbox metadata credential-lease check --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID> [--require-capabilities read,head]"
+    );
+    eprintln!(
+        "  devbox metadata credential-lease rotate --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>"
+    );
+    eprintln!(
+        "  devbox metadata credential-lease revoke --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>"
+    );
+    eprintln!(
+        "  Credential-lease commands are no-network mock/dev smoke commands; live provider provisioning remains deferred."
+    );
 }
 
 fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::error::Error>> {

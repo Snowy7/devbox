@@ -15,6 +15,8 @@ handlers for:
 - project-scoped snapshot metadata lookup by snapshot id
 - server-side device/project cursor reads
 - server-side cursor compare-and-set updates
+- account/session/project-scoped managed object credential lease records for future hosted
+  R2/S3/MinIO-compatible credential provisioning
 
 The service can run locally with SQLite and has an in-memory store for fast unit tests. That keeps
 normal CI free of Docker, Postgres, cloud credentials, and network services while preserving a clear
@@ -40,6 +42,11 @@ GET /v1/projects/:project_id/snapshots/:snapshot_id
 
 Snapshot records store object references and counts only. They do not store plaintext file bytes,
 sync keys, device keys, R2 secrets, object credentials, or manifest contents.
+
+Managed object credential lease records store redacted provider references, endpoint/bucket/region
+shape, optional project scope, capabilities, expiration, revocation, and rotation generation only.
+They do not store raw access keys, secret keys, session tokens, provider API tokens, OAuth tokens, or
+raw credential hashes.
 
 ## Cursor Safety
 
@@ -111,7 +118,7 @@ models or cursor compare-and-set contract.
 Remaining Phase 1 work includes:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
-- managed R2/S3 credential provisioning and rotation
+- live managed R2/S3 credential provisioning and rotation against provider APIs
 - production pairing UX, recovery, and rotation
 - automatic conflict merge/apply resolution and user-facing conflict UI
 - Electron tray/status integration

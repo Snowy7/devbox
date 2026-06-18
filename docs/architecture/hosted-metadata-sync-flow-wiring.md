@@ -25,7 +25,9 @@ mock-dev CLI path, `--mock-key-source-db <PUBLISHER_DB>` can provide the publish
 the same local trust bootstrap that provides the decryption key. The default path remains local/mock
 only and still derives the manifest object key locally. Production-shaped account/session proof
 primitives now exist for future hosted authentication, but this sync wiring still does not enforce a
-live OAuth-backed account session.
+live OAuth-backed account session. Managed object credential lease records now provide a future path
+for resolving redacted hosted R2/S3/MinIO provider configuration by authenticated
+account/session/project scope, but sync commands do not yet fetch live managed cloud credentials.
 
 ## Publish Semantics
 
@@ -71,7 +73,7 @@ unsafe endpoint material.
 This is personal-alpha wiring, not a production SaaS backend. Deferred work remains:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
-- managed object credential provisioning and rotation
+- live managed object credential provisioning and rotation against provider APIs
 - production deployment hardening and observability
 - Electron tray/status UI
 - automatic conflict merge/apply resolution

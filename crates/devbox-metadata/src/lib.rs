@@ -213,6 +213,172 @@ pub struct DeviceProjectCursorRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManagedObjectProviderKind {
+    R2,
+    S3,
+    MinioCompatible,
+}
+
+impl fmt::Display for ManagedObjectProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::R2 => f.write_str("r2"),
+            Self::S3 => f.write_str("s3"),
+            Self::MinioCompatible => f.write_str("minio-compatible"),
+        }
+    }
+}
+
+impl std::str::FromStr for ManagedObjectProviderKind {
+    type Err = MetadataError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "r2" => Ok(Self::R2),
+            "s3" => Ok(Self::S3),
+            "minio-compatible" | "minio" => Ok(Self::MinioCompatible),
+            _ => Err(MetadataError::InvalidRequest(
+                "managed object provider kind must be r2, s3, or minio-compatible".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManagedObjectCapability {
+    Read,
+    Write,
+    List,
+    Head,
+}
+
+impl fmt::Display for ManagedObjectCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read => f.write_str("read"),
+            Self::Write => f.write_str("write"),
+            Self::List => f.write_str("list"),
+            Self::Head => f.write_str("head"),
+        }
+    }
+}
+
+impl std::str::FromStr for ManagedObjectCapability {
+    type Err = MetadataError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "read" => Ok(Self::Read),
+            "write" => Ok(Self::Write),
+            "list" => Ok(Self::List),
+            "head" => Ok(Self::Head),
+            _ => Err(MetadataError::InvalidRequest(
+                "managed object capability must be read, write, list, or head".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedObjectCredentialLeaseRecord {
+    pub account_id: String,
+    pub project_id: Option<String>,
+    pub lease_id: String,
+    pub provider_kind: ManagedObjectProviderKind,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: Option<String>,
+    pub credential_reference: String,
+    pub credential_fingerprint: Option<String>,
+    pub capabilities: Vec<ManagedObjectCapability>,
+    pub issued_at: String,
+    pub expires_at_unix: i64,
+    pub revoked_at: Option<String>,
+    pub rotation_generation: u64,
+    pub last_rotated_at: Option<String>,
+}
+
+impl fmt::Debug for ManagedObjectCredentialLeaseRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedObjectCredentialLeaseRecord")
+            .field("account_id", &self.account_id)
+            .field("project_id", &self.project_id)
+            .field("lease_id", &self.lease_id)
+            .field("provider_kind", &self.provider_kind)
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("credential_reference", &self.credential_reference)
+            .field(
+                "credential_fingerprint",
+                &self.credential_fingerprint.as_ref().map(|_| "<redacted>"),
+            )
+            .field("capabilities", &self.capabilities)
+            .field("issued_at", &self.issued_at)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("revoked_at", &self.revoked_at)
+            .field("rotation_generation", &self.rotation_generation)
+            .field("last_rotated_at", &self.last_rotated_at)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedObjectCredentialLeaseRequest {
+    pub account_id: String,
+    pub project_id: Option<String>,
+    pub lease_id: String,
+    pub provider_kind: ManagedObjectProviderKind,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: Option<String>,
+    pub credential_reference: String,
+    pub credential_fingerprint: Option<String>,
+    pub capabilities: Vec<ManagedObjectCapability>,
+    pub issued_at: String,
+    pub expires_at_unix: i64,
+    pub rotation_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactedManagedObjectRemoteConfig {
+    pub provider_kind: ManagedObjectProviderKind,
+    pub endpoint_host: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: Option<String>,
+    pub credential_reference: String,
+    pub capabilities: Vec<ManagedObjectCapability>,
+    pub rotation_generation: u64,
+    pub expires_at_unix: i64,
+    pub revoked: bool,
+}
+
+impl fmt::Display for RedactedManagedObjectRemoteConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "kind={} endpoint_host={} bucket={} region={} prefix={} capabilities={} generation={} expires_at_unix={} revoked={} credential_reference={}",
+            self.provider_kind,
+            self.endpoint_host,
+            self.bucket,
+            self.region,
+            self.prefix.as_deref().unwrap_or("-"),
+            capabilities_to_string(&self.capabilities),
+            self.rotation_generation,
+            self.expires_at_unix,
+            self.revoked,
+            self.credential_reference
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpsertDeviceRequest {
     pub account_id: String,
@@ -322,6 +488,32 @@ pub trait MetadataStore {
         session_id: &str,
         revoked_at: &str,
     ) -> MetadataResult<AccountSession>;
+    fn upsert_managed_object_credential_lease(
+        &mut self,
+        request: ManagedObjectCredentialLeaseRequest,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord>;
+    fn managed_object_credential_lease(
+        &self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+    ) -> MetadataResult<Option<ManagedObjectCredentialLeaseRecord>>;
+    fn revoke_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord>;
+    fn rotate_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        credential_reference: String,
+        credential_fingerprint: Option<String>,
+        rotated_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord>;
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord>;
     fn upsert_project(&mut self, request: UpsertProjectRequest) -> MetadataResult<ProjectRecord>;
     fn publish_snapshot(
@@ -353,6 +545,8 @@ pub struct InMemoryMetadataStore {
     account_provider_index: BTreeMap<(String, String, String), String>,
     account_sessions: BTreeMap<String, AccountSession>,
     account_session_hash_index: BTreeMap<String, String>,
+    managed_object_credential_leases:
+        BTreeMap<(String, String, String), ManagedObjectCredentialLeaseRecord>,
     devices: BTreeMap<(String, String), DeviceRecord>,
     projects: BTreeMap<(String, String), ProjectRecord>,
     snapshots: BTreeMap<(String, String, String), PublishedSnapshotRecord>,
@@ -512,6 +706,88 @@ impl MetadataStore for InMemoryMetadataStore {
             })?;
         let revoked = revoke_auth_account_session(&session, revoked_at).map_err(auth_error)?;
         self.upsert_account_session(revoked)
+    }
+
+    fn upsert_managed_object_credential_lease(
+        &mut self,
+        request: ManagedObjectCredentialLeaseRequest,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        let record = managed_lease_record_from_request(request)?;
+        ensure_in_memory_lease_dependencies(self, &record)?;
+        let key = managed_lease_key(
+            &record.account_id,
+            record.project_id.as_deref(),
+            &record.lease_id,
+        );
+        self.managed_object_credential_leases
+            .insert(key, record.clone());
+        Ok(record)
+    }
+
+    fn managed_object_credential_lease(
+        &self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+    ) -> MetadataResult<Option<ManagedObjectCredentialLeaseRecord>> {
+        Ok(self
+            .managed_object_credential_leases
+            .get(&managed_lease_key(account_id, project_id, lease_id))
+            .cloned())
+    }
+
+    fn revoke_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        let key = managed_lease_key(account_id, project_id, lease_id);
+        let mut record = self
+            .managed_object_credential_leases
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })?;
+        if record.revoked_at.is_none() {
+            record.revoked_at = Some(revoked_at.to_string());
+        }
+        self.managed_object_credential_leases
+            .insert(key, record.clone());
+        Ok(record)
+    }
+
+    fn rotate_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        credential_reference: String,
+        credential_fingerprint: Option<String>,
+        rotated_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        validate_credential_reference(&credential_reference)?;
+        validate_credential_fingerprint(credential_fingerprint.as_deref())?;
+        let key = managed_lease_key(account_id, project_id, lease_id);
+        let mut record = self
+            .managed_object_credential_leases
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })?;
+        ensure_lease_active(&record, i64::MIN)?;
+        record.credential_reference = credential_reference;
+        record.credential_fingerprint = credential_fingerprint;
+        record.rotation_generation += 1;
+        record.last_rotated_at = Some(rotated_at.to_string());
+        self.managed_object_credential_leases
+            .insert(key, record.clone());
+        Ok(record)
     }
 
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord> {
@@ -725,6 +1001,28 @@ impl SqliteMetadataStore {
                     ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS metadata_managed_object_credential_leases (
+                account_id TEXT NOT NULL,
+                project_scope TEXT NOT NULL,
+                project_id TEXT,
+                lease_id TEXT NOT NULL,
+                provider_kind TEXT NOT NULL CHECK (provider_kind IN ('r2', 's3', 'minio-compatible')),
+                endpoint TEXT NOT NULL,
+                bucket TEXT NOT NULL,
+                region TEXT NOT NULL,
+                prefix TEXT,
+                credential_reference TEXT NOT NULL,
+                credential_fingerprint TEXT,
+                capabilities TEXT NOT NULL,
+                issued_at TEXT NOT NULL,
+                expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+                revoked_at TEXT,
+                rotation_generation INTEGER NOT NULL CHECK (rotation_generation >= 0),
+                last_rotated_at TEXT,
+                PRIMARY KEY (account_id, project_scope, lease_id),
+                FOREIGN KEY (account_id) REFERENCES metadata_accounts(account_id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS metadata_devices (
                 account_id TEXT NOT NULL,
                 device_id TEXT NOT NULL,
@@ -780,6 +1078,8 @@ impl SqliteMetadataStore {
                 ON metadata_account_sessions(account_id, session_state, expires_at_unix);
             CREATE INDEX IF NOT EXISTS idx_metadata_account_sessions_hash
                 ON metadata_account_sessions(session_token_hash_hex);
+            CREATE INDEX IF NOT EXISTS idx_metadata_managed_object_leases_account_project
+                ON metadata_managed_object_credential_leases(account_id, project_scope, expires_at_unix);
             "#,
         )?;
         Ok(())
@@ -1009,6 +1309,196 @@ impl MetadataStore for SqliteMetadataStore {
             })?;
         let revoked = revoke_auth_account_session(&session, revoked_at).map_err(auth_error)?;
         self.upsert_account_session(revoked)
+    }
+
+    fn upsert_managed_object_credential_lease(
+        &mut self,
+        request: ManagedObjectCredentialLeaseRequest,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        let record = managed_lease_record_from_request(request)?;
+        self.ensure_account_exists_for_metadata(&record.account_id)?;
+        if let Some(project_id) = &record.project_id {
+            self.ensure_project_exists(&record.account_id, project_id)?;
+        }
+        self.conn.execute(
+            r#"
+            INSERT INTO metadata_managed_object_credential_leases (
+                account_id,
+                project_scope,
+                project_id,
+                lease_id,
+                provider_kind,
+                endpoint,
+                bucket,
+                region,
+                prefix,
+                credential_reference,
+                credential_fingerprint,
+                capabilities,
+                issued_at,
+                expires_at_unix,
+                revoked_at,
+                rotation_generation,
+                last_rotated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            ON CONFLICT(account_id, project_scope, lease_id) DO UPDATE SET
+                provider_kind = excluded.provider_kind,
+                endpoint = excluded.endpoint,
+                bucket = excluded.bucket,
+                region = excluded.region,
+                prefix = excluded.prefix,
+                credential_reference = excluded.credential_reference,
+                credential_fingerprint = excluded.credential_fingerprint,
+                capabilities = excluded.capabilities,
+                issued_at = excluded.issued_at,
+                expires_at_unix = excluded.expires_at_unix,
+                revoked_at = excluded.revoked_at,
+                rotation_generation = excluded.rotation_generation,
+                last_rotated_at = excluded.last_rotated_at
+            "#,
+            params![
+                &record.account_id,
+                managed_project_scope(record.project_id.as_deref()),
+                &record.project_id,
+                &record.lease_id,
+                record.provider_kind.to_string(),
+                &record.endpoint,
+                &record.bucket,
+                &record.region,
+                &record.prefix,
+                &record.credential_reference,
+                &record.credential_fingerprint,
+                capabilities_to_string(&record.capabilities),
+                &record.issued_at,
+                record.expires_at_unix,
+                &record.revoked_at,
+                record.rotation_generation as i64,
+                &record.last_rotated_at,
+            ],
+        )?;
+        self.managed_object_credential_lease(
+            &record.account_id,
+            record.project_id.as_deref(),
+            &record.lease_id,
+        )?
+        .ok_or_else(|| MetadataError::NotFound {
+            entity: "managed object credential lease",
+            id: record.lease_id,
+        })
+    }
+
+    fn managed_object_credential_lease(
+        &self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+    ) -> MetadataResult<Option<ManagedObjectCredentialLeaseRecord>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    account_id,
+                    project_id,
+                    lease_id,
+                    provider_kind,
+                    endpoint,
+                    bucket,
+                    region,
+                    prefix,
+                    credential_reference,
+                    credential_fingerprint,
+                    capabilities,
+                    issued_at,
+                    expires_at_unix,
+                    revoked_at,
+                    rotation_generation,
+                    last_rotated_at
+                FROM metadata_managed_object_credential_leases
+                WHERE account_id = ?1 AND project_scope = ?2 AND lease_id = ?3
+                "#,
+                params![account_id, managed_project_scope(project_id), lease_id],
+                managed_object_credential_lease_from_row,
+            )
+            .optional()
+            .map_err(MetadataError::from)
+    }
+
+    fn revoke_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        let existing = self
+            .managed_object_credential_lease(account_id, project_id, lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })?;
+        self.conn.execute(
+            r#"
+            UPDATE metadata_managed_object_credential_leases
+            SET revoked_at = COALESCE(revoked_at, ?4)
+            WHERE account_id = ?1 AND project_scope = ?2 AND lease_id = ?3
+            "#,
+            params![
+                account_id,
+                managed_project_scope(project_id),
+                lease_id,
+                revoked_at
+            ],
+        )?;
+        self.managed_object_credential_lease(account_id, existing.project_id.as_deref(), lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })
+    }
+
+    fn rotate_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        credential_reference: String,
+        credential_fingerprint: Option<String>,
+        rotated_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        validate_credential_reference(&credential_reference)?;
+        validate_credential_fingerprint(credential_fingerprint.as_deref())?;
+        let existing = self
+            .managed_object_credential_lease(account_id, project_id, lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })?;
+        ensure_lease_active(&existing, i64::MIN)?;
+        self.conn.execute(
+            r#"
+            UPDATE metadata_managed_object_credential_leases
+            SET
+                credential_reference = ?4,
+                credential_fingerprint = ?5,
+                rotation_generation = rotation_generation + 1,
+                last_rotated_at = ?6
+            WHERE account_id = ?1 AND project_scope = ?2 AND lease_id = ?3
+            "#,
+            params![
+                account_id,
+                managed_project_scope(project_id),
+                lease_id,
+                credential_reference,
+                credential_fingerprint,
+                rotated_at
+            ],
+        )?;
+        self.managed_object_credential_lease(account_id, existing.project_id.as_deref(), lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })
     }
 
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord> {
@@ -1335,6 +1825,16 @@ impl SqliteMetadataStore {
         }
     }
 
+    fn ensure_account_exists_for_metadata(&self, account_id: &str) -> MetadataResult<()> {
+        if self.account(account_id)?.is_some() {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "account must be registered before managed object credential lease".to_string(),
+            ))
+        }
+    }
+
     fn ensure_account_proof_exists(
         &self,
         account_id: &str,
@@ -1568,6 +2068,43 @@ pub fn authenticate_account_session<S: MetadataStore>(
     validate_account_session_hash(&session, &session_hash, now_unix).map_err(auth_error)
 }
 
+pub fn active_managed_object_credential_lease_for_session<S: MetadataStore>(
+    store: &S,
+    raw_session_token: &str,
+    project_id: Option<&str>,
+    lease_id: &str,
+    required_capabilities: &[ManagedObjectCapability],
+    now_unix: i64,
+) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+    let session = authenticate_account_session(store, raw_session_token, now_unix)?;
+    let record = store
+        .managed_object_credential_lease(&session.account_id, project_id, lease_id)?
+        .ok_or_else(|| MetadataError::NotFound {
+            entity: "managed object credential lease",
+            id: lease_id.to_string(),
+        })?;
+    ensure_lease_active(&record, now_unix)?;
+    ensure_required_capabilities(&record, required_capabilities)?;
+    Ok(record)
+}
+
+pub fn redacted_managed_object_remote_config(
+    lease: &ManagedObjectCredentialLeaseRecord,
+) -> MetadataResult<RedactedManagedObjectRemoteConfig> {
+    Ok(RedactedManagedObjectRemoteConfig {
+        provider_kind: lease.provider_kind,
+        endpoint_host: endpoint_host(&lease.endpoint)?,
+        bucket: lease.bucket.clone(),
+        region: lease.region.clone(),
+        prefix: lease.prefix.clone(),
+        credential_reference: lease.credential_reference.clone(),
+        capabilities: lease.capabilities.clone(),
+        rotation_generation: lease.rotation_generation,
+        expires_at_unix: lease.expires_at_unix,
+        revoked: lease.revoked_at.is_some(),
+    })
+}
+
 fn required_header(headers: &HeaderMap, name: &'static str) -> MetadataResult<String> {
     let value = headers
         .get(name)
@@ -1680,6 +2217,300 @@ fn ensure_in_memory_cursor_dependencies(
     Ok(())
 }
 
+fn ensure_in_memory_lease_dependencies(
+    store: &InMemoryMetadataStore,
+    record: &ManagedObjectCredentialLeaseRecord,
+) -> MetadataResult<()> {
+    if !store.accounts.contains_key(&record.account_id) {
+        return Err(MetadataError::InvalidRequest(
+            "account must be registered before managed object credential lease".to_string(),
+        ));
+    }
+    if let Some(project_id) = &record.project_id {
+        if !store
+            .projects
+            .contains_key(&(record.account_id.clone(), project_id.clone()))
+        {
+            return Err(MetadataError::InvalidRequest(
+                "project must be registered before managed object credential lease".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn managed_lease_record_from_request(
+    request: ManagedObjectCredentialLeaseRequest,
+) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+    let account_id = public_metadata_identifier(&request.account_id, "account id")?;
+    let project_id = request
+        .project_id
+        .as_deref()
+        .map(|value| public_metadata_identifier(value, "project id"))
+        .transpose()?;
+    let lease_id = public_metadata_identifier(&request.lease_id, "lease id")?;
+    let endpoint = sanitize_object_endpoint(&request.endpoint)?;
+    let bucket = validate_object_bucket(&request.bucket)?;
+    let region = public_metadata_identifier(&request.region, "region")?;
+    let prefix = request
+        .prefix
+        .as_deref()
+        .map(validate_object_prefix)
+        .transpose()?;
+    validate_credential_reference(&request.credential_reference)?;
+    validate_credential_fingerprint(request.credential_fingerprint.as_deref())?;
+    let capabilities = normalize_capabilities(request.capabilities)?;
+    if request.issued_at.trim().is_empty() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease issued_at must not be empty".to_string(),
+        ));
+    }
+    if request.expires_at_unix <= 0 {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease expiration must be a positive unix timestamp"
+                .to_string(),
+        ));
+    }
+
+    Ok(ManagedObjectCredentialLeaseRecord {
+        account_id,
+        project_id,
+        lease_id,
+        provider_kind: request.provider_kind,
+        endpoint,
+        bucket,
+        region,
+        prefix,
+        credential_reference: request.credential_reference,
+        credential_fingerprint: request.credential_fingerprint,
+        capabilities,
+        issued_at: request.issued_at,
+        expires_at_unix: request.expires_at_unix,
+        revoked_at: None,
+        rotation_generation: request.rotation_generation,
+        last_rotated_at: None,
+    })
+}
+
+fn ensure_lease_active(
+    record: &ManagedObjectCredentialLeaseRecord,
+    now_unix: i64,
+) -> MetadataResult<()> {
+    if record.revoked_at.is_some() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease is revoked".to_string(),
+        ));
+    }
+    if record.expires_at_unix <= now_unix {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease is expired".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_required_capabilities(
+    record: &ManagedObjectCredentialLeaseRecord,
+    required: &[ManagedObjectCapability],
+) -> MetadataResult<()> {
+    for capability in required {
+        if !record.capabilities.contains(capability) {
+            return Err(MetadataError::InvalidRequest(format!(
+                "managed object credential lease is missing {capability} capability"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_capabilities(
+    mut capabilities: Vec<ManagedObjectCapability>,
+) -> MetadataResult<Vec<ManagedObjectCapability>> {
+    if capabilities.is_empty() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease requires at least one capability".to_string(),
+        ));
+    }
+    capabilities.sort();
+    capabilities.dedup();
+    Ok(capabilities)
+}
+
+fn capabilities_to_string(capabilities: &[ManagedObjectCapability]) -> String {
+    capabilities
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn capabilities_from_string(value: &str) -> MetadataResult<Vec<ManagedObjectCapability>> {
+    let capabilities = value
+        .split(',')
+        .filter(|value| !value.is_empty())
+        .map(str::parse)
+        .collect::<MetadataResult<Vec<_>>>()?;
+    normalize_capabilities(capabilities)
+}
+
+fn managed_project_scope(project_id: Option<&str>) -> String {
+    project_id.unwrap_or("*").to_string()
+}
+
+fn managed_lease_key(
+    account_id: &str,
+    project_id: Option<&str>,
+    lease_id: &str,
+) -> (String, String, String) {
+    (
+        account_id.to_string(),
+        managed_project_scope(project_id),
+        lease_id.to_string(),
+    )
+}
+
+fn public_metadata_identifier(value: &str, field: &'static str) -> MetadataResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(MetadataError::InvalidRequest(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if contains_secret_marker(trimmed) || looks_like_raw_credential(trimmed) {
+        return Err(MetadataError::InvalidRequest(format!(
+            "{field} must not contain secret-looking material"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn sanitize_object_endpoint(endpoint: &str) -> MetadataResult<String> {
+    let url = Url::parse(endpoint).map_err(|_| {
+        MetadataError::InvalidRequest(
+            "managed object credential lease endpoint must be an absolute HTTP or HTTPS URL"
+                .to_string(),
+        )
+    })?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(MetadataError::InvalidRequest(
+                "managed object credential lease endpoint must use http or https".to_string(),
+            ));
+        }
+    }
+    if url.host_str().is_none() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease endpoint must include a host".to_string(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease endpoint must not include userinfo".to_string(),
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease endpoint must not include query or fragment"
+                .to_string(),
+        ));
+    }
+    let sanitized = url.to_string();
+    if contains_secret_marker(&sanitized) || looks_like_raw_credential(&sanitized) {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease endpoint must not contain secret-looking material"
+                .to_string(),
+        ));
+    }
+    Ok(sanitized)
+}
+
+fn endpoint_host(endpoint: &str) -> MetadataResult<String> {
+    Url::parse(endpoint)
+        .map_err(|error| MetadataError::InvalidRequest(error.to_string()))?
+        .host_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            MetadataError::InvalidRequest(
+                "managed object credential lease endpoint must include a host".to_string(),
+            )
+        })
+}
+
+fn validate_object_bucket(value: &str) -> MetadataResult<String> {
+    let bucket = public_metadata_identifier(value, "bucket")?;
+    if bucket.contains('/') || bucket.contains('\\') {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease bucket must not contain path separators".to_string(),
+        ));
+    }
+    Ok(bucket)
+}
+
+fn validate_object_prefix(value: &str) -> MetadataResult<String> {
+    let trimmed = value.trim_matches('/');
+    if trimmed.is_empty() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease prefix cannot be empty when provided".to_string(),
+        ));
+    }
+    if trimmed.contains('\\')
+        || trimmed.starts_with('/')
+        || trimmed.split('/').any(|segment| {
+            segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || contains_secret_marker(segment)
+        })
+        || looks_like_raw_credential(trimmed)
+    {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease prefix must be a safe relative object namespace"
+                .to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_credential_reference(value: &str) -> MetadataResult<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease reference must not be empty".to_string(),
+        ));
+    }
+    if contains_secret_marker(trimmed) || looks_like_raw_credential(trimmed) {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease reference must be redacted and must not contain raw credential material".to_string(),
+        ));
+    }
+    if !(trimmed.starts_with("managed-object-ref:")
+        || trimmed.starts_with("mock-managed-object-ref:"))
+    {
+        return Err(MetadataError::InvalidRequest(
+            "managed object credential lease reference must be a managed-object-ref or mock-managed-object-ref".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_credential_fingerprint(value: Option<&str>) -> MetadataResult<()> {
+    if let Some(value) = value {
+        let trimmed = value.trim();
+        if trimmed.is_empty()
+            || contains_secret_marker(trimmed)
+            || looks_like_raw_credential(trimmed)
+            || is_hex_digest(trimmed)
+        {
+            return Err(MetadataError::InvalidRequest(
+                "managed object credential lease fingerprint must be a non-secret opaque reference"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn sanitize_metadata_endpoint(endpoint: &str) -> MetadataResult<String> {
     let url = Url::parse(endpoint).map_err(|_| {
         MetadataError::InvalidRequest(
@@ -1727,6 +2558,23 @@ fn sanitize_metadata_endpoint(endpoint: &str) -> MetadataResult<String> {
 fn contains_secret_marker(value: &str) -> bool {
     let lowered = value.to_ascii_lowercase();
     SECRET_MARKERS.iter().any(|marker| lowered.contains(marker))
+}
+
+fn looks_like_raw_credential(value: &str) -> bool {
+    let trimmed = value.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    trimmed.contains("-----BEGIN ")
+        || trimmed.starts_with("AKIA")
+        || trimmed.starts_with("ASIA")
+        || lowered.contains("bearer ")
+        || lowered.contains("aws_secret_access_key")
+        || lowered.contains("cloudflare_api")
+        || is_hex_digest(trimmed)
+}
+
+fn is_hex_digest(value: &str) -> bool {
+    matches!(value.len(), 40 | 64 | 128)
+        && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn is_sqlite_constraint(error: &rusqlite::Error) -> bool {
@@ -1784,6 +2632,41 @@ fn cursor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceProjectCur
         project_id: row.get(2)?,
         cursor_value: row.get(3)?,
         updated_at: row.get(4)?,
+    })
+}
+
+fn managed_object_credential_lease_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ManagedObjectCredentialLeaseRecord> {
+    let provider_kind_text: String = row.get(3)?;
+    let capabilities_text: String = row.get(10)?;
+    let provider_kind = provider_kind_text.parse().map_err(|error: MetadataError| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, error.into())
+    })?;
+    let capabilities = capabilities_from_string(&capabilities_text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, error.into())
+    })?;
+    let rotation_generation_i64: i64 = row.get(14)?;
+    let rotation_generation = u64::try_from(rotation_generation_i64).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(14, rusqlite::types::Type::Integer, error.into())
+    })?;
+    Ok(ManagedObjectCredentialLeaseRecord {
+        account_id: row.get(0)?,
+        project_id: row.get(1)?,
+        lease_id: row.get(2)?,
+        provider_kind,
+        endpoint: row.get(4)?,
+        bucket: row.get(5)?,
+        region: row.get(6)?,
+        prefix: row.get(7)?,
+        credential_reference: row.get(8)?,
+        credential_fingerprint: row.get(9)?,
+        capabilities,
+        issued_at: row.get(11)?,
+        expires_at_unix: row.get(12)?,
+        revoked_at: row.get(13)?,
+        rotation_generation,
+        last_rotated_at: row.get(15)?,
     })
 }
 
@@ -1889,7 +2772,7 @@ mod tests {
             raw_token,
             "2026-06-18T10:01:00Z",
             101,
-            600,
+            2_000,
         )
         .expect("session creates");
         let session_id = session.session_id.clone();
@@ -1950,7 +2833,7 @@ mod tests {
             raw_token,
             "2026-06-18T10:01:00Z",
             101,
-            600,
+            2_000,
         )
         .expect("session creates");
         let mut store = InMemoryMetadataStore::default();
@@ -2008,7 +2891,7 @@ mod tests {
             raw_token,
             "2026-06-18T10:01:00Z",
             101,
-            600,
+            2_000,
         )
         .expect("session creates");
         session.provider_subject = "unproven-provider-subject".to_string();
@@ -2547,6 +3430,85 @@ mod tests {
         assert!(!check.production_ready);
     }
 
+    #[test]
+    fn managed_object_credential_leases_have_in_memory_store_semantics() {
+        assert_managed_object_credential_lease_store_semantics(
+            &mut InMemoryMetadataStore::default(),
+        );
+    }
+
+    #[test]
+    fn managed_object_credential_leases_have_sqlite_store_semantics() {
+        assert_managed_object_credential_lease_store_semantics(
+            &mut SqliteMetadataStore::open_in_memory().expect("sqlite store opens"),
+        );
+    }
+
+    #[test]
+    fn managed_object_credential_lease_validation_rejects_raw_material_and_redacts_debug() {
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut store);
+        let raw_access_key = "aws_access_key_id_should_not_persist";
+        let raw_hash = "credential_hash_should_not_persist";
+
+        let raw_reference = store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                credential_reference: raw_access_key.to_string(),
+                ..managed_lease_request()
+            })
+            .expect_err("raw access key reference is rejected");
+        assert!(raw_reference
+            .to_string()
+            .contains("must be redacted and must not contain raw credential material"));
+        assert!(!raw_reference.to_string().contains(raw_access_key));
+
+        let raw_fingerprint = store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                credential_fingerprint: Some(raw_hash.to_string()),
+                ..managed_lease_request()
+            })
+            .expect_err("raw digest fingerprint is rejected");
+        assert!(raw_fingerprint
+            .to_string()
+            .contains("fingerprint must be a non-secret opaque reference"));
+        assert!(!raw_fingerprint.to_string().contains(raw_hash));
+
+        let lease = store
+            .upsert_managed_object_credential_lease(managed_lease_request())
+            .expect("lease upserts");
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("mock-fingerprint-ref"));
+    }
+
+    #[test]
+    fn sqlite_managed_object_credential_lease_persistence_excludes_raw_cloud_material() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("metadata.sqlite3");
+        let raw_access_key = "aws_access_key_id_should_not_persist";
+        let raw_secret_key = "aws_secret_access_key_should_not_persist";
+        let raw_provider_token = "cloudflare_api_token_should_not_appear";
+        let raw_credential_hash = "credential_hash_should_not_persist";
+        {
+            let mut store = SqliteMetadataStore::open_file(&db_path).expect("sqlite store opens");
+            seed_verified_account_session_and_project(&mut store);
+            store
+                .upsert_managed_object_credential_lease(managed_lease_request())
+                .expect("lease upserts");
+        }
+
+        let db_bytes = std::fs::read(db_path).expect("sqlite bytes read");
+        let db_text = String::from_utf8_lossy(&db_bytes);
+        for forbidden in [
+            raw_access_key,
+            raw_secret_key,
+            raw_provider_token,
+            raw_credential_hash,
+        ] {
+            assert!(!db_text.contains(forbidden));
+        }
+    }
+
     fn seeded_store() -> InMemoryMetadataStore {
         let mut store = InMemoryMetadataStore::default();
         seed_store(&mut store);
@@ -2610,6 +3572,155 @@ mod tests {
                 .provider_subject,
             "provider-subject-123"
         );
+    }
+
+    fn assert_managed_object_credential_lease_store_semantics<S: MetadataStore>(store: &mut S) {
+        let raw_token = seed_verified_account_session_and_project(store);
+        let lease = store
+            .upsert_managed_object_credential_lease(managed_lease_request())
+            .expect("lease upserts");
+
+        assert_eq!(lease.account_id, ACCOUNT);
+        assert_eq!(lease.project_id.as_deref(), Some(PROJECT));
+        assert_eq!(lease.provider_kind, ManagedObjectProviderKind::R2);
+        assert_eq!(lease.rotation_generation, 0);
+        assert!(lease.capabilities.contains(&ManagedObjectCapability::Read));
+        assert!(lease.capabilities.contains(&ManagedObjectCapability::Head));
+
+        assert!(store
+            .managed_object_credential_lease("account-other", Some(PROJECT), "lease-alpha")
+            .expect("cross-account lookup returns")
+            .is_none());
+        assert!(store
+            .managed_object_credential_lease(ACCOUNT, Some("project-other"), "lease-alpha")
+            .expect("cross-project lookup returns")
+            .is_none());
+
+        let active = active_managed_object_credential_lease_for_session(
+            store,
+            raw_token,
+            Some(PROJECT),
+            "lease-alpha",
+            &[ManagedObjectCapability::Read, ManagedObjectCapability::Head],
+            101,
+        )
+        .expect("lease resolves for active session");
+        let redacted = redacted_managed_object_remote_config(&active).expect("redacted config");
+        assert_eq!(redacted.endpoint_host, "account.r2.cloudflarestorage.com");
+        assert!(redacted
+            .to_string()
+            .contains("credential_reference=mock-managed-object-ref:lease-alpha:generation-0"));
+        assert!(!redacted.to_string().contains("mock-fingerprint-ref"));
+
+        let missing_capability = active_managed_object_credential_lease_for_session(
+            store,
+            raw_token,
+            Some(PROJECT),
+            "lease-alpha",
+            &[ManagedObjectCapability::List],
+            101,
+        )
+        .expect_err("missing capability fails");
+        assert!(missing_capability
+            .to_string()
+            .contains("missing list capability"));
+
+        let expired = active_managed_object_credential_lease_for_session(
+            store,
+            raw_token,
+            Some(PROJECT),
+            "lease-alpha",
+            &[],
+            1_000,
+        )
+        .expect_err("expired lease is rejected for active use");
+        assert_eq!(
+            expired.to_string(),
+            "managed object credential lease is expired"
+        );
+
+        let rotated = store
+            .rotate_managed_object_credential_lease(
+                ACCOUNT,
+                Some(PROJECT),
+                "lease-alpha",
+                "mock-managed-object-ref:lease-alpha:generation-1".to_string(),
+                Some("mock-fingerprint-ref:lease-alpha:generation-1".to_string()),
+                "2026-06-18T10:10:00Z",
+            )
+            .expect("lease rotates");
+        assert_eq!(rotated.rotation_generation, 1);
+
+        store
+            .revoke_managed_object_credential_lease(
+                ACCOUNT,
+                Some(PROJECT),
+                "lease-alpha",
+                "2026-06-18T10:11:00Z",
+            )
+            .expect("lease revokes");
+        let revoked = active_managed_object_credential_lease_for_session(
+            store,
+            raw_token,
+            Some(PROJECT),
+            "lease-alpha",
+            &[],
+            101,
+        )
+        .expect_err("revoked lease is rejected for active use");
+        assert_eq!(
+            revoked.to_string(),
+            "managed object credential lease is revoked"
+        );
+    }
+
+    fn seed_verified_account_session_and_project<S: MetadataStore>(store: &mut S) -> &'static str {
+        let raw_token = "raw-hosted-session-token";
+        let proof = account_proof();
+        store
+            .upsert_account_ownership_proof(proof.clone())
+            .expect("proof upserts");
+        let session = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            2_000,
+        )
+        .expect("session creates");
+        store
+            .upsert_account_session(session)
+            .expect("session upserts");
+        store
+            .upsert_project(project_request())
+            .expect("project upserts");
+        raw_token
+    }
+
+    fn managed_lease_request() -> ManagedObjectCredentialLeaseRequest {
+        ManagedObjectCredentialLeaseRequest {
+            account_id: ACCOUNT.to_string(),
+            project_id: Some(PROJECT.to_string()),
+            lease_id: "lease-alpha".to_string(),
+            provider_kind: ManagedObjectProviderKind::R2,
+            endpoint: "https://account.r2.cloudflarestorage.com".to_string(),
+            bucket: "devbox-alpha".to_string(),
+            region: "auto".to_string(),
+            prefix: Some("accounts/account-alpha/projects/project-devbox".to_string()),
+            credential_reference: "mock-managed-object-ref:lease-alpha:generation-0".to_string(),
+            credential_fingerprint: Some(
+                "mock-fingerprint-ref:lease-alpha:generation-0".to_string(),
+            ),
+            capabilities: vec![
+                ManagedObjectCapability::Head,
+                ManagedObjectCapability::Read,
+                ManagedObjectCapability::Read,
+                ManagedObjectCapability::Write,
+            ],
+            issued_at: "2026-06-18T10:05:00Z".to_string(),
+            expires_at_unix: 1_000,
+            rotation_generation: 0,
+        }
     }
 
     fn device_request() -> UpsertDeviceRequest {
