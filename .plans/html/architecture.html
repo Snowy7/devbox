@@ -40,7 +40,7 @@ Rust daemon
   -> snapshot engine
   -> SQLite metadata
   -> local content-addressed cache
-  -> sync client
+  -> sync client + encrypted object transport
 Rust backend
   -> Postgres metadata
   -> R2 encrypted blob packs</code></pre>
@@ -74,7 +74,7 @@ Rust backend
           <article class="card">
             <span class="tag">SQLite</span>
             <h3>Local metadata</h3>
-            <p>Projects, snapshots, manifests, chunks, operations, policies, conflicts, cursors, restore attempts.</p>
+            <p>Projects, snapshots, manifests, chunks, operations, local identity, policies, conflicts, cursors, restore attempts.</p>
           </article>
           <article class="card">
             <span class="tag blue">Filesystem</span>
@@ -84,7 +84,7 @@ Rust backend
           <article class="card">
             <span class="tag amber">R2</span>
             <h3>Remote blobs</h3>
-            <p>Encrypted immutable blob packs behind a replaceable S3-compatible provider interface.</p>
+            <p>Encrypted immutable blob objects behind a replaceable provider interface. Local filesystem provider is the current foundation.</p>
           </article>
         </div>
       </section>
@@ -100,10 +100,19 @@ Rust backend
         </ul>
       </section>
 
+      <section>
+        <h2>Auth Boundary</h2>
+        <ul class="checklist">
+          <li>Local identity and key material support encrypted object sync foundations.</li>
+          <li>A local identity is not cloud authentication or account ownership proof.</li>
+          <li>The next slice adds sign-in, device approval, key exchange/envelopes, revocation, and server-side device/project cursors.</li>
+          <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
+        </ul>
+      </section>
+
       <footer>
         Keep every layer replaceable except the trust model: immutable snapshots, explainable policy, safe restore.
       </footer>
     </main>
   </body>
 </html>
-

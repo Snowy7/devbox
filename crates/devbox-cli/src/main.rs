@@ -1,14 +1,18 @@
 use devbox_core::scanner::ProjectScanner;
-use devbox_core::{ManifestEntryKind, PolicyDecision};
+use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision};
 use devbox_snapshot::{
     preflight_cache_root, preflight_db_path, scan_local_change_feed, LocalChangeFeedScanOptions,
     RestoreMaterializer, RestorePlan, RestoreSkippedEntry, RestoreTargetStatus, RestoreWrite,
     SnapshotManifestBuilder,
 };
 use devbox_store::{
-    local_project_id, path_to_store_string, BlobCache, LocalChangeKind, ManifestEntryRecord,
-    NewProject, NewSnapshot, NewSnapshotDraft, NewSnapshotManifestEntry, PendingLocalChangeRecord,
-    PersistedSnapshot, Store,
+    local_project_id, path_to_store_string, BlobCache, DeviceRecord, EnsureLocalIdentityOptions,
+    LocalChangeKind, ManifestEntryRecord, NewProject, NewSnapshot, NewSnapshotDraft,
+    NewSnapshotManifestEntry, PendingLocalChangeRecord, PersistedSnapshot, Store,
+};
+use devbox_sync::{
+    download_blob_to_cache, encrypted_blob_object_key, upload_blob_from_cache,
+    LocalFilesystemBlobProvider, ObjectKey, SyncKey,
 };
 use std::path::Path;
 use std::process::ExitCode;
@@ -24,6 +28,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("scan") => run_scan(&args[1..]),
+        Some("init") => run_init(&args[1..]),
+        Some("devices") => run_devices(&args[1..]),
+        Some("sync") => run_sync(&args[1..]),
         Some("status") => run_status(&args[1..]),
         Some("snapshot") => run_snapshot(&args[1..]),
         Some("changes") => run_changes(&args[1..]),
@@ -157,6 +164,191 @@ struct ChangesScanArgs {
 struct ChangesListArgs {
     db_path: String,
     project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InitArgs {
+    db_path: String,
+    device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncBlobArgs {
+    db_path: String,
+    cache_root: String,
+    remote_root: String,
+    blob_id: String,
+    object_key: Option<String>,
+}
+
+fn run_init(args: &[String]) -> ExitCode {
+    match parse_init_args(args)
+        .and_then(|args| init_identity(&args).map_err(|error| error.to_string()))
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("devbox: {error}");
+            eprintln!("Usage: devbox init --db <DB_PATH> [--device-name <NAME>]");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_devices(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("list") => match parse_devices_list_args(&args[1..])
+            .and_then(|db_path| devices_list(&db_path).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox devices list --db <DB_PATH>");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("devbox: devices requires list");
+            eprintln!("Usage: devbox devices list --db <DB_PATH>");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_sync(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("upload") => match parse_sync_blob_args(&args[1..])
+            .and_then(|args| sync_upload(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_sync_usage();
+                ExitCode::from(1)
+            }
+        },
+        Some("download") => match parse_sync_blob_args(&args[1..])
+            .and_then(|args| sync_download(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_sync_usage();
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("devbox: sync requires upload or download");
+            print_sync_usage();
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn parse_init_args(args: &[String]) -> Result<InitArgs, String> {
+    let mut db_path = None;
+    let mut device_name = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--device-name" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--device-name requires a name".to_string())?;
+                device_name = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown init option '{value}'"));
+            }
+            _ => return Err("init accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(InitArgs {
+        db_path: db_path.ok_or_else(|| "init requires --db <DB_PATH>".to_string())?,
+        device_name,
+    })
+}
+
+fn parse_devices_list_args(args: &[String]) -> Result<String, String> {
+    let [flag, db_path] = args else {
+        return Err("devices list requires --db <DB_PATH>".to_string());
+    };
+    if flag != "--db" {
+        return Err("devices list requires --db <DB_PATH>".to_string());
+    }
+    Ok(db_path.clone())
+}
+
+fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
+    let mut db_path = None;
+    let mut cache_root = None;
+    let mut remote_root = None;
+    let mut object_key = None;
+    let mut blob_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--cache" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--cache requires a path".to_string())?;
+                cache_root = Some(value.clone());
+            }
+            "--remote" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--remote requires a directory".to_string())?;
+                remote_root = Some(value.clone());
+            }
+            "--object-key" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--object-key requires a key".to_string())?;
+                object_key = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown sync option '{value}'"));
+            }
+            value => {
+                if blob_id.replace(value.to_string()).is_some() {
+                    return Err("sync accepts exactly one blob id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(SyncBlobArgs {
+        db_path: db_path.ok_or_else(|| "sync requires --db <DB_PATH>".to_string())?,
+        cache_root: cache_root.ok_or_else(|| "sync requires --cache <CACHE_ROOT>".to_string())?,
+        remote_root: remote_root
+            .ok_or_else(|| "sync requires --remote <REMOTE_DIR>".to_string())?,
+        blob_id: blob_id.ok_or_else(|| "sync requires a blob id".to_string())?,
+        object_key,
+    })
 }
 
 fn parse_snapshot_create_args(args: &[String]) -> Result<SnapshotCreateArgs, String> {
@@ -351,6 +543,100 @@ fn parse_snapshot_restore_args(args: &[String]) -> Result<SnapshotRestoreArgs, S
             .ok_or_else(|| "snapshot restore requires a snapshot id".to_string())?,
         apply,
     })
+}
+
+fn init_identity(args: &InitArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = Store::open_file(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store.ensure_local_identity(&EnsureLocalIdentityOptions {
+        device_name: args.device_name.as_deref(),
+    })?;
+
+    println!("Local identity initialized");
+    println!("Account id: {}", identity.account_id);
+    println!("Current device id: {}", identity.device_id);
+    println!("Current device name: {}", identity.device_name);
+    println!("Created at: {}", identity.device_created_at);
+    println!("SQLite database: {}", args.db_path);
+    println!("Cloud authentication: not configured");
+    println!("Key material: stored locally; not printed");
+
+    Ok(())
+}
+
+fn devices_list(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(db_path)?;
+    store.apply_migrations()?;
+    let devices = store.list_devices()?;
+
+    println!("Device id\tAccount id\tCurrent local\tName\tLast seen at\tCreated at");
+    for device in &devices {
+        print_device(device);
+    }
+
+    Ok(())
+}
+
+fn sync_upload(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let sync_key = SyncKey::from_hex(&identity.sync_key_hex)?;
+    let blob_id = BlobId::from_blake3_hex(&args.blob_id)?;
+    let object_key = sync_object_key(&blob_id, args.object_key.as_deref())?;
+    let cache = BlobCache::open(&args.cache_root)?;
+    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let uploaded = upload_blob_from_cache(&cache, &provider, &sync_key, &blob_id, &object_key)?;
+
+    println!("Sync upload: encrypted local-remote object");
+    println!("Blob id: {blob_id}");
+    println!("Object key: {}", uploaded.object_key);
+    println!("Plaintext bytes: {}", uploaded.plaintext_bytes);
+    println!("Remote bytes: {}", uploaded.remote_bytes);
+    println!("Uploaded: {}", uploaded.uploaded);
+    println!("Remote provider: local filesystem");
+    println!("Remote root: {}", provider.root().display());
+    println!("Cloud authentication: not configured");
+
+    Ok(())
+}
+
+fn sync_download(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let sync_key = SyncKey::from_hex(&identity.sync_key_hex)?;
+    let blob_id = BlobId::from_blake3_hex(&args.blob_id)?;
+    let object_key = sync_object_key(&blob_id, args.object_key.as_deref())?;
+    let cache = BlobCache::open(&args.cache_root)?;
+    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let downloaded = download_blob_to_cache(&cache, &provider, &sync_key, &blob_id, &object_key)?;
+
+    println!("Sync download: decrypted into local blob cache");
+    println!("Blob id: {blob_id}");
+    println!("Object key: {}", downloaded.object_key);
+    println!("Plaintext bytes: {}", downloaded.plaintext_bytes);
+    println!("Remote bytes: {}", downloaded.remote_bytes);
+    println!("Blob cache: {}", cache.root().display());
+    println!("Remote provider: local filesystem");
+    println!("Remote root: {}", provider.root().display());
+    println!("Cloud authentication: not configured");
+
+    Ok(())
+}
+
+fn sync_object_key(
+    blob_id: &BlobId,
+    explicit_key: Option<&str>,
+) -> Result<ObjectKey, Box<dyn std::error::Error>> {
+    match explicit_key {
+        Some(key) => Ok(ObjectKey::new(key)?),
+        None => Ok(encrypted_blob_object_key(blob_id)),
+    }
 }
 
 fn snapshot_dry_run(cache_root: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -551,6 +837,18 @@ fn print_pending_change(change: &PendingLocalChangeRecord) {
             .map(ToString::to_string)
             .unwrap_or_else(|| "-".to_string()),
         change.detected_at,
+    );
+}
+
+fn print_device(device: &DeviceRecord) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        device.id,
+        device.account_id,
+        device.is_local,
+        device.display_name,
+        device.last_seen_at,
+        device.created_at
     );
 }
 
@@ -863,6 +1161,16 @@ fn print_changes_usage() {
     eprintln!("  devbox changes clear --db <DB_PATH> [--project <PROJECT_ID>]");
 }
 
+fn print_sync_usage() {
+    eprintln!("Usage:");
+    eprintln!(
+        "  devbox sync upload --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> <BLOB_ID> [--object-key <KEY>]"
+    );
+    eprintln!(
+        "  devbox sync download --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> <BLOB_ID> [--object-key <KEY>]"
+    );
+}
+
 fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::error::Error>> {
     let path = Path::new(db_path);
     if !path.is_file() {
@@ -981,6 +1289,9 @@ fn print_help() {
     println!();
     println!("Commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
+    println!("  init       Initialize local account and current-device identity");
+    println!("  devices    List known local account devices");
+    println!("  sync       Upload and download encrypted blobs through a local remote provider");
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  changes    Scan, list, and clear the pending local change feed");
     println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
