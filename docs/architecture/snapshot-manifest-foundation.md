@@ -2,7 +2,7 @@
 
 This slice introduces the Phase 0 snapshot manifest builder in `crates/devbox-snapshot`.
 
-The builder walks a local project directory, applies the existing generated-artifact policy from `devbox-core`, writes included file bytes into the local `BlobCache`, and returns an in-memory draft snapshot manifest. It does not persist snapshot rows, blob rows, or manifest rows to SQLite yet.
+The builder walks a local project directory, applies the existing generated-artifact policy from `devbox-core`, writes included file bytes into the local `BlobCache`, and returns an in-memory draft snapshot manifest. The CLI can now either print that draft as a dry run or persist its metadata to SQLite.
 
 ## Boundary
 
@@ -34,9 +34,14 @@ The CLI exposes the current surface as:
 
 ```text
 devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>
+devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
+devbox snapshot list --db <DB_PATH>
+devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>
 ```
 
-This command validates that the cache root is outside the snapshot root before initializing the cache, then creates local blob-cache objects for included files and prints the draft manifest summary. It intentionally does not write SQLite metadata.
+Dry-run validates that the cache root is outside the snapshot root before initializing the cache, then creates local blob-cache objects for included files and prints the draft manifest summary. It intentionally does not write SQLite metadata.
+
+The persisted form uses the same builder and blob-cache behavior, then writes metadata rows into SQLite: project, snapshot, manifest entries, blob metadata references for included file entries, and policy evaluation rows for excluded or deferred paths.
 
 ## Manifest Entries
 
@@ -61,23 +66,22 @@ Phase 0 canonical manifest identity converts relative paths to slash-separated U
 
 ## Relationship To SQLite
 
-The SQLite schema already has tables for snapshots, manifests, blobs, policies, and policy evaluations. This slice stops before inserting into those tables.
-
-Later persistence work should translate a draft snapshot into:
+The persisted CLI path translates a draft snapshot into:
 
 - one `snapshots` row
 - one `manifest_entries` row per draft entry
 - `blobs` metadata rows for cache objects that are referenced by included file entries
-- `policy_evaluations` rows for excluded or deferred paths when useful
+- `policy_evaluations` rows for excluded or deferred paths
 
 The local cache remains the source of file bytes. SQLite should store references and metadata, not project file bytes.
+
+Snapshot ids are still stable draft manifest ids derived from manifest content. Attempting to persist the same snapshot id twice returns a duplicate snapshot error rather than silently creating a second row for the same manifest.
 
 ## Deferred
 
 This slice intentionally does not implement:
 
 - restore or materialization
-- snapshot persistence to SQLite
 - daemon automation
 - filesystem watching
 - `.gitignore` parsing
