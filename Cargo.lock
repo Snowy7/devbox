@@ -177,6 +177,7 @@ name = "devbox-cli"
 version = "0.1.0"
 dependencies = [
  "devbox-auth",
+ "devbox-conflict",
  "devbox-core",
  "devbox-materialize",
  "devbox-snapshot",
@@ -184,6 +185,14 @@ dependencies = [
  "devbox-sync",
  "rusqlite",
  "tempfile",
+]
+
+[[package]]
+name = "devbox-conflict"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "devbox-core",
 ]
 
 [[package]]
@@ -238,6 +247,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "devbox-auth",
+ "devbox-conflict",
  "devbox-core",
  "getrandom 0.2.17",
  "rusqlite",

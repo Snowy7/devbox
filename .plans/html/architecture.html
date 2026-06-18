@@ -108,7 +108,8 @@ Rust backend
           <li>The local/mock auth foundation models account session state, device approval, key envelopes, revocation, and device/project cursors in SQLite.</li>
           <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a second SQLite/cache context and safe restore-engine apply.</li>
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
-          <li>Production sign-in, hosted metadata, recovery, real object-storage credentials, explicit secret allow policy, and conflict resolution remain deferred.</li>
+          <li>Local conflict records compare and persist divergent snapshot rows without source bytes.</li>
+          <li>Production sign-in, hosted metadata, recovery, real object-storage credentials, explicit secret allow policy, automatic merge, and conflict UI remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
         </ul>
       </section>

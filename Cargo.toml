@@ -2,6 +2,7 @@
 members = [
     "crates/devbox-auth",
     "crates/devbox-cli",
+    "crates/devbox-conflict",
     "crates/devbox-core",
     "crates/devbox-daemon",
     "crates/devbox-git",

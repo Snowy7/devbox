@@ -667,6 +667,145 @@ fn changes_scan_and_list_smoke_are_stable_and_idempotent() {
 }
 
 #[test]
+fn conflicts_compare_list_show_and_resolve_divergent_snapshots() {
+    let fixture = SnapshotCliFixture::new();
+    let raw_base_secret = synthetic_token("sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456");
+    let raw_local_secret = synthetic_token("sk-", "bcdefghijklmnopqrstuvwxyzABCDEFGH1234567");
+    let raw_incoming_secret = synthetic_token("sk-", "cdefghijklmnopqrstuvwxyzABCDEFGH12345678");
+    fixture.write("same.txt", "same\n");
+    fixture.write("both.txt", "base\n");
+    fixture.write("delete-local.txt", "base local delete\n");
+    fixture.write("delete-incoming.txt", "base incoming delete\n");
+    fixture.write("secret.env", &format!("OPENAI_API_KEY={raw_base_secret}\n"));
+    fixture.write("node_modules/left-pad/index.js", "module.exports = true;\n");
+
+    let base = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&base);
+    let base_id = prefixed_value(&stdout(&base), "Snapshot id: ");
+
+    fixture.write("both.txt", "local\n");
+    fs::remove_file(fixture.project.join("delete-local.txt")).expect("local delete applies");
+    fixture.write("local-only.txt", "local only\n");
+    fixture.write(
+        "secret.env",
+        &format!("OPENAI_API_KEY={raw_local_secret}\n"),
+    );
+    let local = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&local);
+    let local_id = prefixed_value(&stdout(&local), "Snapshot id: ");
+
+    fixture.write("both.txt", "incoming\n");
+    fixture.write("delete-local.txt", "base local delete\n");
+    fs::remove_file(fixture.project.join("delete-incoming.txt")).expect("incoming delete applies");
+    fs::remove_file(fixture.project.join("local-only.txt")).expect("local-only removes");
+    fixture.write("incoming-only.txt", "incoming only\n");
+    fixture.write(
+        "secret.env",
+        &format!("OPENAI_API_KEY={raw_incoming_secret}\n"),
+    );
+    let incoming = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&incoming);
+    let incoming_id = prefixed_value(&stdout(&incoming), "Snapshot id: ");
+
+    let compare = run_devbox([
+        "conflicts",
+        "compare",
+        "--db",
+        fixture.db_path(),
+        "--base",
+        &base_id,
+        "--local",
+        &local_id,
+        "--incoming",
+        &incoming_id,
+    ]);
+    assert_success(&compare);
+    let compare_stdout = stdout(&compare);
+    assert!(compare_stdout.contains("Conflict compare: divergent snapshots"));
+    assert!(compare_stdout.contains("Status: open"));
+    assert!(compare_stdout.contains("both.txt\tboth-modified-different\tfile"));
+    assert!(compare_stdout.contains("delete-local.txt\tlocal-deleted\tfile"));
+    assert!(compare_stdout.contains("delete-incoming.txt\tincoming-deleted\tfile"));
+    assert!(compare_stdout.contains("incoming-only.txt\tincoming-only\tfile"));
+    assert!(compare_stdout.contains("local-only.txt\tlocal-only\tfile"));
+    assert!(compare_stdout.contains("node_modules\tpolicy-excluded\tdirectory"));
+    assert!(compare_stdout.contains("secret.env\tpolicy-blocked\tfile"));
+    assert!(compare_stdout.contains("sk-<redacted>"));
+    assert!(!compare_stdout.contains(&raw_base_secret));
+    assert!(!compare_stdout.contains(&raw_local_secret));
+    assert!(!compare_stdout.contains(&raw_incoming_secret));
+    let conflict_id = prefixed_value(&compare_stdout, "Conflict id: ");
+
+    let second_compare = run_devbox([
+        "conflicts",
+        "compare",
+        "--db",
+        fixture.db_path(),
+        "--base",
+        &base_id,
+        "--local",
+        &local_id,
+        "--incoming",
+        &incoming_id,
+    ]);
+    assert_success(&second_compare);
+    assert_eq!(
+        prefixed_value(&stdout(&second_compare), "Conflict id: "),
+        conflict_id
+    );
+
+    let list = run_devbox(["conflicts", "list", "--db", fixture.db_path()]);
+    assert_success(&list);
+    let list_stdout = stdout(&list);
+    assert!(list_stdout.contains(
+        "Conflict id\tStatus\tProject id\tBase snapshot id\tLocal snapshot id\tIncoming snapshot id"
+    ));
+    assert!(list_stdout.contains(&conflict_id));
+    assert!(list_stdout.contains(&base_id));
+    assert!(list_stdout.contains(&local_id));
+    assert!(list_stdout.contains(&incoming_id));
+
+    let show = run_devbox(["conflicts", "show", "--db", fixture.db_path(), &conflict_id]);
+    assert_success(&show);
+    let show_stdout = stdout(&show);
+    assert!(show_stdout.contains("Entries:"));
+    assert!(show_stdout.contains("secret.env\tpolicy-blocked\tfile"));
+    assert!(!show_stdout.contains(&raw_local_secret));
+    assert!(!show_stdout.contains(&raw_incoming_secret));
+
+    let resolve = run_devbox([
+        "conflicts",
+        "resolve",
+        "--db",
+        fixture.db_path(),
+        &conflict_id,
+    ]);
+    assert_success(&resolve);
+    assert!(stdout(&resolve).contains("Status: resolved"));
+}
+
+#[test]
 fn changes_scan_rejects_in_project_cache_and_db_without_leftovers() {
     let fixture = SnapshotCliFixture::new();
     fixture.write("README.md", "hello\n");

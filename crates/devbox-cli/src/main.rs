@@ -2,6 +2,10 @@ use devbox_auth::{
     approve_pairing_invitation, create_pairing_invitation, mock_login, now_unix_seconds,
     DeviceProjectCursor, DeviceTrustRecord, LocalIdentityView, PairingInvitationToken,
 };
+use devbox_conflict::{
+    compare_snapshots, path_to_conflict_string, ComparableEntry, ComparableSnapshot,
+    PathComparisonRow,
+};
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision};
 use devbox_materialize::{
@@ -14,8 +18,9 @@ use devbox_snapshot::{
     RestoreTargetStatus, RestoreWrite, SnapshotManifestBuilder, SnapshotManifestEntry,
 };
 use devbox_store::{
-    local_project_id, path_to_store_string, BlobCache, EnsureLocalIdentityOptions, LocalChangeKind,
-    LocalIdentityRecord, ManifestEntryRecord, NewProject, NewSnapshot, NewSnapshotDraft,
+    local_project_id, path_to_store_string, BlobCache, ConflictRowRecord, ConflictStatus,
+    EnsureLocalIdentityOptions, LocalChangeKind, LocalIdentityRecord, ManifestEntryRecord,
+    NewConflict, NewConflictRow, NewProject, NewSnapshot, NewSnapshotDraft,
     NewSnapshotManifestEntry, PendingLocalChangeRecord, PersistedSnapshot, Store,
 };
 use devbox_sync::{
@@ -40,6 +45,7 @@ fn main() -> ExitCode {
         Some("auth") => run_auth(&args[1..]),
         Some("devices") => run_devices(&args[1..]),
         Some("sync") => run_sync(&args[1..]),
+        Some("conflicts") => run_conflicts(&args[1..]),
         Some("status") => run_status(&args[1..]),
         Some("snapshot") => run_snapshot(&args[1..]),
         Some("changes") => run_changes(&args[1..]),
@@ -91,6 +97,68 @@ fn run_changes(args: &[String]) -> ExitCode {
         _ => {
             eprintln!("devbox: changes requires scan, list, or clear");
             print_changes_usage();
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_conflicts(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("compare") => match parse_conflict_compare_args(&args[1..])
+            .and_then(|args| conflicts_compare(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_conflicts_usage();
+                ExitCode::from(1)
+            }
+        },
+        Some("list") => match parse_conflict_list_args(&args[1..])
+            .and_then(|args| conflicts_list(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_conflicts_usage();
+                ExitCode::from(1)
+            }
+        },
+        Some("show") => match parse_conflict_show_args(&args[1..])
+            .and_then(|args| conflicts_show(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_conflicts_usage();
+                ExitCode::from(1)
+            }
+        },
+        Some("resolve") => match parse_conflict_show_args(&args[1..]).and_then(|args| {
+            conflicts_update_status(&args, ConflictStatus::Resolved)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_conflicts_usage();
+                ExitCode::from(1)
+            }
+        },
+        Some("dismiss") => match parse_conflict_show_args(&args[1..]).and_then(|args| {
+            conflicts_update_status(&args, ConflictStatus::Dismissed)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_conflicts_usage();
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("devbox: conflicts requires compare, list, show, resolve, or dismiss");
+            print_conflicts_usage();
             ExitCode::from(2)
         }
     }
@@ -173,6 +241,26 @@ struct ChangesScanArgs {
 struct ChangesListArgs {
     db_path: String,
     project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConflictCompareArgs {
+    db_path: String,
+    base_snapshot_id: Option<String>,
+    local_snapshot_id: String,
+    incoming_snapshot_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConflictListArgs {
+    db_path: String,
+    project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConflictShowArgs {
+    db_path: String,
+    conflict_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1038,6 +1126,132 @@ fn parse_changes_list_args(args: &[String]) -> Result<ChangesListArgs, String> {
     })
 }
 
+fn parse_conflict_compare_args(args: &[String]) -> Result<ConflictCompareArgs, String> {
+    let mut db_path = None;
+    let mut base_snapshot_id = None;
+    let mut local_snapshot_id = None;
+    let mut incoming_snapshot_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--base" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--base requires a snapshot id".to_string())?;
+                base_snapshot_id = Some(value.clone());
+            }
+            "--local" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--local requires a snapshot id".to_string())?;
+                local_snapshot_id = Some(value.clone());
+            }
+            "--incoming" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--incoming requires a snapshot id".to_string())?;
+                incoming_snapshot_id = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown conflicts compare option '{value}'"));
+            }
+            _ => return Err("conflicts compare accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(ConflictCompareArgs {
+        db_path: db_path.ok_or_else(|| "conflicts compare requires --db <DB_PATH>".to_string())?,
+        base_snapshot_id,
+        local_snapshot_id: local_snapshot_id
+            .ok_or_else(|| "conflicts compare requires --local <SNAPSHOT_ID>".to_string())?,
+        incoming_snapshot_id: incoming_snapshot_id
+            .ok_or_else(|| "conflicts compare requires --incoming <SNAPSHOT_ID>".to_string())?,
+    })
+}
+
+fn parse_conflict_list_args(args: &[String]) -> Result<ConflictListArgs, String> {
+    let mut db_path = None;
+    let mut project_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--project" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--project requires a project id".to_string())?;
+                project_id = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown conflicts list option '{value}'"));
+            }
+            _ => return Err("conflicts list accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(ConflictListArgs {
+        db_path: db_path.ok_or_else(|| "conflicts list requires --db <DB_PATH>".to_string())?,
+        project_id,
+    })
+}
+
+fn parse_conflict_show_args(args: &[String]) -> Result<ConflictShowArgs, String> {
+    let mut db_path = None;
+    let mut conflict_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown conflicts command option '{value}'"));
+            }
+            value => {
+                if conflict_id.replace(value.to_string()).is_some() {
+                    return Err("conflicts command accepts one conflict id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(ConflictShowArgs {
+        db_path: db_path.ok_or_else(|| "conflicts command requires --db <DB_PATH>".to_string())?,
+        conflict_id: conflict_id
+            .ok_or_else(|| "conflicts command requires <CONFLICT_ID>".to_string())?,
+    })
+}
+
 fn parse_snapshot_restore_args(args: &[String]) -> Result<SnapshotRestoreArgs, String> {
     let mut db_path = None;
     let mut cache_root = None;
@@ -1618,6 +1832,116 @@ fn changes_scan(args: &ChangesScanArgs) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+fn conflicts_compare(args: &ConflictCompareArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let base = args
+        .base_snapshot_id
+        .as_deref()
+        .map(|id| load_snapshot(&store, id))
+        .transpose()?;
+    let local = load_snapshot(&store, &args.local_snapshot_id)?;
+    let incoming = load_snapshot(&store, &args.incoming_snapshot_id)?;
+    let base_comparable = base.as_ref().map(snapshot_to_comparable);
+    let local_comparable = snapshot_to_comparable(&local);
+    let incoming_comparable = snapshot_to_comparable(&incoming);
+    let comparison = compare_snapshots(
+        base_comparable.as_ref(),
+        &local_comparable,
+        &incoming_comparable,
+    )?;
+    let created_at = store.current_timestamp()?;
+    let new_rows = comparison
+        .rows()
+        .iter()
+        .map(new_conflict_row)
+        .collect::<Vec<_>>();
+    let persisted = store.persist_conflict(
+        &NewConflict {
+            id: comparison.conflict_id(),
+            project_id: comparison.project_id(),
+            base_snapshot_id: comparison.base_snapshot_id(),
+            local_snapshot_id: comparison.local_snapshot_id(),
+            incoming_snapshot_id: comparison.incoming_snapshot_id(),
+            summary: comparison.summary(),
+            created_at: &created_at,
+        },
+        &new_rows,
+    )?;
+
+    print_conflict_detail(
+        &persisted.conflict,
+        &persisted.rows,
+        Some("Conflict compare: divergent snapshots"),
+    );
+
+    Ok(())
+}
+
+fn conflicts_list(args: &ConflictListArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let conflicts = store.list_conflicts(args.project_id.as_deref())?;
+
+    println!(
+        "Conflict id\tStatus\tProject id\tBase snapshot id\tLocal snapshot id\tIncoming snapshot id\tRows\tDifferent\tPolicy/deferred\tCreated at"
+    );
+    for conflict in conflicts {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            conflict.id,
+            conflict.status.as_str(),
+            conflict.project_id,
+            conflict.base_snapshot_id.as_deref().unwrap_or("-"),
+            conflict.local_snapshot_id,
+            conflict.incoming_snapshot_id,
+            conflict.row_count,
+            conflict.both_modified_different_count
+                + conflict.local_only_count
+                + conflict.incoming_only_count
+                + conflict.local_deleted_count
+                + conflict.incoming_deleted_count,
+            conflict.policy_excluded_count
+                + conflict.policy_deferred_count
+                + conflict.policy_blocked_count
+                + conflict.unsupported_count,
+            conflict.created_at
+        );
+    }
+
+    Ok(())
+}
+
+fn conflicts_show(args: &ConflictShowArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let conflict = store
+        .conflict_with_rows(&args.conflict_id)?
+        .ok_or_else(|| format!("conflict not found: {}", args.conflict_id))?;
+
+    print_conflict_detail(&conflict.conflict, &conflict.rows, None);
+
+    Ok(())
+}
+
+fn conflicts_update_status(
+    args: &ConflictShowArgs,
+    status: ConflictStatus,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let updated_at = store.current_timestamp()?;
+    let conflict = store
+        .update_conflict_status(&args.conflict_id, status, &updated_at)?
+        .ok_or_else(|| format!("conflict not found: {}", args.conflict_id))?;
+
+    println!("Conflict id: {}", conflict.id);
+    println!("Status: {}", conflict.status.as_str());
+    println!("Updated at: {}", conflict.updated_at);
+
+    Ok(())
+}
+
 fn changes_list(args: &ChangesListArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_existing_metadata_store(&args.db_path)?;
     store.apply_migrations()?;
@@ -1919,6 +2243,133 @@ fn print_snapshot_detail(persisted: &PersistedSnapshot) {
     }
 }
 
+fn load_snapshot(store: &Store, id: &str) -> Result<PersistedSnapshot, Box<dyn std::error::Error>> {
+    store
+        .snapshot_with_entries(id)?
+        .ok_or_else(|| format!("snapshot not found: {id}").into())
+}
+
+fn snapshot_to_comparable(snapshot: &PersistedSnapshot) -> ComparableSnapshot {
+    ComparableSnapshot::new(
+        snapshot.project.id.clone(),
+        snapshot.snapshot.id.clone(),
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| {
+                ComparableEntry::new(
+                    entry.relative_path.clone(),
+                    entry.kind.clone(),
+                    entry.size_bytes,
+                    entry.blob_id.clone(),
+                    entry.object_ref.clone(),
+                    entry.policy_decision.clone(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn new_conflict_row(row: &PathComparisonRow) -> NewConflictRow<'_> {
+    NewConflictRow {
+        path: row.path(),
+        state: row.state(),
+        entry_kind: row.entry_kind(),
+        base_blob_id: row.base_blob_id(),
+        local_blob_id: row.local_blob_id(),
+        incoming_blob_id: row.incoming_blob_id(),
+        base_size_bytes: row.base_size_bytes(),
+        local_size_bytes: row.local_size_bytes(),
+        incoming_size_bytes: row.incoming_size_bytes(),
+        local_policy_decision: row.local_policy_decision(),
+        incoming_policy_decision: row.incoming_policy_decision(),
+    }
+}
+
+fn print_conflict_detail(
+    conflict: &devbox_store::ConflictRecord,
+    rows: &[ConflictRowRecord],
+    title: Option<&str>,
+) {
+    if let Some(title) = title {
+        println!("{title}");
+    }
+    println!("Conflict id: {}", conflict.id);
+    println!("Status: {}", conflict.status.as_str());
+    println!("Project id: {}", conflict.project_id);
+    println!(
+        "Base snapshot id: {}",
+        conflict.base_snapshot_id.as_deref().unwrap_or("-")
+    );
+    println!("Local snapshot id: {}", conflict.local_snapshot_id);
+    println!("Incoming snapshot id: {}", conflict.incoming_snapshot_id);
+    println!("Created at: {}", conflict.created_at);
+    println!("Updated at: {}", conflict.updated_at);
+    println!("Rows: {}", conflict.row_count);
+    println!("Same: {}", conflict.same_count);
+    println!("Local only: {}", conflict.local_only_count);
+    println!("Incoming only: {}", conflict.incoming_only_count);
+    println!("Local deleted: {}", conflict.local_deleted_count);
+    println!("Incoming deleted: {}", conflict.incoming_deleted_count);
+    println!("Both modified same: {}", conflict.both_modified_same_count);
+    println!(
+        "Both modified different: {}",
+        conflict.both_modified_different_count
+    );
+    println!("Policy excluded: {}", conflict.policy_excluded_count);
+    println!("Policy deferred: {}", conflict.policy_deferred_count);
+    println!("Policy blocked: {}", conflict.policy_blocked_count);
+    println!("Unsupported: {}", conflict.unsupported_count);
+    println!("Entries:");
+    println!(
+        "Path\tState\tKind\tBase blob id\tLocal blob id\tIncoming blob id\tBase bytes\tLocal bytes\tIncoming bytes\tLocal decision\tIncoming decision\tReason"
+    );
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            path_to_conflict_string(&row.relative_path),
+            row.state.as_str(),
+            manifest_kind_value(&row.entry_kind),
+            optional_blob_id(row.base_blob_id.as_ref()),
+            optional_blob_id(row.local_blob_id.as_ref()),
+            optional_blob_id(row.incoming_blob_id.as_ref()),
+            optional_u64(row.base_size_bytes),
+            optional_u64(row.local_size_bytes),
+            optional_u64(row.incoming_size_bytes),
+            optional_policy_decision(row.local_policy_decision.as_ref()),
+            optional_policy_decision(row.incoming_policy_decision.as_ref()),
+            conflict_row_reason(row).unwrap_or("-")
+        );
+    }
+}
+
+fn optional_blob_id(blob_id: Option<&BlobId>) -> String {
+    blob_id
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn optional_policy_decision(policy: Option<&PolicyDecision>) -> &'static str {
+    policy.map(policy_decision_name).unwrap_or("-")
+}
+
+fn conflict_row_reason(row: &ConflictRowRecord) -> Option<&str> {
+    row.local_policy_decision
+        .as_ref()
+        .and_then(policy_reason)
+        .or_else(|| {
+            row.incoming_policy_decision
+                .as_ref()
+                .and_then(policy_reason)
+        })
+}
+
 fn print_restore_plan(plan: &RestorePlan) {
     println!("Restore mode: dry-run");
     println!("Snapshot id: {}", plan.snapshot_id());
@@ -2101,6 +2552,17 @@ fn print_changes_usage() {
     eprintln!("  devbox changes clear --db <DB_PATH> [--project <PROJECT_ID>]");
 }
 
+fn print_conflicts_usage() {
+    eprintln!("Usage:");
+    eprintln!(
+        "  devbox conflicts compare --db <DB_PATH> --local <LOCAL_SNAPSHOT_ID> --incoming <INCOMING_SNAPSHOT_ID> [--base <BASE_SNAPSHOT_ID>]"
+    );
+    eprintln!("  devbox conflicts list --db <DB_PATH> [--project <PROJECT_ID>]");
+    eprintln!("  devbox conflicts show --db <DB_PATH> <CONFLICT_ID>");
+    eprintln!("  devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID>");
+    eprintln!("  devbox conflicts dismiss --db <DB_PATH> <CONFLICT_ID>");
+}
+
 fn print_sync_usage() {
     eprintln!("Usage:");
     eprintln!(
@@ -2250,6 +2712,7 @@ fn print_help() {
     println!("  sync       Upload/download encrypted blobs and manage local cursors");
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  changes    Scan, list, and clear the pending local change feed");
+    println!("  conflicts  Compare, persist, list, and update divergent snapshot conflicts");
     println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
     println!("  restore    Placeholder for snapshot restore");
     println!("  explain    Placeholder for policy and sync explanations");
