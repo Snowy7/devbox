@@ -27,8 +27,9 @@ The auth and pairing foundation slice adds local/mock primitives for:
 - local device/project cursors
 
 Production-shaped account/session proof primitives and server-side device/project cursors were added
-in later foundations. Live sign-in, hosted OAuth/OIDC verification, recovery, and production
-second-device materialization UX remain later Phase 1 work.
+in later foundations. The private-alpha Electron shell now covers local status and safety visibility.
+Live sign-in, hosted OAuth/OIDC verification, recovery, and production second-device materialization
+UX remain deferred.
 
 ## Local Identity Model
 
@@ -83,7 +84,7 @@ Upload reads plaintext from the local content-addressed blob cache, encrypts it,
 encrypted object to the remote provider. Download reads the encrypted remote object, decrypts it,
 verifies the expected BLAKE3 blob id, and writes the plaintext back into a local blob cache.
 
-Download targets the blob cache, not a project directory. Second-device project materialization,
-now has a local/mock foundation in `devbox-materialize`; production key exchange, live hosted auth
-enforcement, managed cloud credential provisioning, conflict UI, and UI restore flows remain later
-Phase 1 work.
+Download targets the blob cache, not a project directory. Second-device project materialization now
+has a local/mock foundation in `devbox-materialize`; production key exchange, live hosted auth
+enforcement, managed cloud credential provisioning, automatic conflict resolution, and restore UI
+flows remain deferred.

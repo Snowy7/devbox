@@ -96,9 +96,11 @@ Current Phase 1 foundation status:
   records without advancing the cursor
 - local/mock publish/import/materialize can opt into in-process hosted metadata for manifest
   discovery and server-side cursor compare-and-set
+- no-network Electron private-alpha shell, explicit path-scoped secret policy records, and guarded
+  manual conflict resolution records are in place
 - live OAuth/login integration, live Cloudflare/AWS object credential provisioning, production
-  pairing/recovery UX, explicit secret allow policy, automatic merge/apply resolution, conflict UI,
-  Electron UI, and production deployment hardening remain later Phase 1 work
+  pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and
+  production deployment hardening remain deferred
 
 ## Content Addressing
 

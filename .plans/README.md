@@ -30,7 +30,8 @@ store, with handlers scoping devices/projects/snapshots/cursors to the authentic
 Hosted metadata now also models account/session/project-scoped managed object credential leases
 with redacted provider references, expiration, revocation, rotation generation, and no-network
 mock/dev CLI smoke commands. Local pairing now includes no-network recovery grant references,
-revocation, device rotation intents, and key-envelope rotation generation. Live OAuth/login
-integration, live Cloudflare/AWS credential provisioning, production pairing UX, explicit secret
-allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and production deployment
-hardening remain later Phase 1 work.
+revocation, device rotation intents, and key-envelope rotation generation. The final private-alpha
+surface now adds a no-network Electron shell, explicit path-scoped secret policy records, and guarded
+manual conflict resolution records. Live OAuth/login integration, live Cloudflare/AWS credential
+provisioning, production pairing UX, automatic merge/apply resolution, paid/team/agent/Git
+replacement work, and production deployment hardening remain deferred.

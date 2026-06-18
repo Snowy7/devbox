@@ -14,7 +14,8 @@ This slice completes the first local/mock Phase 1 vertical path for second-devic
 This is still a local/mock foundation.
 
 It does not implement live OAuth-backed account login, managed R2/S3 credential provisioning,
-production pairing UX, automatic conflict resolution, or Electron UI. The materialization path can
+production pairing UX, or automatic conflict resolution. The private-alpha Electron shell can show
+fixture-backed continuation, conflict, device, and safety state; this materialization path itself can
 now opt into an in-process mock-dev hosted metadata store for manifest discovery and server-side
 cursor compare-and-set, but the default remains local/mock only. Production-shaped account/session
 proof primitives exist for future hosted auth, but this materialization path does not enforce them
@@ -123,6 +124,5 @@ Remaining Phase 1 work includes:
 - live OAuth/OIDC account ownership verification and production key exchange
 - managed R2/S3 credential provisioning, rotation, and hosted object indexing
 - production pairing/recovery UX and live recovery/rotation exchange
-- automatic conflict merge/apply resolution and user-facing conflict flows
-- minimal tray/Electron continuation UI
-- explicit path-scoped secret allow/template/envelope policy
+- automatic conflict merge/apply resolution
+- live daemon-backed desktop materialization actions

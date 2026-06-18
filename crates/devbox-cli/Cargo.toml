@@ -11,6 +11,7 @@ name = "devbox"
 path = "src/main.rs"
 
 [dependencies]
+blake3 = "1"
 devbox-auth = { path = "../devbox-auth" }
 devbox-conflict = { path = "../devbox-conflict" }
 devbox-core = { path = "../devbox-core" }

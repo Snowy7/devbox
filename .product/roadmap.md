@@ -75,17 +75,22 @@ Completed foundations:
   materialization and persists readable conflict records without advancing cursors
 - opt-in mock-dev hosted metadata wiring for publish/import/materialize manifest discovery and
   server-side device/project cursor compare-and-set
+- no-network Electron private-alpha shell for status, projects, sync activity, conflicts, devices,
+  secret policy, and settings
+- explicit path-scoped secret policy records for block, template, and encrypted envelope references
+- guarded manual conflict resolution records with no automatic apply or merge
 
-Remaining auth and pairing work:
+Remaining deferred work:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
 - production pairing UX and live recovery/rotation user flows
 - live managed cloud object credential provisioning against Cloudflare/AWS/MinIO APIs
 - production hosted metadata deployment hardening beyond the no-network SQLite/dev boundary
 - production deployment hardening
-- Electron UI integration
-- explicit path-scoped secret allow/template/envelope policy
-- automatic conflict merge/apply resolution and user-facing conflict flows
+- automatic conflict merge/apply resolution
+- paid/team administration
+- agent workflows
+- Git replacement/version-control semantics
 
 Exit criteria:
 

@@ -32,9 +32,11 @@ This repository currently contains the product foundation and MVP planning artif
   managed object credential leases with account/session/project scoping, R2/S3/MinIO-shaped provider
   references, redacted credential references, expiration, revocation, and rotation generation. Local
   pairing now includes no-network recovery grants and device key-envelope rotation intents for future
-  production pairing/recovery flows. Live sign-in, live Cloudflare/AWS credential provisioning,
-  deployment hardening, Electron UI, automatic conflict resolution, and conflict UI remain later
-  Phase 1 work.
+  production pairing/recovery flows. The private-alpha desktop shell now provides a no-network
+  Electron control surface for status, projects, sync activity, conflicts, devices, secret policy,
+  and settings. Live sign-in, live Cloudflare/AWS credential provisioning, production deployment
+  hardening, automatic conflict resolution, and paid/team/agent/Git-replacement work remain
+  deferred.
 
 ## Local MVP Surface
 
@@ -54,6 +56,9 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF>`
 - `devbox devices recovery revoke --db <DB_PATH> <GRANT_ID>`
 - `devbox devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>`
+- `devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply`
+- `devbox secrets policy add --db <DB_PATH> --project <PROJECT_ID> --path <REL_PATH> --action block|template|envelope [--envelope-ref <REF>]`
+- `devbox secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]`
 
 Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 

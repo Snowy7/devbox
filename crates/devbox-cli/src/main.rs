@@ -29,10 +29,11 @@ use devbox_snapshot::{
     RestoreTargetStatus, RestoreWrite, SnapshotManifestBuilder, SnapshotManifestEntry,
 };
 use devbox_store::{
-    local_project_id, path_to_store_string, BlobCache, ConflictRowRecord, ConflictStatus,
-    EnsureLocalIdentityOptions, LocalChangeKind, LocalIdentityRecord, ManifestEntryRecord,
-    NewConflict, NewConflictRow, NewProject, NewSnapshot, NewSnapshotDraft,
-    NewSnapshotManifestEntry, PendingLocalChangeRecord, PersistedSnapshot, Store,
+    local_project_id, path_to_store_string, validate_secret_envelope_reference, BlobCache,
+    ConflictRowRecord, ConflictStatus, EnsureLocalIdentityOptions, LocalChangeKind,
+    LocalIdentityRecord, ManifestEntryRecord, NewConflict, NewConflictRow, NewProject,
+    NewSecretPolicyRule, NewSnapshot, NewSnapshotDraft, NewSnapshotManifestEntry,
+    PendingLocalChangeRecord, PersistedSnapshot, SecretPolicyAction, SecretPolicyRuleRecord, Store,
 };
 use devbox_sync::{
     download_blob_to_cache, encrypted_blob_object_key, upload_blob_from_cache,
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
         Some("metadata") => run_metadata(&args[1..]),
         Some("sync") => run_sync(&args[1..]),
         Some("conflicts") => run_conflicts(&args[1..]),
+        Some("secrets") => run_secrets(&args[1..]),
         Some("status") => run_status(&args[1..]),
         Some("snapshot") => run_snapshot(&args[1..]),
         Some("changes") => run_changes(&args[1..]),
@@ -147,10 +149,9 @@ fn run_conflicts(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Some("resolve") => match parse_conflict_show_args(&args[1..]).and_then(|args| {
-            conflicts_update_status(&args, ConflictStatus::Resolved)
-                .map_err(|error| error.to_string())
-        }) {
+        Some("resolve") => match parse_conflict_resolve_args(&args[1..])
+            .and_then(|args| conflicts_resolve(&args).map_err(|error| error.to_string()))
+        {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("devbox: {error}");
@@ -172,6 +173,43 @@ fn run_conflicts(args: &[String]) -> ExitCode {
         _ => {
             eprintln!("devbox: conflicts requires compare, list, show, resolve, or dismiss");
             print_conflicts_usage();
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_secrets(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("policy") => match args.get(1).map(String::as_str) {
+            Some("add") => match parse_secret_policy_add_args(&args[2..])
+                .and_then(|args| secret_policy_add(&args).map_err(|error| error.to_string()))
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_secrets_usage();
+                    ExitCode::from(1)
+                }
+            },
+            Some("list") => match parse_secret_policy_list_args(&args[2..])
+                .and_then(|args| secret_policy_list(&args).map_err(|error| error.to_string()))
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_secrets_usage();
+                    ExitCode::from(1)
+                }
+            },
+            _ => {
+                eprintln!("devbox: secrets policy requires add or list");
+                print_secrets_usage();
+                ExitCode::from(2)
+            }
+        },
+        _ => {
+            eprintln!("devbox: secrets requires policy");
+            print_secrets_usage();
             ExitCode::from(2)
         }
     }
@@ -274,6 +312,49 @@ struct ConflictListArgs {
 struct ConflictShowArgs {
     db_path: String,
     conflict_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConflictResolveArgs {
+    db_path: String,
+    conflict_id: String,
+    manual_resolution: ManualConflictResolution,
+    confirm_no_auto_apply: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualConflictResolution {
+    KeepLocal,
+    KeepIncoming,
+    KeepBoth,
+    Exported,
+}
+
+impl ManualConflictResolution {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::KeepLocal => "keep-local",
+            Self::KeepIncoming => "keep-incoming",
+            Self::KeepBoth => "keep-both",
+            Self::Exported => "exported",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecretPolicyAddArgs {
+    db_path: String,
+    project_id: String,
+    path: String,
+    action: SecretPolicyAction,
+    envelope_ref: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecretPolicyListArgs {
+    db_path: String,
+    project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2635,6 +2716,187 @@ fn parse_conflict_show_args(args: &[String]) -> Result<ConflictShowArgs, String>
     })
 }
 
+fn parse_conflict_resolve_args(args: &[String]) -> Result<ConflictResolveArgs, String> {
+    let mut db_path = None;
+    let mut conflict_id = None;
+    let mut manual_resolution = None;
+    let mut confirm_no_auto_apply = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--manual-resolution" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    "--manual-resolution requires keep-local, keep-incoming, keep-both, or exported"
+                        .to_string()
+                })?;
+                manual_resolution = Some(parse_manual_conflict_resolution(value)?);
+            }
+            "--confirm-no-auto-apply" => {
+                confirm_no_auto_apply = true;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown conflicts resolve option '{value}'"));
+            }
+            value => {
+                if conflict_id.replace(value.to_string()).is_some() {
+                    return Err("conflicts resolve accepts one conflict id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(ConflictResolveArgs {
+        db_path: db_path.ok_or_else(|| "conflicts resolve requires --db <DB_PATH>".to_string())?,
+        conflict_id: conflict_id
+            .ok_or_else(|| "conflicts resolve requires <CONFLICT_ID>".to_string())?,
+        manual_resolution: manual_resolution.ok_or_else(|| {
+            "conflicts resolve requires --manual-resolution keep-local|keep-incoming|keep-both|exported"
+                .to_string()
+        })?,
+        confirm_no_auto_apply,
+    })
+}
+
+fn parse_manual_conflict_resolution(value: &str) -> Result<ManualConflictResolution, String> {
+    match value {
+        "keep-local" => Ok(ManualConflictResolution::KeepLocal),
+        "keep-incoming" => Ok(ManualConflictResolution::KeepIncoming),
+        "keep-both" => Ok(ManualConflictResolution::KeepBoth),
+        "exported" => Ok(ManualConflictResolution::Exported),
+        _ => Err(
+            "--manual-resolution requires keep-local, keep-incoming, keep-both, or exported"
+                .to_string(),
+        ),
+    }
+}
+
+fn parse_secret_policy_add_args(args: &[String]) -> Result<SecretPolicyAddArgs, String> {
+    let mut db_path = None;
+    let mut project_id = None;
+    let mut path = None;
+    let mut action = None;
+    let mut envelope_ref = None;
+    let mut note = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--project" => {
+                index += 1;
+                project_id = args.get(index).cloned();
+            }
+            "--path" => {
+                index += 1;
+                path = args.get(index).cloned();
+            }
+            "--action" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--action requires block, template, or envelope".to_string())?;
+                action = Some(parse_secret_policy_action(value)?);
+            }
+            "--envelope-ref" => {
+                index += 1;
+                envelope_ref = args.get(index).cloned();
+            }
+            "--note" => {
+                index += 1;
+                note = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown secrets policy add option '{value}'"));
+            }
+            _ => return Err("secrets policy add accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    let action = action.ok_or_else(|| {
+        "secrets policy add requires --action block|template|envelope".to_string()
+    })?;
+    if action == SecretPolicyAction::Envelope && envelope_ref.is_none() {
+        return Err("secrets policy add envelope action requires --envelope-ref <REF>".to_string());
+    }
+    if action != SecretPolicyAction::Envelope && envelope_ref.is_some() {
+        return Err(
+            "secrets policy add accepts --envelope-ref only for envelope action".to_string(),
+        );
+    }
+    if let Some(reference) = &envelope_ref {
+        validate_secret_envelope_reference(reference).map_err(|error| error.to_string())?;
+    }
+    if let Some(note) = &note {
+        validate_non_secret_reference(note, "policy note")?;
+    }
+
+    Ok(SecretPolicyAddArgs {
+        db_path: db_path.ok_or_else(|| "secrets policy add requires --db <DB_PATH>".to_string())?,
+        project_id: project_id
+            .ok_or_else(|| "secrets policy add requires --project <PROJECT_ID>".to_string())?,
+        path: path.ok_or_else(|| "secrets policy add requires --path <REL_PATH>".to_string())?,
+        action,
+        envelope_ref,
+        note,
+    })
+}
+
+fn parse_secret_policy_action(value: &str) -> Result<SecretPolicyAction, String> {
+    match value {
+        "block" => Ok(SecretPolicyAction::Block),
+        "template" => Ok(SecretPolicyAction::Template),
+        "envelope" => Ok(SecretPolicyAction::Envelope),
+        _ => Err("--action requires block, template, or envelope".to_string()),
+    }
+}
+
+fn parse_secret_policy_list_args(args: &[String]) -> Result<SecretPolicyListArgs, String> {
+    let mut db_path = None;
+    let mut project_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--project" => {
+                index += 1;
+                project_id = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown secrets policy list option '{value}'"));
+            }
+            _ => return Err("secrets policy list accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(SecretPolicyListArgs {
+        db_path: db_path
+            .ok_or_else(|| "secrets policy list requires --db <DB_PATH>".to_string())?,
+        project_id,
+    })
+}
+
 fn parse_snapshot_restore_args(args: &[String]) -> Result<SnapshotRestoreArgs, String> {
     let mut db_path = None;
     let mut cache_root = None;
@@ -3863,6 +4125,55 @@ fn mock_credential_fingerprint_reference(lease_id: &str, generation: u64) -> Str
     format!("mock-fingerprint-ref:{lease_id}:generation-{generation}")
 }
 
+fn stable_secret_policy_rule_id(project_id: &str, path: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"devbox-secret-policy-rule-v1\n");
+    hasher.update(project_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(path.as_bytes());
+    format!("secret-policy-b3-{}", hasher.finalize().to_hex())
+}
+
+fn print_secret_policy_rule(rule: &SecretPolicyRuleRecord) {
+    println!("Policy rule id: {}", rule.id);
+    println!("Project id: {}", rule.project_id);
+    println!("Path: {}", path_to_store_string(&rule.path));
+    println!("Action: {}", rule.action.as_str());
+    println!(
+        "Envelope reference: {}",
+        rule.envelope_ref.as_deref().unwrap_or("-")
+    );
+    println!("Note: {}", rule.note.as_deref().unwrap_or("-"));
+    println!("Updated at: {}", rule.updated_at);
+}
+
+fn validate_non_secret_reference(value: &str, field: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if trimmed.contains("-----BEGIN ")
+        || trimmed.to_ascii_lowercase().contains("bearer ")
+        || trimmed
+            .to_ascii_lowercase()
+            .contains("aws_secret_access_key")
+        || [
+            "sk-",
+            "sk_live_",
+            "sk_test_",
+            "ghp_",
+            "github_pat_",
+            "AKIA",
+            "ASIA",
+        ]
+        .iter()
+        .any(|marker| trimmed.contains(marker))
+    {
+        return Err(format!("{field} must not contain secret-looking material"));
+    }
+    Ok(())
+}
+
 fn dev_mock_account_id(value: &str) -> String {
     let suffix = value
         .chars()
@@ -4099,6 +4410,90 @@ fn conflicts_update_status(
     println!("Conflict id: {}", conflict.id);
     println!("Status: {}", conflict.status.as_str());
     println!("Updated at: {}", conflict.updated_at);
+
+    Ok(())
+}
+
+fn conflicts_resolve(args: &ConflictResolveArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if !args.confirm_no_auto_apply {
+        return Err(
+            "conflicts resolve requires --confirm-no-auto-apply after manual review".into(),
+        );
+    }
+
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let existing = store
+        .conflict_with_rows(&args.conflict_id)?
+        .ok_or_else(|| format!("conflict not found: {}", args.conflict_id))?;
+    if existing.conflict.status != ConflictStatus::Open {
+        return Err(format!(
+            "conflict {} is {}; only open conflicts can be manually resolved",
+            existing.conflict.id,
+            existing.conflict.status.as_str()
+        )
+        .into());
+    }
+
+    let updated_at = store.current_timestamp()?;
+    let conflict = store
+        .update_conflict_status(&args.conflict_id, ConflictStatus::Resolved, &updated_at)?
+        .ok_or_else(|| format!("conflict not found: {}", args.conflict_id))?;
+
+    println!("Conflict id: {}", conflict.id);
+    println!("Status: {}", conflict.status.as_str());
+    println!("Manual resolution: {}", args.manual_resolution.as_str());
+    println!("Rows reviewed: {}", existing.rows.len());
+    println!("Updated at: {}", conflict.updated_at);
+    println!("Automatic apply: not performed");
+    println!("Source file contents: not printed");
+
+    Ok(())
+}
+
+fn secret_policy_add(args: &SecretPolicyAddArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let project = store
+        .project(&args.project_id)?
+        .ok_or_else(|| format!("project not found: {}", args.project_id))?;
+    let created_at = store.current_timestamp()?;
+    let id = stable_secret_policy_rule_id(&args.project_id, &args.path);
+    let rule = store.upsert_secret_policy_rule(&NewSecretPolicyRule {
+        id: &id,
+        project_id: &project.id,
+        path: Path::new(&args.path),
+        action: args.action,
+        envelope_ref: args.envelope_ref.as_deref(),
+        note: args.note.as_deref(),
+        created_at: &created_at,
+    })?;
+
+    println!("Secret policy: upserted");
+    print_secret_policy_rule(&rule);
+    println!("Raw secret material: not stored or printed");
+    println!("Boundary: local alpha policy record only; hosted/team policy remains deferred");
+
+    Ok(())
+}
+
+fn secret_policy_list(args: &SecretPolicyListArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let rules = store.list_secret_policy_rules(args.project_id.as_deref())?;
+
+    println!("Project id\tPath\tAction\tEnvelope ref\tNote\tUpdated at");
+    for rule in rules {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            rule.project_id,
+            path_to_store_string(&rule.path),
+            rule.action.as_str(),
+            rule.envelope_ref.as_deref().unwrap_or("-"),
+            rule.note.as_deref().unwrap_or("-"),
+            rule.updated_at
+        );
+    }
 
     Ok(())
 }
@@ -4779,8 +5174,21 @@ fn print_conflicts_usage() {
     );
     eprintln!("  devbox conflicts list --db <DB_PATH> [--project <PROJECT_ID>]");
     eprintln!("  devbox conflicts show --db <DB_PATH> <CONFLICT_ID>");
-    eprintln!("  devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID>");
+    eprintln!(
+        "  devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply"
+    );
     eprintln!("  devbox conflicts dismiss --db <DB_PATH> <CONFLICT_ID>");
+}
+
+fn print_secrets_usage() {
+    eprintln!("Usage:");
+    eprintln!(
+        "  devbox secrets policy add --db <DB_PATH> --project <PROJECT_ID> --path <REL_PATH> --action block|template|envelope [--envelope-ref <REF>] [--note <TEXT>]"
+    );
+    eprintln!("  devbox secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]");
+    eprintln!(
+        "  Secret policy commands are local/no-network alpha records; raw secret material is never accepted as a policy value."
+    );
 }
 
 fn print_devices_usage() {
@@ -4993,6 +5401,7 @@ fn print_help() {
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  changes    Scan, list, and clear the pending local change feed");
     println!("  conflicts  Compare, persist, list, and update divergent snapshot conflicts");
+    println!("  secrets    Manage explicit local secret policy records");
     println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
     println!("  restore    Placeholder for snapshot restore");
     println!("  explain    Placeholder for policy and sync explanations");
@@ -5354,5 +5763,200 @@ mod tests {
             error,
             "sync snapshot accepts --metadata-account/--metadata-project only for import-snapshot or materialize"
         );
+    }
+
+    #[test]
+    fn secret_policy_args_reject_secret_like_envelope_refs() {
+        let raw = ["sk-", "abcdefghijklmnop", "qrstuvwxyzABCDEFGH123456"].concat();
+        let unsafe_ref = format!("secret-envelope-ref:legacy/{raw}");
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--project".to_string(),
+            "project-1".to_string(),
+            "--path".to_string(),
+            ".env".to_string(),
+            "--action".to_string(),
+            "envelope".to_string(),
+            "--envelope-ref".to_string(),
+            unsafe_ref.clone(),
+        ];
+
+        let error =
+            parse_secret_policy_add_args(&args).expect_err("raw secret envelope ref is rejected");
+
+        assert_eq!(
+            error,
+            "secret envelope reference must not contain secret-looking material"
+        );
+        assert!(!error.contains(&raw));
+        assert!(!error.contains(&unsafe_ref));
+
+        let missing_scheme = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--project".to_string(),
+            "project-1".to_string(),
+            "--path".to_string(),
+            ".env".to_string(),
+            "--action".to_string(),
+            "envelope".to_string(),
+            "--envelope-ref".to_string(),
+            "vault:env".to_string(),
+        ];
+        let error =
+            parse_secret_policy_add_args(&missing_scheme).expect_err("opaque scheme is required");
+        assert_eq!(
+            error,
+            "secret envelope reference must use the secret-envelope-ref: opaque scheme"
+        );
+    }
+
+    #[test]
+    fn secret_policy_add_persists_sanitized_alpha_rule() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("devbox.sqlite3");
+        {
+            let store = Store::open_file(&db_path).expect("store opens");
+            store.apply_migrations().expect("migrations apply");
+            store
+                .insert_project(&NewProject {
+                    id: "project-1",
+                    root_path: "/workspace/devbox",
+                    kind: "Rust",
+                    display_name: "devbox",
+                    discovered_at: "2026-06-18T10:00:00Z",
+                })
+                .expect("project inserts");
+        }
+
+        secret_policy_add(&SecretPolicyAddArgs {
+            db_path: db_path.display().to_string(),
+            project_id: "project-1".to_string(),
+            path: ".env.example".to_string(),
+            action: SecretPolicyAction::Template,
+            envelope_ref: None,
+            note: Some("sync variable names only".to_string()),
+        })
+        .expect("template policy adds");
+
+        let store = Store::open_file(&db_path).expect("store reopens");
+        store.apply_migrations().expect("migrations apply");
+        let rules = store
+            .list_secret_policy_rules(Some("project-1"))
+            .expect("rules list");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].action, SecretPolicyAction::Template);
+        assert_eq!(rules[0].envelope_ref, None);
+    }
+
+    #[test]
+    fn conflict_resolve_requires_manual_confirmation_and_open_status() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("devbox.sqlite3");
+        let conflict_id = "conflict-manual";
+        {
+            let mut store = Store::open_file(&db_path).expect("store opens");
+            store.apply_migrations().expect("migrations apply");
+            let include = PolicyDecision::Include;
+            let blob = BlobId::from_blake3_hex(
+                "a3f35a5b6a1d118e4f9f4c23b77d982c84e4c3f4d53172ac89eacd1d29d98f03",
+            )
+            .expect("valid blob id");
+            let readme = Path::new("README.md");
+            let entries = [NewSnapshotManifestEntry {
+                relative_path: readme,
+                kind: ManifestEntryKind::File,
+                size_bytes: 4,
+                blob_id: Some(&blob),
+                object_ref: Some("blobs/b3/readme"),
+                policy_decision: &include,
+            }];
+            store
+                .persist_draft_snapshot(&NewSnapshotDraft {
+                    project: NewProject {
+                        id: "project-1",
+                        root_path: "/workspace/devbox",
+                        kind: "Rust",
+                        display_name: "devbox",
+                        discovered_at: "2026-06-18T10:00:00Z",
+                    },
+                    snapshot: NewSnapshot {
+                        id: "snapshot-local",
+                        project_id: "project-1",
+                        parent_snapshot_id: None,
+                        created_at: "2026-06-18T10:01:00Z",
+                        reason: "manual",
+                        manifest_entry_count: entries.len() as u64,
+                        total_size_bytes: 4,
+                    },
+                    entries: entries.to_vec(),
+                })
+                .expect("local snapshot persists");
+            store
+                .persist_draft_snapshot(&NewSnapshotDraft {
+                    project: NewProject {
+                        id: "project-1",
+                        root_path: "/workspace/devbox",
+                        kind: "Rust",
+                        display_name: "devbox",
+                        discovered_at: "2026-06-18T10:00:00Z",
+                    },
+                    snapshot: NewSnapshot {
+                        id: "snapshot-incoming",
+                        project_id: "project-1",
+                        parent_snapshot_id: None,
+                        created_at: "2026-06-18T10:02:00Z",
+                        reason: "manual",
+                        manifest_entry_count: entries.len() as u64,
+                        total_size_bytes: 4,
+                    },
+                    entries: entries.to_vec(),
+                })
+                .expect("incoming snapshot persists");
+            let summary = devbox_conflict::ConflictSummary::from_rows(&[]);
+            store
+                .persist_conflict(
+                    &NewConflict {
+                        id: conflict_id,
+                        project_id: "project-1",
+                        base_snapshot_id: None,
+                        local_snapshot_id: "snapshot-local",
+                        incoming_snapshot_id: "snapshot-incoming",
+                        summary: &summary,
+                        created_at: "2026-06-18T10:03:00Z",
+                    },
+                    &[],
+                )
+                .expect("conflict persists");
+        }
+
+        let missing_confirmation = conflicts_resolve(&ConflictResolveArgs {
+            db_path: db_path.display().to_string(),
+            conflict_id: conflict_id.to_string(),
+            manual_resolution: ManualConflictResolution::KeepBoth,
+            confirm_no_auto_apply: false,
+        })
+        .expect_err("confirmation is required");
+        assert!(missing_confirmation
+            .to_string()
+            .contains("--confirm-no-auto-apply"));
+
+        conflicts_resolve(&ConflictResolveArgs {
+            db_path: db_path.display().to_string(),
+            conflict_id: conflict_id.to_string(),
+            manual_resolution: ManualConflictResolution::KeepBoth,
+            confirm_no_auto_apply: true,
+        })
+        .expect("manual conflict resolves");
+
+        let already_resolved = conflicts_resolve(&ConflictResolveArgs {
+            db_path: db_path.display().to_string(),
+            conflict_id: conflict_id.to_string(),
+            manual_resolution: ManualConflictResolution::KeepBoth,
+            confirm_no_auto_apply: true,
+        })
+        .expect_err("resolved conflicts cannot be resolved again");
+        assert!(already_resolved.to_string().contains("only open conflicts"));
     }
 }

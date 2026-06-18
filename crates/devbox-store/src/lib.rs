@@ -19,7 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -43,6 +43,7 @@ const SUMMARY_TABLES: &[&str] = &[
     "device_project_cursors",
     "conflicts",
     "conflict_rows",
+    "secret_policy_rules",
     "policies",
     "policy_evaluations",
     "restore_attempts",
@@ -102,6 +103,68 @@ impl From<rusqlite::Error> for StoreError {
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
+
+pub const SECRET_ENVELOPE_REF_PREFIX: &str = "secret-envelope-ref:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretEnvelopeReferenceError {
+    Empty,
+    MissingOpaqueScheme,
+    EmptyOpaqueReference,
+    TooLong,
+    UnsafeCharacter,
+    SecretLookingMaterial,
+}
+
+impl fmt::Display for SecretEnvelopeReferenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("secret envelope reference must not be empty"),
+            Self::MissingOpaqueScheme => write!(
+                f,
+                "secret envelope reference must use the {SECRET_ENVELOPE_REF_PREFIX} opaque scheme"
+            ),
+            Self::EmptyOpaqueReference => {
+                f.write_str("secret envelope reference must include an opaque reference")
+            }
+            Self::TooLong => f.write_str("secret envelope reference is too long"),
+            Self::UnsafeCharacter => {
+                f.write_str("secret envelope reference contains an unsafe character")
+            }
+            Self::SecretLookingMaterial => {
+                f.write_str("secret envelope reference must not contain secret-looking material")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SecretEnvelopeReferenceError {}
+
+pub fn validate_secret_envelope_reference(value: &str) -> Result<(), SecretEnvelopeReferenceError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SecretEnvelopeReferenceError::Empty);
+    }
+    if trimmed != value || trimmed.len() > 512 {
+        return Err(SecretEnvelopeReferenceError::TooLong);
+    }
+    let Some(opaque) = trimmed.strip_prefix(SECRET_ENVELOPE_REF_PREFIX) else {
+        return Err(SecretEnvelopeReferenceError::MissingOpaqueScheme);
+    };
+    if opaque.is_empty() {
+        return Err(SecretEnvelopeReferenceError::EmptyOpaqueReference);
+    }
+    if !opaque.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '/' | ':')
+    }) {
+        return Err(SecretEnvelopeReferenceError::UnsafeCharacter);
+    }
+    if contains_secret_like_material(trimmed) {
+        return Err(SecretEnvelopeReferenceError::SecretLookingMaterial);
+    }
+
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct Store {
@@ -187,6 +250,10 @@ impl Store {
         if version < 9 {
             self.conn
                 .execute_batch(MIGRATION_9_PRODUCTION_PAIRING_RECOVERY_ROTATION)?;
+        }
+
+        if version < 10 {
+            self.conn.execute_batch(MIGRATION_10_SECRET_POLICY_RULES)?;
         }
 
         Ok(())
@@ -2066,6 +2133,102 @@ impl Store {
         self.conflict(id)
     }
 
+    pub fn upsert_secret_policy_rule(
+        &self,
+        rule: &NewSecretPolicyRule<'_>,
+    ) -> StoreResult<SecretPolicyRuleRecord> {
+        validate_secret_policy_envelope(rule.action, rule.envelope_ref)?;
+
+        self.conn.execute(
+            r#"
+            INSERT INTO secret_policy_rules (
+                id,
+                project_id,
+                path,
+                action,
+                envelope_ref,
+                note,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            ON CONFLICT(project_id, path) DO UPDATE SET
+                action = excluded.action,
+                envelope_ref = excluded.envelope_ref,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                rule.id,
+                rule.project_id,
+                path_to_store_string(rule.path),
+                rule.action.as_str(),
+                rule.envelope_ref,
+                rule.note,
+                rule.created_at,
+            ],
+        )?;
+
+        self.secret_policy_rule(rule.project_id, rule.path)?
+            .ok_or_else(|| {
+                StoreError::InvalidMigrationState("secret policy rule was not persisted".into())
+            })
+    }
+
+    pub fn list_secret_policy_rules(
+        &self,
+        project_id: Option<&str>,
+    ) -> StoreResult<Vec<SecretPolicyRuleRecord>> {
+        let mut statement = if project_id.is_some() {
+            self.conn.prepare(
+                r#"
+                SELECT id, project_id, path, action, envelope_ref, note, created_at, updated_at
+                FROM secret_policy_rules
+                WHERE project_id = ?1
+                ORDER BY path ASC, id ASC
+                "#,
+            )?
+        } else {
+            self.conn.prepare(
+                r#"
+                SELECT id, project_id, path, action, envelope_ref, note, created_at, updated_at
+                FROM secret_policy_rules
+                ORDER BY project_id ASC, path ASC, id ASC
+                "#,
+            )?
+        };
+
+        let rows = match project_id {
+            Some(project_id) => statement
+                .query_map(params![project_id], secret_policy_rule_from_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => statement
+                .query_map([], secret_policy_rule_from_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        Ok(rows)
+    }
+
+    pub fn secret_policy_rule(
+        &self,
+        project_id: &str,
+        path: &Path,
+    ) -> StoreResult<Option<SecretPolicyRuleRecord>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT id, project_id, path, action, envelope_ref, note, created_at, updated_at
+                FROM secret_policy_rules
+                WHERE project_id = ?1 AND path = ?2
+                "#,
+                params![project_id, path_to_store_string(path)],
+                secret_policy_rule_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     fn conflict(&self, id: &str) -> StoreResult<Option<ConflictRecord>> {
         self.conn
             .query_row(
@@ -2380,6 +2543,46 @@ impl ConflictStatus {
             Self::Dismissed => "dismissed",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretPolicyAction {
+    Block,
+    Template,
+    Envelope,
+}
+
+impl SecretPolicyAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Template => "template",
+            Self::Envelope => "envelope",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSecretPolicyRule<'a> {
+    pub id: &'a str,
+    pub project_id: &'a str,
+    pub path: &'a Path,
+    pub action: SecretPolicyAction,
+    pub envelope_ref: Option<&'a str>,
+    pub note: Option<&'a str>,
+    pub created_at: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretPolicyRuleRecord {
+    pub id: String,
+    pub project_id: String,
+    pub path: PathBuf,
+    pub action: SecretPolicyAction,
+    pub envelope_ref: Option<String>,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2706,6 +2909,30 @@ fn conflict_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conflic
     })
 }
 
+fn secret_policy_rule_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SecretPolicyRuleRecord> {
+    let action: String = row.get(3)?;
+    let action = secret_policy_action_from_store(&action).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let envelope_ref: Option<String> = row.get(4)?;
+    validate_secret_policy_envelope(action, envelope_ref.as_deref()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+
+    Ok(SecretPolicyRuleRecord {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        path: PathBuf::from(row.get::<_, String>(2)?),
+        action,
+        envelope_ref,
+        note: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
 fn random_prefixed_id(prefix: &str) -> StoreResult<String> {
     let mut bytes = [0_u8; 16];
     getrandom::getrandom(&mut bytes).map_err(|error| {
@@ -2722,6 +2949,24 @@ fn random_key_hex() -> StoreResult<String> {
         ))
     })?;
     Ok(hex_encode(&bytes))
+}
+
+fn contains_secret_like_material(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    value.contains("-----BEGIN ")
+        || lower.contains("bearer ")
+        || lower.contains("aws_secret_access_key")
+        || [
+            "sk-",
+            "sk_live_",
+            "sk_test_",
+            "ghp_",
+            "github_pat_",
+            "AKIA",
+            "ASIA",
+        ]
+        .iter()
+        .any(|marker| value.contains(marker))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -2773,6 +3018,42 @@ fn conflict_status_from_store(value: &str) -> StoreResult<ConflictStatus> {
         "dismissed" => Ok(ConflictStatus::Dismissed),
         _ => Err(StoreError::InvalidConflictStatus(value.to_string())),
     }
+}
+
+fn secret_policy_action_from_store(value: &str) -> StoreResult<SecretPolicyAction> {
+    match value {
+        "block" => Ok(SecretPolicyAction::Block),
+        "template" => Ok(SecretPolicyAction::Template),
+        "envelope" => Ok(SecretPolicyAction::Envelope),
+        _ => Err(StoreError::InvalidStoredValue(format!(
+            "invalid secret policy action: {value}"
+        ))),
+    }
+}
+
+fn validate_secret_policy_envelope(
+    action: SecretPolicyAction,
+    envelope_ref: Option<&str>,
+) -> StoreResult<()> {
+    match (action, envelope_ref) {
+        (SecretPolicyAction::Envelope, Some(reference)) => {
+            validate_secret_envelope_reference(reference)
+                .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        }
+        (SecretPolicyAction::Envelope, None) => {
+            return Err(StoreError::InvalidStoredValue(
+                "secret envelope policy requires an opaque envelope reference".to_string(),
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(StoreError::InvalidStoredValue(
+                "only envelope secret policy rules may store an envelope reference".to_string(),
+            ));
+        }
+        (_, None) => {}
+    }
+
+    Ok(())
 }
 
 fn comparison_state_from_store(value: &str) -> StoreResult<PathComparisonState> {
@@ -3359,6 +3640,44 @@ INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (9, 'production_pairing_recovery_rotation');
 
 PRAGMA user_version = 9;
+
+COMMIT;
+"#;
+
+const MIGRATION_10_SECRET_POLICY_RULES: &str = r#"
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS secret_policy_rules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('block', 'template', 'envelope')),
+    envelope_ref TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (
+            action = 'envelope'
+            AND envelope_ref IS NOT NULL
+            AND envelope_ref LIKE 'secret-envelope-ref:%'
+            AND length(envelope_ref) > length('secret-envelope-ref:')
+        )
+        OR (
+            action IN ('block', 'template')
+            AND envelope_ref IS NULL
+        )
+    ),
+    UNIQUE (project_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_secret_policy_rules_project_path
+    ON secret_policy_rules(project_id, path);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (10, 'secret_policy_rules');
+
+PRAGMA user_version = 10;
 
 COMMIT;
 "#;
@@ -4488,6 +4807,140 @@ mod tests {
             )
             .expect("missing status update is handled")
             .is_none());
+    }
+
+    #[test]
+    fn secret_policy_rules_are_path_scoped_and_upserted_without_plaintext() {
+        let store = migrated_store();
+        store
+            .insert_project(&NewProject {
+                id: "project-1",
+                root_path: "/workspace/devbox",
+                kind: "Rust",
+                display_name: "devbox",
+                discovered_at: "2026-06-18T10:00:00Z",
+            })
+            .expect("project inserts");
+
+        let path = Path::new(".env.example");
+        let envelope = store
+            .upsert_secret_policy_rule(&NewSecretPolicyRule {
+                id: "secret-policy-1",
+                project_id: "project-1",
+                path,
+                action: SecretPolicyAction::Envelope,
+                envelope_ref: Some("secret-envelope-ref:personal/env-example"),
+                note: Some("personal device envelope reference"),
+                created_at: "2026-06-18T10:05:00Z",
+            })
+            .expect("envelope policy persists");
+
+        assert_eq!(envelope.action, SecretPolicyAction::Envelope);
+        assert_eq!(
+            envelope.envelope_ref.as_deref(),
+            Some("secret-envelope-ref:personal/env-example")
+        );
+
+        let rejected = store
+            .upsert_secret_policy_rule(&NewSecretPolicyRule {
+                id: "secret-policy-unsafe",
+                project_id: "project-1",
+                path: Path::new(".env"),
+                action: SecretPolicyAction::Envelope,
+                envelope_ref: Some("vault:raw-ref"),
+                note: None,
+                created_at: "2026-06-18T10:05:30Z",
+            })
+            .expect_err("unsafe envelope reference is rejected before persistence");
+        assert_eq!(
+            rejected.to_string(),
+            "secret envelope reference must use the secret-envelope-ref: opaque scheme"
+        );
+
+        let template = store
+            .upsert_secret_policy_rule(&NewSecretPolicyRule {
+                id: "secret-policy-1",
+                project_id: "project-1",
+                path,
+                action: SecretPolicyAction::Template,
+                envelope_ref: None,
+                note: Some("template only"),
+                created_at: "2026-06-18T10:06:00Z",
+            })
+            .expect("template policy updates same path");
+
+        assert_eq!(template.action, SecretPolicyAction::Template);
+        assert_eq!(template.envelope_ref, None);
+        assert_eq!(
+            store
+                .list_secret_policy_rules(Some("project-1"))
+                .expect("rules list")
+                .len(),
+            1
+        );
+
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "secret_policy_rules"), 1);
+    }
+
+    #[test]
+    fn unsafe_persisted_secret_policy_envelope_refs_fail_closed_without_echoing_value() {
+        let store = migrated_store();
+        store
+            .insert_project(&NewProject {
+                id: "project-1",
+                root_path: "/workspace/devbox",
+                kind: "Rust",
+                display_name: "devbox",
+                discovered_at: "2026-06-18T10:00:00Z",
+            })
+            .expect("project inserts");
+        let raw_secret = ["sk-", "abcdefghijklmnop", "qrstuvwxyzABCDEFGH123456"].concat();
+        let unsafe_ref = format!("secret-envelope-ref:legacy/{raw_secret}");
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO secret_policy_rules (
+                    id,
+                    project_id,
+                    path,
+                    action,
+                    envelope_ref,
+                    note,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    'secret-policy-legacy-unsafe',
+                    'project-1',
+                    '.env',
+                    'envelope',
+                    ?1,
+                    NULL,
+                    '2026-06-18T10:05:00Z',
+                    '2026-06-18T10:05:00Z'
+                )
+                "#,
+                params![unsafe_ref],
+            )
+            .expect("legacy unsafe row can exist under broad DB shape");
+
+        let list_error = store
+            .list_secret_policy_rules(Some("project-1"))
+            .expect_err("unsafe persisted envelope ref fails closed");
+        let list_error = list_error.to_string();
+        assert!(list_error.contains("secret envelope reference"));
+        assert!(!list_error.contains(&raw_secret));
+        assert!(!list_error.contains(&unsafe_ref));
+
+        let detail_error = store
+            .secret_policy_rule("project-1", Path::new(".env"))
+            .expect_err("unsafe detail read fails closed");
+        let detail_error = detail_error.to_string();
+        assert!(detail_error.contains("secret envelope reference"));
+        assert!(!detail_error.contains(&raw_secret));
+        assert!(!detail_error.contains(&unsafe_ref));
     }
 
     #[test]

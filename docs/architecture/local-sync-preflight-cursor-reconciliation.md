@@ -12,8 +12,10 @@ The implementation is local-first:
 - `devbox-store` still owns local SQLite cursors, snapshots, conflicts, and conflict rows.
 - `devbox-cli` exposes a scriptable `devbox sync preflight` command.
 
-It does not add production auth, managed R2/S3 credential provisioning, Electron UI, automatic
-merge/apply resolution, Git replacement UX, or a hosted conflict service. A hosted metadata API
+It does not add production auth, managed R2/S3 credential provisioning, automatic merge/apply
+resolution, Git replacement UX, or a hosted conflict service. The Electron alpha shell can now show
+fixture-backed conflict state and CLI command hints, while real daemon IPC remains a later
+integration point. A hosted metadata API
 foundation now models server-side compare-and-set cursors, and the opt-in mock-dev sync wiring can
 use that hosted cursor CAS. The preflight comparison and conflict records remain local.
 
@@ -79,3 +81,11 @@ project id, base/local/incoming snapshot ids, conflict id when blocked, and summ
 
 Blocked `sync preflight`, `sync import-snapshot`, and `sync materialize` exit non-zero after
 printing the preflight block. They do not attempt automatic merge or resolution.
+
+Open conflict records can be manually marked resolved only with:
+
+```text
+devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply
+```
+
+That command records the user's manual path and does not apply workspace changes.

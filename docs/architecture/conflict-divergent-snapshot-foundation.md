@@ -9,11 +9,12 @@ The foundation is local-first and metadata-only:
 
 - `devbox-conflict` owns deterministic comparison semantics over snapshot manifest metadata.
 - `devbox-store` owns SQLite conflict records and comparison rows.
-- `devbox-cli` exposes manual/scriptable conflict commands.
+- `devbox-cli` exposes manual/scriptable conflict commands and guarded manual resolution records.
 
 It does not implement production auth, hosted conflict metadata, server-side cursors, R2/S3,
-Electron conflict UI, automatic merge, Git replacement UX, or materialization into non-empty
-targets.
+automatic merge, Git replacement UX, or materialization into non-empty targets. The private-alpha
+Electron shell can display conflict records and manual CLI paths, but real daemon-driven conflict UI
+and automatic resolution remain deferred.
 
 ## Comparison Semantics
 
@@ -64,7 +65,9 @@ Creation is idempotent for the same project/base/local/incoming tuple. The stabl
 that tuple, and the SQLite schema also enforces tuple uniqueness. Re-running compare returns the
 existing record and does not duplicate rows.
 
-Status transitions are intentionally small: `open`, `resolved`, and `dismissed`.
+Status transitions are intentionally small: `open`, `resolved`, and `dismissed`. Marking a conflict
+resolved requires a manual-resolution mode plus an explicit `--confirm-no-auto-apply` acknowledgement.
+Devbox does not merge or apply file bytes as part of that status transition.
 
 ## CLI Surface
 
@@ -72,12 +75,22 @@ Status transitions are intentionally small: `open`, `resolved`, and `dismissed`.
 devbox conflicts compare --db <DB_PATH> --local <LOCAL_SNAPSHOT_ID> --incoming <INCOMING_SNAPSHOT_ID> [--base <BASE_SNAPSHOT_ID>]
 devbox conflicts list --db <DB_PATH> [--project <PROJECT_ID>]
 devbox conflicts show --db <DB_PATH> <CONFLICT_ID>
-devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID>
+devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply
 devbox conflicts dismiss --db <DB_PATH> <CONFLICT_ID>
 ```
 
 The output is plain text and tabular so future daemon/sync code can call the same model before
 refusing unsafe overwrites.
+
+Manual resolution options are records of what the user did outside automatic apply semantics:
+
+- `keep-local`
+- `keep-incoming`
+- `keep-both`
+- `exported`
+
+Normal output prints snapshot ids, paths, row counts, and redacted policy reasons only. It does not
+print source file contents or secret material.
 
 `devbox sync preflight` and the local/mock import/materialize path now call this model when the
 receiving device cursor and local snapshot diverge from an incoming snapshot. Blocked preflight
@@ -89,7 +102,6 @@ sync operation, and leaves the cursor unchanged.
 Remaining work includes:
 
 - merge planning and apply semantics
-- user-facing conflict UI
 - hosted conflict metadata and cross-device conflict service
 - richer Git-aware compare views
-- explicit secret allow/template/envelope policies
+- automatic conflict resolution

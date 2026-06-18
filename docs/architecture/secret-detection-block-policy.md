@@ -15,11 +15,16 @@ It does not implement:
 - live OAuth/OIDC cloud authentication
 - hosted metadata enforcement
 - managed R2/S3 credential provisioning or hosted object indexing
-- encrypted personal/team secret envelopes
-- an override UI
+- encrypted personal/team secret envelope payload storage
 
-Future explicit allow policy must be path-scoped and deliberate. Until that exists, detected secrets
-are represented as blocked/deferred manifest policy entries.
+Explicit alpha policy is path-scoped and deliberate. Detected secrets are still blocked by default
+before blob-cache writes. Local policy records let the alpha UI and CLI distinguish:
+
+- `block`: keep blocking a detected path and require user action.
+- `template`: intentionally sync only template/example shape later; raw detected bytes are not made
+  uploadable by this alpha record.
+- `envelope`: point at an opaque encrypted envelope reference with the `secret-envelope-ref:` scheme;
+  the reference is metadata, not envelope plaintext.
 
 ## Detector Rules
 
@@ -73,3 +78,16 @@ file on another local/mock device.
 
 `snapshot show`, restore, import, and materialize keep using manifest policy decisions, so blocked
 entries remain visible as deferred/skipped policy entries without exposing raw secret values.
+
+Explicit alpha policy records are managed with:
+
+```text
+devbox secrets policy add --db <DB_PATH> --project <PROJECT_ID> --path <REL_PATH> --action block|template|envelope [--envelope-ref <REF>] [--note <TEXT>]
+devbox secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]
+```
+
+The CLI and store reject secret-looking envelope references or notes. Envelope references must use
+the `secret-envelope-ref:` opaque scheme, and store reads fail closed for unsafe legacy values rather
+than returning them to list/detail output. Normal output prints only rule ids, project ids, paths,
+actions, safe opaque envelope refs, notes, and timestamps. These commands are local/no-network
+records for the private alpha; hosted/team policy enforcement remains deferred.

@@ -67,8 +67,9 @@
             <h3>CLI and Minimal UI</h3>
             <ul class="checklist">
               <li>`devbox init`, `devices`, `sync`, `pause`, `restore`.</li>
-              <li>Minimal Electron shell for onboarding and status.</li>
+              <li>Minimal Electron shell for alpha onboarding and status.</li>
               <li>Tray state: idle, syncing, paused, warning.</li>
+              <li>Fixture-backed no-network control surface for projects, conflicts, devices, secrets, and settings.</li>
               <li>Support bundle without source content by default.</li>
             </ul>
           </article>
@@ -76,7 +77,7 @@
             <h3>Safety</h3>
             <ul class="checklist">
               <li>Local high-confidence secret blocking before uploadable blobs.</li>
-              <li>Explicit secret allow/template/envelope policy remains deferred.</li>
+              <li>Explicit local secret block/template/envelope-reference policy records.</li>
               <li>Git verification after materialization.</li>
               <li>Atomic writes with rollback.</li>
               <li>Manual pause and project exclusion.</li>
@@ -104,7 +105,8 @@
           <li>Local high-confidence secret detection blocks detected files before blob-cache writes and uploadable local/mock sync blobs.</li>
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
           <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
-          <li>Live OAuth/login integration, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, conflict UI, Electron UI, and deployment hardening remain later Phase 1 work.</li>
+          <li>No-network Electron alpha shell, explicit path-scoped secret policy records, and guarded manual conflict resolution records are now in place.</li>
+          <li>Live OAuth/login integration, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
         </ul>
       </section>
 
