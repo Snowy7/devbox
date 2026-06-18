@@ -47,7 +47,7 @@
             <h3>Sync Backend</h3>
             <ul class="checklist">
               <li>Rust API with device pairing and auth.</li>
-              <li>Postgres metadata for accounts, devices, projects, manifests, and cursors.</li>
+              <li>Hosted metadata API foundation for accounts, devices, projects, published manifests, and compare-and-set cursors. SQLite-backed dev/test storage is complete; Postgres remains the production boundary.</li>
               <li>R2 blob backend behind a provider interface.</li>
               <li>Encrypted immutable blob upload and download. Local filesystem and S3-compatible R2/S3/MinIO provider foundations are complete; managed cloud credentials are deferred.</li>
             </ul>
@@ -93,12 +93,13 @@
           <li>The account/device model remains multi-device-capable even though one installation has one current local device.</li>
           <li>Encrypted blob upload and download work through a local filesystem remote provider without cloud credentials.</li>
           <li>S3-compatible encrypted blob transport can target Cloudflare R2, AWS S3, or MinIO with redacted environment-based credential configuration.</li>
+          <li>Hosted metadata API/store/handler foundations model accounts, devices, projects, published snapshot manifests, and server-side compare-and-set device/project cursors.</li>
           <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
           <li>Local/mock second-device materialization now proves encrypted publish/import, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret detection blocks detected files before blob-cache writes and uploadable local/mock sync blobs.</li>
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
           <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
-          <li>Production cloud authentication, hosted metadata, managed object-storage credential provisioning, production pairing UX, automatic merge/apply resolution, and conflict UI remain later Phase 1 work.</li>
+          <li>Production cloud authentication, managed object-storage credential provisioning, production pairing UX, hosted metadata sync-flow wiring, automatic merge/apply resolution, and conflict UI remain later Phase 1 work.</li>
         </ul>
       </section>
 

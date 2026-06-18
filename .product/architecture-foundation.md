@@ -69,6 +69,9 @@ Current Phase 1 foundation status:
 - encrypted immutable blob upload/download works through a local filesystem provider
 - S3-compatible encrypted blob transport can target Cloudflare R2, AWS S3, or MinIO with redacted
   env-based credential configuration
+- hosted metadata API/store/handler foundations model accounts, devices, projects, published
+  snapshot manifests, and server-side device/project cursors with compare-and-set updates using
+  SQLite for dev/tests
 - local/mock auth session, pairing invitation approval, key envelopes, device revocation, and
   device/project cursor primitives exist in SQLite
 - local/mock second-device materialization can publish/import an encrypted snapshot bundle through a
@@ -80,9 +83,9 @@ Current Phase 1 foundation status:
 - local sync preflight reconciles receiving device/project cursors with local and incoming
   snapshots, refuses divergent local/mock import or materialization, and persists readable conflict
   records without advancing the cursor
-- real cloud authentication, hosted metadata, managed object-storage credential provisioning,
-  production pairing UX, explicit secret allow policy, automatic merge/apply resolution, and
-  conflict UI remain later Phase 1 work
+- real cloud authentication, managed object-storage credential provisioning, wiring local sync flows
+  to hosted metadata, production pairing UX, explicit secret allow policy, automatic merge/apply
+  resolution, and conflict UI remain later Phase 1 work
 
 ## Content Addressing
 

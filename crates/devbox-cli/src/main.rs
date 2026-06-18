@@ -13,6 +13,7 @@ use devbox_materialize::{
     MaterializationRequest, MaterializeError, PublishSnapshotRequest, SyncPreflightOutcome,
     SyncPreflightRequest,
 };
+use devbox_metadata::{MetadataAuthMode, MetadataServiceConfig};
 use devbox_snapshot::{
     is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
     LocalChangeFeedScanOptions, RestoreMaterializer, RestorePlan, RestoreSkippedEntry,
@@ -46,6 +47,7 @@ fn main() -> ExitCode {
         Some("init") => run_init(&args[1..]),
         Some("auth") => run_auth(&args[1..]),
         Some("devices") => run_devices(&args[1..]),
+        Some("metadata") => run_metadata(&args[1..]),
         Some("sync") => run_sync(&args[1..]),
         Some("conflicts") => run_conflicts(&args[1..]),
         Some("status") => run_status(&args[1..]),
@@ -385,6 +387,12 @@ struct SyncCursorArgs {
     value: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataCheckArgs {
+    endpoint: String,
+    auth_mode: MetadataAuthMode,
+}
+
 fn run_init(args: &[String]) -> ExitCode {
     match parse_init_args(args)
         .and_then(|args| init_identity(&args).map_err(|error| error.to_string()))
@@ -487,6 +495,26 @@ fn run_devices(args: &[String]) -> ExitCode {
                 "  devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>"
             );
             eprintln!("  devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_metadata(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("check") => match parse_metadata_check_args(&args[1..])
+            .and_then(|args| metadata_check(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_metadata_usage();
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("devbox: metadata requires check");
+            print_metadata_usage();
             ExitCode::from(2)
         }
     }
@@ -1034,6 +1062,42 @@ fn parse_sync_remote_check_args(args: &[String]) -> Result<SyncRemoteCheckArgs, 
     Ok(SyncRemoteCheckArgs {
         remote: finalize_sync_remote(remote, "sync remote check")?,
         validate_only,
+    })
+}
+
+fn parse_metadata_check_args(args: &[String]) -> Result<MetadataCheckArgs, String> {
+    let mut endpoint = None;
+    let mut auth_mode = MetadataAuthMode::MockDevHeaders;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--endpoint" => {
+                index += 1;
+                endpoint = args.get(index).cloned();
+            }
+            "--auth-mode" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--auth-mode requires mock-dev-headers".to_string())?;
+                auth_mode = match value.as_str() {
+                    "mock-dev-headers" => MetadataAuthMode::MockDevHeaders,
+                    _ => return Err("--auth-mode requires mock-dev-headers".to_string()),
+                };
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown metadata check option '{value}'"));
+            }
+            _ => return Err("metadata check accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(MetadataCheckArgs {
+        endpoint: endpoint.ok_or_else(|| "metadata check requires --endpoint <URL>".to_string())?,
+        auth_mode,
     })
 }
 
@@ -2236,6 +2300,26 @@ fn sync_cursor_set(args: &SyncCursorArgs) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+fn metadata_check(args: &MetadataCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let check = MetadataServiceConfig {
+        endpoint: args.endpoint.clone(),
+        auth_mode: args.auth_mode,
+    }
+    .validate()?;
+
+    println!("Metadata service check");
+    println!("Endpoint: {}", check.endpoint);
+    println!("Auth mode: mock-dev-headers");
+    println!("Required headers: x-devbox-mock-account-id, x-devbox-mock-device-id");
+    println!("Network check: {}", check.network_check);
+    println!("Production ready: {}", check.production_ready);
+    println!(
+        "Boundary: local tests/dev only; production OAuth and managed credentials are deferred"
+    );
+
+    Ok(())
+}
+
 fn sync_object_key(
     blob_id: &BlobId,
     explicit_key: Option<&str>,
@@ -3175,6 +3259,11 @@ fn print_sync_usage() {
     );
 }
 
+fn print_metadata_usage() {
+    eprintln!("Usage:");
+    eprintln!("  devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]");
+}
+
 fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::error::Error>> {
     let path = Path::new(db_path);
     if !path.is_file() {
@@ -3296,6 +3385,7 @@ fn print_help() {
     println!("  init       Initialize local account and current-device identity");
     println!("  auth       Manage local/mock auth session status");
     println!("  devices    List, invite, approve, and revoke local/mock trusted devices");
+    println!("  metadata   Validate hosted metadata service config without a network request");
     println!("  sync       Upload/download encrypted blobs and manage local cursors");
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  changes    Scan, list, and clear the pending local change feed");
@@ -3370,5 +3460,33 @@ mod tests {
         preflight_db_path(&db_path, &root).expect("outside db path is accepted");
 
         assert!(!db_path.exists());
+    }
+
+    #[test]
+    fn metadata_check_args_default_to_mock_dev_headers() {
+        let args = vec![
+            "--endpoint".to_string(),
+            "http://127.0.0.1:8787".to_string(),
+        ];
+
+        let parsed = parse_metadata_check_args(&args).expect("metadata check args parse");
+
+        assert_eq!(parsed.endpoint, "http://127.0.0.1:8787");
+        assert_eq!(parsed.auth_mode, MetadataAuthMode::MockDevHeaders);
+    }
+
+    #[test]
+    fn metadata_check_rejects_secret_like_endpoint_material() {
+        let args = MetadataCheckArgs {
+            endpoint: "https://metadata.example/sync-key/raw".to_string(),
+            auth_mode: MetadataAuthMode::MockDevHeaders,
+        };
+
+        let error = metadata_check(&args).expect_err("secret-like config is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "metadata endpoint must not contain secret-looking material"
+        );
     }
 }
