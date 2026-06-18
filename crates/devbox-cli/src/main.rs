@@ -1,8 +1,9 @@
 use devbox_auth::{
     approve_pairing_invitation, create_account_ownership_proof, create_account_session,
-    create_pairing_invitation, mock_login, now_unix_seconds, revoke_account_session,
-    validate_account_session, AccountOwnershipProofInput, DeviceProjectCursor, DeviceTrustRecord,
-    LocalIdentityView, PairingInvitationToken,
+    create_device_rotation_intent, create_pairing_invitation, create_recovery_grant, mock_login,
+    now_unix_seconds, revoke_account_session, validate_account_session, AccountOwnershipProofInput,
+    DeviceProjectCursor, DeviceRotationIntent, DeviceRotationIntentInput, DeviceTrustRecord,
+    LocalIdentityView, PairingInvitationToken, RecoveryGrant,
 };
 use devbox_conflict::{
     compare_snapshots, path_to_conflict_string, ComparableEntry, ComparableSnapshot,
@@ -356,6 +357,42 @@ struct DeviceRevokeArgs {
     reason: Option<String>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct DeviceRecoveryGrantArgs {
+    db_path: String,
+    device_id: String,
+    recovery_ref: String,
+    audit_label: String,
+    ttl_seconds: i64,
+}
+
+impl std::fmt::Debug for DeviceRecoveryGrantArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceRecoveryGrantArgs")
+            .field("db_path", &self.db_path)
+            .field("device_id", &self.device_id)
+            .field("recovery_ref", &"<redacted>")
+            .field("audit_label", &self.audit_label)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceRecoveryRevokeArgs {
+    db_path: String,
+    grant_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceRotateEnvelopeArgs {
+    db_path: String,
+    device_id: String,
+    reason: String,
+    session_id: Option<String>,
+    ttl_seconds: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SyncBlobArgs {
     db_path: String,
@@ -693,15 +730,46 @@ fn run_devices(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("recovery") => match args.get(1).map(String::as_str) {
+            Some("create") => match parse_device_recovery_grant_args(&args[2..]).and_then(|args| {
+                devices_recovery_grant_create(&args).map_err(|error| error.to_string())
+            }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_devices_usage();
+                    ExitCode::from(1)
+                }
+            },
+            Some("revoke") => match parse_device_recovery_revoke_args(&args[2..]).and_then(|args| {
+                devices_recovery_grant_revoke(&args).map_err(|error| error.to_string())
+            }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_devices_usage();
+                    ExitCode::from(1)
+                }
+            },
+            _ => {
+                eprintln!("devbox: devices recovery requires create or revoke");
+                print_devices_usage();
+                ExitCode::from(2)
+            }
+        },
+        Some("rotate-key-envelope") => match parse_device_rotate_envelope_args(&args[1..])
+            .and_then(|args| devices_rotate_key_envelope(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                print_devices_usage();
+                ExitCode::from(1)
+            }
+        },
         _ => {
-            eprintln!("devbox: devices requires list, invite, approve, or revoke");
-            eprintln!("Usage:");
-            eprintln!("  devbox devices list --db <DB_PATH>");
-            eprintln!("  devbox devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]");
-            eprintln!(
-                "  devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>"
-            );
-            eprintln!("  devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]");
+            eprintln!("devbox: devices requires list, invite, approve, revoke, recovery, or rotate-key-envelope");
+            print_devices_usage();
             ExitCode::from(2)
         }
     }
@@ -1251,6 +1319,146 @@ fn parse_device_revoke_args(args: &[String]) -> Result<DeviceRevokeArgs, String>
     })
 }
 
+fn parse_device_recovery_grant_args(args: &[String]) -> Result<DeviceRecoveryGrantArgs, String> {
+    let mut db_path = None;
+    let mut device_id = None;
+    let mut recovery_ref = None;
+    let mut audit_label = "recovery grant".to_string();
+    let mut ttl_seconds = 600_i64;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--device" => {
+                index += 1;
+                device_id = args.get(index).cloned();
+            }
+            "--recovery-ref" => {
+                index += 1;
+                recovery_ref = args.get(index).cloned();
+            }
+            "--audit-label" => {
+                index += 1;
+                audit_label = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "--audit-label requires text".to_string())?;
+            }
+            "--ttl-seconds" => {
+                index += 1;
+                ttl_seconds = parse_positive_i64(args.get(index), "--ttl-seconds")?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices recovery create option '{value}'"));
+            }
+            _ => return Err("devices recovery create accepts only flags".to_string()),
+        }
+        index += 1;
+    }
+
+    Ok(DeviceRecoveryGrantArgs {
+        db_path: db_path
+            .ok_or_else(|| "devices recovery create requires --db <DB_PATH>".to_string())?,
+        device_id: device_id
+            .ok_or_else(|| "devices recovery create requires --device <DEVICE_ID>".to_string())?,
+        recovery_ref: recovery_ref.ok_or_else(|| {
+            "devices recovery create requires --recovery-ref <REDACTED_REF>".to_string()
+        })?,
+        audit_label,
+        ttl_seconds,
+    })
+}
+
+fn parse_device_recovery_revoke_args(args: &[String]) -> Result<DeviceRecoveryRevokeArgs, String> {
+    let mut db_path = None;
+    let mut grant_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices recovery revoke option '{value}'"));
+            }
+            value => {
+                if grant_id.replace(value.to_string()).is_some() {
+                    return Err("devices recovery revoke accepts exactly one grant id".to_string());
+                }
+            }
+        }
+        index += 1;
+    }
+
+    Ok(DeviceRecoveryRevokeArgs {
+        db_path: db_path
+            .ok_or_else(|| "devices recovery revoke requires --db <DB_PATH>".to_string())?,
+        grant_id: grant_id
+            .ok_or_else(|| "devices recovery revoke requires a grant id".to_string())?,
+    })
+}
+
+fn parse_device_rotate_envelope_args(args: &[String]) -> Result<DeviceRotateEnvelopeArgs, String> {
+    let mut db_path = None;
+    let mut device_id = None;
+    let mut reason = "recovery rotation".to_string();
+    let mut session_id = None;
+    let mut ttl_seconds = 600_i64;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--device" => {
+                index += 1;
+                device_id = args.get(index).cloned();
+            }
+            "--reason" => {
+                index += 1;
+                reason = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "--reason requires text".to_string())?;
+            }
+            "--session-id" => {
+                index += 1;
+                session_id = args.get(index).cloned();
+            }
+            "--ttl-seconds" => {
+                index += 1;
+                ttl_seconds = parse_positive_i64(args.get(index), "--ttl-seconds")?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown devices rotate-key-envelope option '{value}'"
+                ));
+            }
+            _ => return Err("devices rotate-key-envelope accepts only flags".to_string()),
+        }
+        index += 1;
+    }
+
+    Ok(DeviceRotateEnvelopeArgs {
+        db_path: db_path
+            .ok_or_else(|| "devices rotate-key-envelope requires --db <DB_PATH>".to_string())?,
+        device_id: device_id.ok_or_else(|| {
+            "devices rotate-key-envelope requires --device <DEVICE_ID>".to_string()
+        })?,
+        reason,
+        session_id,
+        ttl_seconds,
+    })
+}
+
 fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
     let mut db_path = None;
     let mut cache_root = None;
@@ -1518,12 +1726,17 @@ fn parse_metadata_check_args(args: &[String]) -> Result<MetadataCheckArgs, Strin
             }
             "--auth-mode" => {
                 index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "--auth-mode requires mock-dev-headers".to_string())?;
+                let value = args.get(index).ok_or_else(|| {
+                    "--auth-mode requires mock-dev-headers or account-session".to_string()
+                })?;
                 auth_mode = match value.as_str() {
                     "mock-dev-headers" => MetadataAuthMode::MockDevHeaders,
-                    _ => return Err("--auth-mode requires mock-dev-headers".to_string()),
+                    "account-session" => MetadataAuthMode::AccountSession,
+                    _ => {
+                        return Err(
+                            "--auth-mode requires mock-dev-headers or account-session".to_string()
+                        )
+                    }
                 };
             }
             value if value.starts_with('-') => {
@@ -2766,6 +2979,131 @@ fn devices_revoke(args: &DeviceRevokeArgs) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+fn devices_recovery_grant_create(
+    args: &DeviceRecoveryGrantArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let device = store
+        .device_trust(&args.device_id)?
+        .ok_or_else(|| format!("device not found: {}", args.device_id))?;
+    let now = store.current_timestamp()?;
+    let now_unix = now_unix_seconds();
+    let grant = create_recovery_grant(
+        &device.account_id,
+        &device.device_id,
+        &args.recovery_ref,
+        &args.audit_label,
+        &now,
+        now_unix,
+        args.ttl_seconds,
+    )?;
+    store.upsert_recovery_grant(&grant)?;
+
+    println!("Recovery grant: created");
+    print_recovery_grant(&grant);
+    println!("Recovery secret/code plaintext: not printed");
+    println!("Boundary: production-shaped no-network recovery primitive; UI remains deferred");
+
+    Ok(())
+}
+
+fn devices_recovery_grant_revoke(
+    args: &DeviceRecoveryRevokeArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let revoked_at = store.current_timestamp()?;
+    let grant = store.revoke_recovery_grant(&args.grant_id, &revoked_at)?;
+
+    println!("Recovery grant: revoked");
+    print_recovery_grant(&grant);
+    println!("Revocation idempotent: true");
+
+    Ok(())
+}
+
+fn devices_rotate_key_envelope(
+    args: &DeviceRotateEnvelopeArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let current = store
+        .key_envelope_for_device(&args.device_id)?
+        .ok_or_else(|| format!("key envelope not found for device: {}", args.device_id))?;
+    let now = store.current_timestamp()?;
+    let intent = create_device_rotation_intent(DeviceRotationIntentInput {
+        account_id: &identity.account_id,
+        device_id: &args.device_id,
+        requested_by_session_id: args.session_id.as_deref(),
+        reason: &args.reason,
+        created_at: &now,
+        now_unix: now_unix_seconds(),
+        ttl_seconds: args.ttl_seconds,
+        current_generation: current.rotation_generation,
+    })?;
+    store.upsert_device_rotation_intent(&intent)?;
+    let (completed, envelope) = store.rotate_key_envelope_for_device(
+        &intent,
+        &identity.sync_key_hex,
+        &now,
+        now_unix_seconds(),
+    )?;
+
+    println!("Device key-envelope rotation: completed");
+    print_device_rotation_intent(&completed);
+    println!("Key envelope id: {}", envelope.id);
+    println!("Key envelope generation: {}", envelope.rotation_generation);
+    println!("Key envelope plaintext: not printed");
+    println!("Device key material: not printed");
+    println!("Boundary: production-shaped no-network rotation primitive; UI remains deferred");
+
+    Ok(())
+}
+
+fn print_recovery_grant(grant: &RecoveryGrant) {
+    println!("Grant id: {}", grant.id);
+    println!("Account id: {}", grant.account_id);
+    println!("Device id: {}", grant.device_id);
+    println!("Grant reference: {}", grant.grant_ref);
+    println!("Status: {}", grant.status);
+    println!("Expires at unix: {}", grant.expires_at_unix);
+    println!(
+        "Consumed at: {}",
+        grant.consumed_at.as_deref().unwrap_or("-")
+    );
+    println!("Revoked at: {}", grant.revoked_at.as_deref().unwrap_or("-"));
+    println!("Audit label: {}", grant.audit_label);
+}
+
+fn print_device_rotation_intent(intent: &DeviceRotationIntent) {
+    println!("Rotation intent id: {}", intent.id);
+    println!("Account id: {}", intent.account_id);
+    println!("Device id: {}", intent.device_id);
+    println!(
+        "Requested by session id: {}",
+        intent.requested_by_session_id.as_deref().unwrap_or("-")
+    );
+    println!("Status: {}", intent.status);
+    println!("Reason: {}", intent.reason);
+    println!("Expires at unix: {}", intent.expires_at_unix);
+    println!(
+        "Completed at: {}",
+        intent.completed_at.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Revoked at: {}",
+        intent.revoked_at.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Key envelope generation: {}",
+        intent.key_envelope_generation
+    );
+}
+
 #[derive(Debug, Clone)]
 enum RemoteProviderDescription {
     Local { root: PathBuf },
@@ -3314,12 +3652,21 @@ fn metadata_check(args: &MetadataCheckArgs) -> Result<(), Box<dyn std::error::Er
 
     println!("Metadata service check");
     println!("Endpoint (sanitized): {}", check.endpoint);
-    println!("Auth mode: mock-dev-headers");
-    println!("Required headers: x-devbox-mock-account-id, x-devbox-mock-device-id");
+    match check.auth_mode {
+        MetadataAuthMode::MockDevHeaders => {
+            println!("Auth mode: mock-dev-headers");
+            println!("Required headers: x-devbox-mock-account-id, x-devbox-mock-device-id");
+        }
+        MetadataAuthMode::AccountSession => {
+            println!("Auth mode: account-session");
+            println!("Required header: Authorization: Bearer <session-token>");
+            println!("Session token: not printed");
+        }
+    }
     println!("Network check: {}", check.network_check);
     println!("Production ready: {}", check.production_ready);
     println!(
-        "Boundary: local tests/dev only; production OAuth and managed credentials are deferred"
+        "Boundary: production-shaped service trust only; live OAuth, managed provider provisioning, deployment hardening, and UI are deferred"
     );
 
     Ok(())
@@ -4436,6 +4783,21 @@ fn print_conflicts_usage() {
     eprintln!("  devbox conflicts dismiss --db <DB_PATH> <CONFLICT_ID>");
 }
 
+fn print_devices_usage() {
+    eprintln!("Usage:");
+    eprintln!("  devbox devices list --db <DB_PATH>");
+    eprintln!("  devbox devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]");
+    eprintln!("  devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>");
+    eprintln!("  devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]");
+    eprintln!(
+        "  devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF> [--audit-label <TEXT>] [--ttl-seconds <SECONDS>]"
+    );
+    eprintln!("  devbox devices recovery revoke --db <DB_PATH> <GRANT_ID>");
+    eprintln!(
+        "  devbox devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID> [--session-id <SESSION_ID>] [--reason <TEXT>] [--ttl-seconds <SECONDS>]"
+    );
+}
+
 fn print_sync_usage() {
     eprintln!("Usage:");
     eprintln!(
@@ -4485,7 +4847,9 @@ fn print_sync_usage() {
 
 fn print_metadata_usage() {
     eprintln!("Usage:");
-    eprintln!("  devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]");
+    eprintln!(
+        "  devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]"
+    );
     eprintln!(
         "  devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET> [--provider-kind r2|s3|minio-compatible] [--region <REGION>] [--prefix <PREFIX>] [--capabilities read,write,list,head] [--ttl-seconds <SECONDS>]"
     );
@@ -4712,6 +5076,15 @@ mod tests {
 
         assert_eq!(parsed.endpoint, "http://127.0.0.1:8787");
         assert_eq!(parsed.auth_mode, MetadataAuthMode::MockDevHeaders);
+
+        let session_args = vec![
+            "--endpoint".to_string(),
+            "http://127.0.0.1:8787".to_string(),
+            "--auth-mode".to_string(),
+            "account-session".to_string(),
+        ];
+        let parsed = parse_metadata_check_args(&session_args).expect("session auth args parse");
+        assert_eq!(parsed.auth_mode, MetadataAuthMode::AccountSession);
     }
 
     #[test]
@@ -4776,6 +5149,78 @@ mod tests {
         let formatted = format!("{proof_check:?}");
         assert!(!formatted.contains("raw-token"));
         assert!(formatted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn device_recovery_and_rotation_smoke_commands_are_sanitized() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("devbox.sqlite3");
+        let raw_recovery_secret = "raw-recovery-secret-should-not-print";
+        let approved_device_id;
+
+        {
+            let mut store = Store::open_file(&db_path).expect("store opens");
+            store.apply_migrations().expect("migrations apply");
+            let identity = store
+                .ensure_local_identity(&EnsureLocalIdentityOptions {
+                    device_name: Some("Current machine"),
+                })
+                .expect("identity initializes");
+            let view = identity_view(&identity);
+            let draft = create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
+                .expect("invitation creates");
+            store
+                .insert_pairing_invitation(&draft.invitation)
+                .expect("invitation persists");
+            let approval = approve_pairing_invitation(
+                &view,
+                &draft.invitation,
+                &draft.token,
+                "Laptop",
+                "2026-06-18T10:01:00Z",
+                101,
+            )
+            .expect("approval creates");
+            approved_device_id = approval.device.device_id.clone();
+            store
+                .persist_pairing_approval(&approval)
+                .expect("approval persists");
+        }
+
+        let rejected = devices_recovery_grant_create(&DeviceRecoveryGrantArgs {
+            db_path: db_path.display().to_string(),
+            device_id: approved_device_id.clone(),
+            recovery_ref: raw_recovery_secret.to_string(),
+            audit_label: "laptop recovery".to_string(),
+            ttl_seconds: 600,
+        })
+        .expect_err("raw recovery secret is rejected");
+        assert!(!rejected.to_string().contains(raw_recovery_secret));
+
+        devices_recovery_grant_create(&DeviceRecoveryGrantArgs {
+            db_path: db_path.display().to_string(),
+            device_id: approved_device_id.clone(),
+            recovery_ref: "recovery-ref:laptop:alpha".to_string(),
+            audit_label: "laptop recovery".to_string(),
+            ttl_seconds: 600,
+        })
+        .expect("redacted recovery grant creates");
+        devices_rotate_key_envelope(&DeviceRotateEnvelopeArgs {
+            db_path: db_path.display().to_string(),
+            device_id: approved_device_id.clone(),
+            reason: "recovery rotation".to_string(),
+            session_id: None,
+            ttl_seconds: 600,
+        })
+        .expect("key envelope rotates");
+
+        let store = Store::open_file(&db_path).expect("store reopens");
+        store.apply_migrations().expect("migrations apply");
+        let envelope = store
+            .key_envelope_for_device(&approved_device_id)
+            .expect("envelope reads")
+            .expect("envelope exists");
+        assert_eq!(envelope.rotation_generation, 1);
     }
 
     #[test]

@@ -7,6 +7,8 @@ This slice adds the next Phase 1 trust foundation after local identity and encry
 - approved-device trust records
 - encrypted account key envelopes for approved devices
 - revocation markers
+- production-shaped recovery grant references
+- device rotation intents and key-envelope rotation generation
 - device/project cursor records
 - scriptable CLI smoke commands
 
@@ -20,7 +22,9 @@ R2/S3 credential provisioning, or second-device project materialization. A later
 foundation now models server-side device/project cursors separately, but this local/mock auth
 boundary remains non-production. A later production-shaped account proof/session foundation now
 models provider subject/email/domain proof, token-hash sessions, expiration, and revocation, but it
-still does not add live OAuth login.
+still does not add live OAuth login. A later service-trust slice now adds account-session hosted
+metadata request auth plus no-network production-shaped recovery/rotation primitives, but it still
+does not add Electron pairing UX, live provider recovery, or live OAuth.
 
 A mock auth session proves that local account ownership state can be represented and queried. It is
 not a cloud session and must not be treated as durable proof outside the local metadata boundary.
@@ -33,6 +37,9 @@ not a cloud session and must not be treated as durable proof outside the local m
 - reject malformed, expired, reused, or account-mismatched invitations
 - approve many devices for one account
 - create encrypted key envelopes for approved devices
+- create redacted recovery grant references with expiry and revocation
+- create/complete/revoke device rotation intents
+- rotate key envelopes by generation without printing key plaintext
 - reject repeated revocation
 - model local/mock auth sessions and device/project cursors
 
@@ -58,6 +65,12 @@ Schema version `6` adds a unique invitation claim index so a pairing invitation 
 one trusted device. `Store::persist_pairing_approval` also claims invitations with
 `WHERE status = 'pending'` inside the approval transaction.
 
+Schema version `9` adds recovery grants, device rotation intents, and key-envelope rotation
+generation. Recovery grants store redacted references only, not recovery code plaintext. Rotation
+updates the encrypted key envelope for an approved device and records the completed generation.
+Recovery consumption is pending-only, consumed grants reject later revoke/consume attempts, and
+rotation completion claims a persisted pending intent by expiry and key-envelope generation.
+
 ## CLI Smoke Path
 
 The manual path is:
@@ -70,6 +83,9 @@ devbox devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]
 devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>
 devbox devices list --db <DB_PATH>
 devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]
+devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF>
+devbox devices recovery revoke --db <DB_PATH> <GRANT_ID>
+devbox devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>
 devbox sync cursor set --db <DB_PATH> --project <PROJECT_ID> --value <CURSOR>
 devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID>
 ```
@@ -86,8 +102,7 @@ record and do not advance the cursor.
 Remaining Phase 1 work includes:
 
 - live OAuth/OIDC account ownership verification and hosted login UI
-- production hosted auth integration for the metadata API
 - live cloud object storage credential provisioning
-- production pairing UX and recovery
+- production pairing/recovery UI and live recovery-secret exchange
 - production second-device project materialization UX
 - automatic conflict merge/apply resolution and user-facing conflict flows

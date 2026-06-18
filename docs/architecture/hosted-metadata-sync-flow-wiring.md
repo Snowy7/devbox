@@ -23,9 +23,10 @@ That account/project scope lets the receiver discover the manifest object key fr
 by `(account_id, project_id, snapshot_id)` before decrypting the encrypted bundle. In the current
 mock-dev CLI path, `--mock-key-source-db <PUBLISHER_DB>` can provide the publisher account id for
 the same local trust bootstrap that provides the decryption key. The default path remains local/mock
-only and still derives the manifest object key locally. Production-shaped account/session proof
-primitives now exist for future hosted authentication, but this sync wiring still does not enforce a
-live OAuth-backed account session. Managed object credential lease records now provide a future path
+only and still derives the manifest object key locally. Hosted metadata handlers now support
+production-shaped account-session bearer auth, but these local sync commands still use the
+in-process mock-dev SQLite metadata mode and do not perform live OAuth-backed network auth. Managed
+object credential lease records now provide a future path
 for resolving redacted hosted R2/S3/MinIO provider configuration by authenticated
 account/session/project scope, but sync commands do not yet fetch live managed cloud credentials.
 

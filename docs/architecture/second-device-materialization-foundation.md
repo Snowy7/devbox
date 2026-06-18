@@ -122,7 +122,7 @@ Remaining Phase 1 work includes:
 
 - live OAuth/OIDC account ownership verification and production key exchange
 - managed R2/S3 credential provisioning, rotation, and hosted object indexing
-- production pairing UX, recovery, and rotation
+- production pairing/recovery UX and live recovery/rotation exchange
 - automatic conflict merge/apply resolution and user-facing conflict flows
 - minimal tray/Electron continuation UI
 - explicit path-scoped secret allow/template/envelope policy

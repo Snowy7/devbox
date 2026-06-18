@@ -71,7 +71,7 @@ Remaining Phase 1 work still includes:
 - live OAuth/OIDC sign-in and hosted account proof verification
 - live Cloudflare/AWS/MinIO credential provisioning APIs
 - production deployment hardening and abuse protection
-- production pairing UX, recovery, and credential recovery flows
+- production pairing/recovery UX and live credential recovery flows
 - Electron onboarding/status UI
 - billing and storage limits
 - automatic conflict merge/apply resolution

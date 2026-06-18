@@ -59,9 +59,13 @@ Completed foundations:
 - production-shaped account ownership proof and account session primitives with provider
   subject/email/domain proof, token-hash sessions, expiration, revocation, and no-network CLI/dev
   persistence
+- authenticated hosted metadata request context with explicit mock-dev header mode for tests/dev
+  and production-shaped account-session bearer auth resolved through the hosted session store
 - managed object credential lease foundation for account/session/project-scoped R2/S3/MinIO-shaped
   provider references, capabilities, expiration, revocation, rotation generation, and no-network
   mock/dev CLI smoke checks
+- production-shaped pairing recovery and rotation primitives, including recovery grant references,
+  revocation, device rotation intents, and key-envelope rotation generation
 - local/mock second-device materialization through an encrypted local filesystem remote, including
   publish/import, deferred materialize cursor commit, and safe restore-engine apply
 - local high-confidence secret detection and block-by-default policy before snapshot blobs become
@@ -75,9 +79,9 @@ Completed foundations:
 Remaining auth and pairing work:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
-- production pairing UX, recovery, and rotation flows
+- production pairing UX and live recovery/rotation user flows
 - live managed cloud object credential provisioning against Cloudflare/AWS/MinIO APIs
-- production hosted metadata service integration beyond the in-process mock-dev test boundary
+- production hosted metadata deployment hardening beyond the no-network SQLite/dev boundary
 - production deployment hardening
 - Electron UI integration
 - explicit path-scoped secret allow/template/envelope policy

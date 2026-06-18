@@ -26,6 +26,7 @@ use url::Url;
 
 const MOCK_ACCOUNT_HEADER: &str = "x-devbox-mock-account-id";
 const MOCK_DEVICE_HEADER: &str = "x-devbox-mock-device-id";
+const AUTHORIZATION_HEADER: &str = "authorization";
 const SECRET_MARKERS: &[&str] = &[
     "sync_key",
     "sync-key",
@@ -128,6 +129,7 @@ impl MetadataError {
             }
             Self::Sqlite(_) => "metadata storage error".to_string(),
             Self::PoisonedStore => "metadata storage error".to_string(),
+            Self::InvalidAccountSession(_) => "account session authentication failed".to_string(),
             _ => self.to_string(),
         }
     }
@@ -455,6 +457,7 @@ pub struct MetadataServiceConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum MetadataAuthMode {
     MockDevHeaders,
+    AccountSession,
 }
 
 impl MetadataServiceConfig {
@@ -1962,27 +1965,29 @@ async fn health() -> Json<HealthResponse> {
 async fn upsert_device<S>(
     State(store): State<SharedMetadataStore<S>>,
     headers: HeaderMap,
-    Json(request): Json<UpsertDeviceRequest>,
+    Json(mut request): Json<UpsertDeviceRequest>,
 ) -> MetadataResult<Json<DeviceRecord>>
 where
     S: MetadataStore,
 {
-    authorize(&headers, &request.account_id, &request.device_id)?;
     let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store)?;
+    request.account_id = account_scope_for_request(&context, &request.account_id)?;
+    authorize_request_device(&context, &request.device_id)?;
     Ok(Json(store.upsert_device(request)?))
 }
 
 async fn upsert_project<S>(
     State(store): State<SharedMetadataStore<S>>,
     headers: HeaderMap,
-    Json(request): Json<UpsertProjectRequest>,
+    Json(mut request): Json<UpsertProjectRequest>,
 ) -> MetadataResult<Json<ProjectRecord>>
 where
     S: MetadataStore,
 {
-    let identity = MockDevIdentity::from_headers(&headers)?;
-    authorize_identity(&identity, &request.account_id, &identity.device_id)?;
     let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store)?;
+    request.account_id = account_scope_for_request(&context, &request.account_id)?;
     Ok(Json(store.upsert_project(request)?))
 }
 
@@ -1990,7 +1995,7 @@ async fn publish_snapshot<S>(
     State(store): State<SharedMetadataStore<S>>,
     headers: HeaderMap,
     Path(project_id): Path<String>,
-    Json(request): Json<PublishSnapshotRequest>,
+    Json(mut request): Json<PublishSnapshotRequest>,
 ) -> MetadataResult<Json<PublishedSnapshotRecord>>
 where
     S: MetadataStore,
@@ -2000,12 +2005,10 @@ where
             "snapshot path and body project must match".to_string(),
         ));
     }
-    authorize(
-        &headers,
-        &request.account_id,
-        &request.published_by_device_id,
-    )?;
     let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store)?;
+    request.account_id = account_scope_for_request(&context, &request.account_id)?;
+    authorize_request_device(&context, &request.published_by_device_id)?;
     Ok(Json(store.publish_snapshot(request)?))
 }
 
@@ -2017,10 +2020,10 @@ async fn get_snapshot<S>(
 where
     S: MetadataStore,
 {
-    let identity = MockDevIdentity::from_headers(&headers)?;
     let store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store)?;
     let record = store
-        .snapshot(&identity.account_id, &project_id, &snapshot_id)?
+        .snapshot(context.account_id(), &project_id, &snapshot_id)?
         .ok_or_else(|| MetadataError::NotFound {
             entity: "snapshot",
             id: snapshot_id,
@@ -2036,12 +2039,12 @@ async fn get_cursor<S>(
 where
     S: MetadataStore,
 {
-    let identity = MockDevIdentity::from_headers(&headers)?;
-    authorize_identity(&identity, &identity.account_id, &device_id)?;
     let store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
-    let record = store.cursor(&identity.account_id, &device_id, &project_id)?;
+    let context = request_context(&headers, &*store)?;
+    authorize_request_device(&context, &device_id)?;
+    let record = store.cursor(context.account_id(), &device_id, &project_id)?;
     Ok(Json(record.unwrap_or(DeviceProjectCursorRecord {
-        account_id: identity.account_id,
+        account_id: context.account_id().to_string(),
         device_id,
         project_id,
         cursor_value: None,
@@ -2053,35 +2056,97 @@ async fn update_cursor<S>(
     State(store): State<SharedMetadataStore<S>>,
     headers: HeaderMap,
     Path((project_id, device_id)): Path<(String, String)>,
-    Json(request): Json<UpdateCursorRequest>,
+    Json(mut request): Json<UpdateCursorRequest>,
 ) -> MetadataResult<Json<DeviceProjectCursorRecord>>
 where
     S: MetadataStore,
 {
-    authorize(&headers, &request.account_id, &request.device_id)?;
     if request.project_id != project_id || request.device_id != device_id {
         return Err(MetadataError::InvalidRequest(
             "cursor path and body identity must match".to_string(),
         ));
     }
     let mut store = store.lock().map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store)?;
+    authorize_request_device(&context, &device_id)?;
+    request.account_id = account_scope_for_request(&context, &request.account_id)?;
     Ok(Json(store.compare_and_set_cursor(request)?))
 }
 
-fn authorize(headers: &HeaderMap, account_id: &str, device_id: &str) -> MetadataResult<()> {
-    let identity = MockDevIdentity::from_headers(headers)?;
-    authorize_identity(&identity, account_id, device_id)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostedMetadataRequestContext {
+    MockDev(MockDevIdentity),
+    AccountSession(AuthenticatedAccountSession),
 }
 
-fn authorize_identity(
-    identity: &MockDevIdentity,
-    account_id: &str,
+impl HostedMetadataRequestContext {
+    pub fn account_id(&self) -> &str {
+        match self {
+            Self::MockDev(identity) => &identity.account_id,
+            Self::AccountSession(session) => &session.account_id,
+        }
+    }
+}
+
+fn request_context<S: MetadataStore>(
+    headers: &HeaderMap,
+    store: &S,
+) -> MetadataResult<HostedMetadataRequestContext> {
+    if let Some(raw_token) = bearer_session_token(headers)? {
+        let context =
+            authenticate_account_session(store, &raw_token, devbox_auth::now_unix_seconds())?;
+        return Ok(HostedMetadataRequestContext::AccountSession(context));
+    }
+
+    MockDevIdentity::from_headers(headers).map(HostedMetadataRequestContext::MockDev)
+}
+
+fn authorize_request_device(
+    context: &HostedMetadataRequestContext,
     device_id: &str,
 ) -> MetadataResult<()> {
-    if identity.account_id != account_id || identity.device_id != device_id {
-        return Err(MetadataError::IdentityMismatch);
+    if let HostedMetadataRequestContext::MockDev(identity) = context {
+        if identity.device_id != device_id {
+            return Err(MetadataError::IdentityMismatch);
+        }
     }
     Ok(())
+}
+
+fn account_scope_for_request(
+    context: &HostedMetadataRequestContext,
+    request_account_id: &str,
+) -> MetadataResult<String> {
+    match context {
+        HostedMetadataRequestContext::MockDev(identity) => {
+            if identity.account_id != request_account_id {
+                return Err(MetadataError::IdentityMismatch);
+            }
+            Ok(identity.account_id.clone())
+        }
+        HostedMetadataRequestContext::AccountSession(session) => Ok(session.account_id.clone()),
+    }
+}
+
+fn bearer_session_token(headers: &HeaderMap) -> MetadataResult<Option<String>> {
+    let Some(value) = headers
+        .get(AUTHORIZATION_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    let Some(token) = trimmed.strip_prefix("Bearer ") else {
+        return Err(MetadataError::InvalidAccountSession(
+            "authorization header must use bearer session auth".to_string(),
+        ));
+    };
+    if token.trim().is_empty() {
+        return Err(MetadataError::InvalidAccountSession(
+            "authorization bearer session token is empty".to_string(),
+        ));
+    }
+    Ok(Some(token.trim().to_string()))
 }
 
 pub fn authenticate_account_session<S: MetadataStore>(
@@ -3361,6 +3426,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handlers_accept_account_session_auth_and_scope_account_from_session() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session(&mut store, raw_token);
+        let app = app(store);
+
+        let device = app
+            .clone()
+            .oneshot(session_json_request(
+                Method::PUT,
+                "/v1/devices",
+                &UpsertDeviceRequest {
+                    account_id: "account-attacker".to_string(),
+                    ..device_request()
+                },
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(device.status(), StatusCode::OK);
+        let body = response_text(device).await;
+        assert!(body.contains(ACCOUNT));
+        assert!(!body.contains("account-attacker"));
+
+        let project = app
+            .clone()
+            .oneshot(session_json_request(
+                Method::PUT,
+                "/v1/projects",
+                &UpsertProjectRequest {
+                    account_id: "account-attacker".to_string(),
+                    ..project_request()
+                },
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(project.status(), StatusCode::OK);
+
+        let publish = app
+            .clone()
+            .oneshot(session_json_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/snapshots",
+                &PublishSnapshotRequest {
+                    account_id: "account-attacker".to_string(),
+                    ..publish_request()
+                },
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(publish.status(), StatusCode::OK);
+
+        let fetched = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/projects/project-devbox/snapshots/snapshot-a")
+                    .header("authorization", format!("Bearer {raw_token}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response returns");
+        assert_eq!(fetched.status(), StatusCode::OK);
+
+        let cursor = app
+            .oneshot(session_json_request(
+                Method::PUT,
+                "/v1/cursors/project-devbox/device-laptop",
+                &UpdateCursorRequest {
+                    account_id: "account-attacker".to_string(),
+                    device_id: DEVICE.to_string(),
+                    project_id: PROJECT.to_string(),
+                    expected_cursor: None,
+                    next_cursor: Some("snapshot-a".to_string()),
+                    updated_at: "2026-06-18T10:04:00Z".to_string(),
+                },
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(cursor.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handlers_reject_expired_and_revoked_sessions_without_reflecting_token_or_hash() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session(&mut store, raw_token);
+        let session_hash = hash_session_token_hex(raw_token);
+        let session_id = store
+            .account_session_by_hash(&session_hash)
+            .expect("hash lookup works")
+            .expect("session exists")
+            .session_id;
+        store
+            .revoke_account_session(&session_id, "2026-06-18T10:02:00Z")
+            .expect("session revokes");
+        let router = app(store);
+
+        let response = router
+            .oneshot(session_json_request(
+                Method::PUT,
+                "/v1/projects",
+                &project_request(),
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_text(response).await;
+        assert_eq!(
+            body,
+            "{\"error\":\"account session authentication failed\"}"
+        );
+        assert!(!body.contains(raw_token));
+        assert!(!body.contains(&session_hash));
+        assert!(!body.contains(&session_id));
+
+        let mut expired_store = InMemoryMetadataStore::default();
+        seed_verified_account_session_with_ttl(&mut expired_store, raw_token, 1);
+        let expired_app = app(expired_store);
+        let expired = expired_app
+            .oneshot(session_json_request(
+                Method::PUT,
+                "/v1/projects",
+                &project_request(),
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+        let body = response_text(expired).await;
+        assert_eq!(
+            body,
+            "{\"error\":\"account session authentication failed\"}"
+        );
+        assert!(!body.contains(raw_token));
+        assert!(!body.contains(&session_hash));
+    }
+
+    #[tokio::test]
     async fn sqlite_handlers_return_sanitized_4xx_for_out_of_order_calls() {
         let app = app(SqliteMetadataStore::open_in_memory().expect("sqlite store opens"));
 
@@ -3477,6 +3688,16 @@ mod tests {
 
         assert_eq!(check.network_check, "skipped");
         assert!(!check.production_ready);
+
+        let session_check = MetadataServiceConfig {
+            endpoint: "http://127.0.0.1:8787".to_string(),
+            auth_mode: MetadataAuthMode::AccountSession,
+        }
+        .validate()
+        .expect("session auth config validates");
+        assert_eq!(session_check.auth_mode, MetadataAuthMode::AccountSession);
+        assert_eq!(session_check.network_check, "skipped");
+        assert!(!session_check.production_ready);
     }
 
     #[test]
@@ -3808,6 +4029,22 @@ mod tests {
 
     fn seed_verified_account_session_and_project<S: MetadataStore>(store: &mut S) -> &'static str {
         let raw_token = "raw-hosted-session-token";
+        seed_verified_account_session(store, raw_token);
+        store
+            .upsert_project(project_request())
+            .expect("project upserts");
+        raw_token
+    }
+
+    fn seed_verified_account_session<S: MetadataStore>(store: &mut S, raw_token: &str) {
+        seed_verified_account_session_with_ttl(store, raw_token, 4_000_000_000);
+    }
+
+    fn seed_verified_account_session_with_ttl<S: MetadataStore>(
+        store: &mut S,
+        raw_token: &str,
+        ttl_seconds: i64,
+    ) {
         let proof = account_proof();
         store
             .upsert_account_ownership_proof(proof.clone())
@@ -3817,16 +4054,12 @@ mod tests {
             raw_token,
             "2026-06-18T10:01:00Z",
             101,
-            2_000,
+            ttl_seconds,
         )
         .expect("session creates");
         store
             .upsert_account_session(session)
             .expect("session upserts");
-        store
-            .upsert_project(project_request())
-            .expect("project upserts");
-        raw_token
     }
 
     fn managed_lease_request() -> ManagedObjectCredentialLeaseRequest {
@@ -3924,6 +4157,21 @@ mod tests {
                 .header(MOCK_DEVICE_HEADER, DEVICE);
         }
         builder
+            .body(Body::from(serde_json::to_vec(body).expect("json encodes")))
+            .expect("request builds")
+    }
+
+    fn session_json_request<T: Serialize>(
+        method: Method,
+        uri: &str,
+        body: &T,
+        raw_token: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {raw_token}"))
             .body(Body::from(serde_json::to_vec(body).expect("json encodes")))
             .expect("request builds")
     }

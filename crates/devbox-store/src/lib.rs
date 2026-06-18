@@ -5,9 +5,13 @@ mod blob_cache;
 pub use blob_cache::{BlobCache, BlobCacheError, BlobCacheResult, BlobRef};
 
 use devbox_auth::{
-    hash_session_token_hex, now_unix_seconds, revoke_trusted_device,
+    complete_device_rotation_intent, consume_recovery_grant as auth_consume_recovery_grant,
+    create_key_envelope, hash_session_token_hex, now_unix_seconds,
+    revoke_device_rotation_intent as auth_revoke_device_rotation_intent,
+    revoke_recovery_grant as auth_revoke_recovery_grant, revoke_trusted_device,
     validate_account_ownership_proof, AccountOwnershipProof, AccountSession, AuthSession,
-    DeviceProjectCursor, DeviceTrustRecord, KeyEnvelope, PairingApproval, PairingInvitation,
+    DeviceProjectCursor, DeviceRotationIntent, DeviceTrustRecord, KeyEnvelope, PairingApproval,
+    PairingInvitation, RecoveryGrant,
 };
 use devbox_conflict::{ConflictSummary, PathComparisonState};
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision, ProjectId};
@@ -15,7 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -33,6 +37,8 @@ const SUMMARY_TABLES: &[&str] = &[
     "pairing_invitations",
     "trusted_devices",
     "key_envelopes",
+    "recovery_grants",
+    "device_rotation_intents",
     "revocation_markers",
     "device_project_cursors",
     "conflicts",
@@ -176,6 +182,11 @@ impl Store {
         if version < 8 {
             self.conn
                 .execute_batch(MIGRATION_8_PRODUCTION_ACCOUNT_AUTH_BOUNDARY)?;
+        }
+
+        if version < 9 {
+            self.conn
+                .execute_batch(MIGRATION_9_PRODUCTION_PAIRING_RECOVERY_ROTATION)?;
         }
 
         Ok(())
@@ -818,9 +829,10 @@ impl Store {
                 device_id,
                 key_ref,
                 ciphertext_hex,
-                created_at
+                created_at,
+                rotation_generation
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             params![
                 approval.envelope.id,
@@ -829,6 +841,7 @@ impl Store {
                 approval.envelope.key_ref,
                 approval.envelope.ciphertext_hex,
                 approval.envelope.created_at,
+                approval.envelope.rotation_generation,
             ],
         )?;
         let claimed = tx.execute(
@@ -881,7 +894,8 @@ impl Store {
                     device_id,
                     key_ref,
                     ciphertext_hex,
-                    created_at
+                    created_at,
+                    rotation_generation
                 FROM key_envelopes
                 WHERE device_id = ?1
                 ORDER BY created_at DESC, id ASC
@@ -896,6 +910,7 @@ impl Store {
                         key_ref: row.get(3)?,
                         ciphertext_hex: row.get(4)?,
                         created_at: row.get(5)?,
+                        rotation_generation: row.get::<_, i64>(6)? as u64,
                     })
                 },
             )
@@ -991,6 +1006,377 @@ impl Store {
         self.device_trust(device_id)?.ok_or_else(|| {
             StoreError::InvalidMigrationState("revoked device disappeared".to_string())
         })
+    }
+
+    pub fn upsert_recovery_grant(&self, grant: &RecoveryGrant) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO recovery_grants (
+                id,
+                account_id,
+                device_id,
+                grant_ref,
+                status,
+                created_at,
+                expires_at_unix,
+                consumed_at,
+                revoked_at,
+                audit_label
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                consumed_at = excluded.consumed_at,
+                revoked_at = excluded.revoked_at
+            "#,
+            params![
+                grant.id,
+                grant.account_id,
+                grant.device_id,
+                grant.grant_ref,
+                grant.status,
+                grant.created_at,
+                grant.expires_at_unix,
+                grant.consumed_at,
+                grant.revoked_at,
+                grant.audit_label,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn recovery_grant(&self, grant_id: &str) -> StoreResult<Option<RecoveryGrant>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    account_id,
+                    device_id,
+                    grant_ref,
+                    status,
+                    created_at,
+                    expires_at_unix,
+                    consumed_at,
+                    revoked_at,
+                    audit_label
+                FROM recovery_grants
+                WHERE id = ?1
+                "#,
+                params![grant_id],
+                recovery_grant_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn revoke_recovery_grant(
+        &self,
+        grant_id: &str,
+        revoked_at: &str,
+    ) -> StoreResult<RecoveryGrant> {
+        let grant = self.recovery_grant(grant_id)?.ok_or_else(|| {
+            StoreError::InvalidStoredValue(format!("recovery grant not found: {grant_id}"))
+        })?;
+        let revoked = auth_revoke_recovery_grant(&grant, revoked_at)
+            .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        self.upsert_recovery_grant(&revoked)?;
+        Ok(revoked)
+    }
+
+    pub fn consume_recovery_grant(
+        &self,
+        grant_id: &str,
+        consumed_at: &str,
+        now_unix: i64,
+    ) -> StoreResult<RecoveryGrant> {
+        let grant = self.recovery_grant(grant_id)?.ok_or_else(|| {
+            StoreError::InvalidStoredValue(format!("recovery grant not found: {grant_id}"))
+        })?;
+        let consumed = auth_consume_recovery_grant(&grant, consumed_at, now_unix)
+            .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        let updated = self.conn.execute(
+            r#"
+            UPDATE recovery_grants
+            SET status = 'consumed',
+                consumed_at = ?2
+            WHERE id = ?1
+                AND status = 'pending'
+                AND consumed_at IS NULL
+                AND revoked_at IS NULL
+                AND expires_at_unix > ?3
+            "#,
+            params![grant_id, consumed_at, now_unix],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::InvalidStoredValue(
+                "recovery grant was not pending for consumption".to_string(),
+            ));
+        }
+        Ok(consumed)
+    }
+
+    pub fn upsert_device_rotation_intent(&self, intent: &DeviceRotationIntent) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO device_rotation_intents (
+                id,
+                account_id,
+                device_id,
+                requested_by_session_id,
+                status,
+                reason,
+                created_at,
+                expires_at_unix,
+                completed_at,
+                revoked_at,
+                key_envelope_generation
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                completed_at = excluded.completed_at,
+                revoked_at = excluded.revoked_at,
+                key_envelope_generation = excluded.key_envelope_generation
+            "#,
+            params![
+                intent.id,
+                intent.account_id,
+                intent.device_id,
+                intent.requested_by_session_id,
+                intent.status,
+                intent.reason,
+                intent.created_at,
+                intent.expires_at_unix,
+                intent.completed_at,
+                intent.revoked_at,
+                intent.key_envelope_generation as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn device_rotation_intent(
+        &self,
+        intent_id: &str,
+    ) -> StoreResult<Option<DeviceRotationIntent>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    account_id,
+                    device_id,
+                    requested_by_session_id,
+                    status,
+                    reason,
+                    created_at,
+                    expires_at_unix,
+                    completed_at,
+                    revoked_at,
+                    key_envelope_generation
+                FROM device_rotation_intents
+                WHERE id = ?1
+                "#,
+                params![intent_id],
+                device_rotation_intent_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn revoke_device_rotation_intent(
+        &self,
+        intent_id: &str,
+        revoked_at: &str,
+    ) -> StoreResult<DeviceRotationIntent> {
+        let intent = self.device_rotation_intent(intent_id)?.ok_or_else(|| {
+            StoreError::InvalidStoredValue(format!("device rotation intent not found: {intent_id}"))
+        })?;
+        let revoked = auth_revoke_device_rotation_intent(&intent, revoked_at)
+            .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        self.upsert_device_rotation_intent(&revoked)?;
+        Ok(revoked)
+    }
+
+    pub fn rotate_key_envelope_for_device(
+        &mut self,
+        intent: &DeviceRotationIntent,
+        sync_key_hex: &str,
+        rotated_at: &str,
+        now_unix: i64,
+    ) -> StoreResult<(DeviceRotationIntent, KeyEnvelope)> {
+        let tx = self.conn.transaction()?;
+        let stored_intent = tx
+            .query_row(
+                r#"
+                SELECT
+                    id,
+                    account_id,
+                    device_id,
+                    requested_by_session_id,
+                    status,
+                    reason,
+                    created_at,
+                    expires_at_unix,
+                    completed_at,
+                    revoked_at,
+                    key_envelope_generation
+                FROM device_rotation_intents
+                WHERE id = ?1
+                "#,
+                params![intent.id],
+                device_rotation_intent_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidStoredValue(format!(
+                    "device rotation intent not found: {}",
+                    intent.id
+                ))
+            })?;
+        if stored_intent.account_id != intent.account_id
+            || stored_intent.device_id != intent.device_id
+            || stored_intent.key_envelope_generation != intent.key_envelope_generation
+        {
+            return Err(StoreError::InvalidStoredValue(
+                "device rotation intent does not match stored pending intent".to_string(),
+            ));
+        }
+        if stored_intent.status != "pending" {
+            return Err(StoreError::InvalidStoredValue(format!(
+                "device rotation intent {} is not pending; current status is {}",
+                stored_intent.id, stored_intent.status
+            )));
+        }
+
+        let (existing, device_key_hex) = tx
+            .query_row(
+                r#"
+                SELECT
+                    e.id,
+                    e.account_id,
+                    e.device_id,
+                    e.key_ref,
+                    e.ciphertext_hex,
+                    e.created_at,
+                    e.rotation_generation,
+                    d.device_key_hex
+                FROM key_envelopes e
+                JOIN local_devices d
+                    ON d.id = e.device_id
+                    AND d.account_id = e.account_id
+                WHERE e.account_id = ?1 AND e.device_id = ?2
+                ORDER BY e.created_at DESC, e.id ASC
+                LIMIT 1
+                "#,
+                params![stored_intent.account_id, stored_intent.device_id],
+                |row| {
+                    Ok((
+                        KeyEnvelope {
+                            id: row.get(0)?,
+                            account_id: row.get(1)?,
+                            device_id: row.get(2)?,
+                            key_ref: row.get(3)?,
+                            ciphertext_hex: row.get(4)?,
+                            created_at: row.get(5)?,
+                            rotation_generation: row.get::<_, i64>(6)? as u64,
+                        },
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidStoredValue(format!(
+                    "key envelope not found for device: {}",
+                    stored_intent.device_id
+                ))
+            })?;
+        if existing.rotation_generation != stored_intent.key_envelope_generation {
+            return Err(StoreError::InvalidStoredValue(
+                "device rotation intent generation is stale".to_string(),
+            ));
+        }
+
+        let mut rotated = create_key_envelope(
+            &stored_intent.account_id,
+            &stored_intent.device_id,
+            &device_key_hex,
+            sync_key_hex,
+            rotated_at,
+        )
+        .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        rotated.id = existing.id;
+        rotated.key_ref = existing.key_ref;
+        rotated.rotation_generation = existing.rotation_generation + 1;
+        let completed = complete_device_rotation_intent(
+            &stored_intent,
+            rotated_at,
+            now_unix,
+            rotated.rotation_generation,
+        )
+        .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+
+        let claimed = tx.execute(
+            r#"
+            UPDATE device_rotation_intents
+            SET status = ?1,
+                completed_at = ?2,
+                key_envelope_generation = ?3
+            WHERE id = ?4
+                AND account_id = ?5
+                AND device_id = ?6
+                AND status = 'pending'
+                AND key_envelope_generation = ?7
+                AND expires_at_unix > ?8
+            "#,
+            params![
+                completed.status,
+                completed.completed_at,
+                completed.key_envelope_generation as i64,
+                completed.id,
+                completed.account_id,
+                completed.device_id,
+                existing.rotation_generation as i64,
+                now_unix,
+            ],
+        )?;
+        if claimed != 1 {
+            return Err(StoreError::InvalidStoredValue(
+                "device rotation intent was not claimed for completion".to_string(),
+            ));
+        }
+
+        let updated_envelope = tx.execute(
+            r#"
+            UPDATE key_envelopes
+            SET ciphertext_hex = ?1,
+                created_at = ?2,
+                rotation_generation = ?3
+            WHERE id = ?4
+                AND account_id = ?5
+                AND device_id = ?6
+                AND rotation_generation = ?7
+            "#,
+            params![
+                rotated.ciphertext_hex,
+                rotated.created_at,
+                rotated.rotation_generation as i64,
+                rotated.id,
+                rotated.account_id,
+                rotated.device_id,
+                existing.rotation_generation as i64,
+            ],
+        )?;
+        if updated_envelope != 1 {
+            return Err(StoreError::InvalidStoredValue(
+                "key envelope generation changed before rotation commit".to_string(),
+            ));
+        }
+        tx.commit()?;
+
+        Ok((completed, rotated))
     }
 
     pub fn upsert_device_project_cursor(&self, cursor: &DeviceProjectCursor) -> StoreResult<()> {
@@ -2240,6 +2626,39 @@ fn account_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account
     })
 }
 
+fn recovery_grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecoveryGrant> {
+    Ok(RecoveryGrant {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        device_id: row.get(2)?,
+        grant_ref: row.get(3)?,
+        status: row.get(4)?,
+        created_at: row.get(5)?,
+        expires_at_unix: row.get(6)?,
+        consumed_at: row.get(7)?,
+        revoked_at: row.get(8)?,
+        audit_label: row.get(9)?,
+    })
+}
+
+fn device_rotation_intent_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DeviceRotationIntent> {
+    Ok(DeviceRotationIntent {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        device_id: row.get(2)?,
+        requested_by_session_id: row.get(3)?,
+        status: row.get(4)?,
+        reason: row.get(5)?,
+        created_at: row.get(6)?,
+        expires_at_unix: row.get(7)?,
+        completed_at: row.get(8)?,
+        revoked_at: row.get(9)?,
+        key_envelope_generation: row.get::<_, i64>(10)? as u64,
+    })
+}
+
 fn ensure_session_hash(session: &AccountSession) -> StoreResult<()> {
     if session.session_token_hash_hex.len() != 64
         || session
@@ -2898,6 +3317,52 @@ PRAGMA user_version = 8;
 COMMIT;
 "#;
 
+const MIGRATION_9_PRODUCTION_PAIRING_RECOVERY_ROTATION: &str = r#"
+BEGIN;
+
+ALTER TABLE key_envelopes
+    ADD COLUMN rotation_generation INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS recovery_grants (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES local_devices(id) ON DELETE CASCADE,
+    grant_ref TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'consumed', 'revoked')),
+    created_at TEXT NOT NULL,
+    expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+    consumed_at TEXT,
+    revoked_at TEXT,
+    audit_label TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_rotation_intents (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES local_devices(id) ON DELETE CASCADE,
+    requested_by_session_id TEXT REFERENCES account_sessions(session_id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'revoked')),
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+    completed_at TEXT,
+    revoked_at TEXT,
+    key_envelope_generation INTEGER NOT NULL CHECK (key_envelope_generation >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_grants_account_device_status
+    ON recovery_grants(account_id, device_id, status, expires_at_unix);
+CREATE INDEX IF NOT EXISTS idx_device_rotation_intents_account_device_status
+    ON device_rotation_intents(account_id, device_id, status, expires_at_unix);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (9, 'production_pairing_recovery_rotation');
+
+PRAGMA user_version = 9;
+
+COMMIT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3519,6 +3984,317 @@ mod tests {
         assert!(matches!(second, Err(StoreError::InvalidStoredValue(_))));
         let summary = store.schema_summary().expect("summary reads");
         assert_eq!(count(&summary, "revocation_markers"), 1);
+    }
+
+    #[test]
+    fn production_recovery_grant_revocation_is_idempotent_and_sanitized() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("devbox.sqlite3");
+        let raw_recovery_secret = "raw-recovery-secret-should-not-persist";
+
+        {
+            let mut store = Store::open_file(&db_path).expect("store opens");
+            store.apply_migrations().expect("migrations apply");
+            let identity = store
+                .ensure_local_identity(&EnsureLocalIdentityOptions {
+                    device_name: Some("Current machine"),
+                })
+                .expect("identity initializes");
+            let approval = approve_test_device(&mut store, &identity, "Laptop");
+
+            let rejected = devbox_auth::create_recovery_grant(
+                &identity.account_id,
+                &approval.device.device_id,
+                raw_recovery_secret,
+                "laptop recovery",
+                "2026-06-18T10:00:00Z",
+                100,
+                600,
+            )
+            .expect_err("raw recovery secret is rejected");
+            assert!(!rejected.to_string().contains(raw_recovery_secret));
+
+            let grant = devbox_auth::create_recovery_grant(
+                &identity.account_id,
+                &approval.device.device_id,
+                "recovery-ref:laptop:alpha",
+                "laptop recovery",
+                "2026-06-18T10:00:00Z",
+                100,
+                600,
+            )
+            .expect("grant creates");
+            store.upsert_recovery_grant(&grant).expect("grant persists");
+            let first = store
+                .revoke_recovery_grant(&grant.id, "2026-06-18T10:01:00Z")
+                .expect("grant revokes");
+            let second = store
+                .revoke_recovery_grant(&grant.id, "2026-06-18T10:02:00Z")
+                .expect("grant revokes idempotently");
+
+            assert_eq!(first.revoked_at, second.revoked_at);
+            assert_eq!(second.status, "revoked");
+            let summary = store.schema_summary().expect("summary reads");
+            assert_eq!(count(&summary, "recovery_grants"), 1);
+
+            let consumable = devbox_auth::create_recovery_grant(
+                &identity.account_id,
+                &approval.device.device_id,
+                "recovery-ref:laptop:beta",
+                "laptop recovery",
+                "2026-06-18T10:03:00Z",
+                103,
+                600,
+            )
+            .expect("grant creates");
+            store
+                .upsert_recovery_grant(&consumable)
+                .expect("grant persists");
+            let consumed = store
+                .consume_recovery_grant(&consumable.id, "2026-06-18T10:04:00Z", 104)
+                .expect("grant consumes");
+            assert_eq!(consumed.status, "consumed");
+            assert_eq!(
+                consumed.consumed_at.as_deref(),
+                Some("2026-06-18T10:04:00Z")
+            );
+            let consumed_again =
+                store.consume_recovery_grant(&consumable.id, "2026-06-18T10:05:00Z", 105);
+            assert!(matches!(
+                consumed_again,
+                Err(StoreError::InvalidStoredValue(_))
+            ));
+            let consumed_revoke =
+                store.revoke_recovery_grant(&consumable.id, "2026-06-18T10:05:00Z");
+            assert!(matches!(
+                consumed_revoke,
+                Err(StoreError::InvalidStoredValue(_))
+            ));
+            let loaded_consumed = store
+                .recovery_grant(&consumable.id)
+                .expect("grant reads")
+                .expect("grant exists");
+            assert_eq!(
+                loaded_consumed.consumed_at.as_deref(),
+                Some("2026-06-18T10:04:00Z")
+            );
+            assert_eq!(loaded_consumed.revoked_at, None);
+        }
+
+        let db_bytes = std::fs::read(&db_path).expect("db bytes read");
+        let db_text = String::from_utf8_lossy(&db_bytes);
+        assert!(!db_text.contains(raw_recovery_secret));
+    }
+
+    #[test]
+    fn production_device_rotation_intent_bumps_key_envelope_generation() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let approval = approve_test_device(&mut store, &identity, "Laptop");
+        let current = store
+            .key_envelope_for_device(&approval.device.device_id)
+            .expect("envelope reads")
+            .expect("envelope exists");
+        assert_eq!(current.rotation_generation, 0);
+
+        let intent =
+            devbox_auth::create_device_rotation_intent(devbox_auth::DeviceRotationIntentInput {
+                account_id: &identity.account_id,
+                device_id: &approval.device.device_id,
+                requested_by_session_id: None,
+                reason: "recovery rotation",
+                created_at: "2026-06-18T10:02:00Z",
+                now_unix: 102,
+                ttl_seconds: 600,
+                current_generation: current.rotation_generation,
+            })
+            .expect("intent creates");
+        store
+            .upsert_device_rotation_intent(&intent)
+            .expect("intent persists");
+        let (completed, rotated) = store
+            .rotate_key_envelope_for_device(
+                &intent,
+                &identity.sync_key_hex,
+                "2026-06-18T10:03:00Z",
+                103,
+            )
+            .expect("envelope rotates");
+
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.key_envelope_generation, 1);
+        assert_eq!(rotated.rotation_generation, 1);
+        let loaded = store
+            .key_envelope_for_device(&approval.device.device_id)
+            .expect("envelope reads")
+            .expect("envelope exists");
+        assert_eq!(loaded.rotation_generation, 1);
+        let opened = devbox_auth::open_key_envelope(
+            &loaded,
+            &approval.device.device_key_hex,
+            &approval.device.device_id,
+        )
+        .expect("rotated envelope opens");
+        assert_eq!(opened, identity.sync_key_hex);
+
+        let repeated = store.rotate_key_envelope_for_device(
+            &completed,
+            &identity.sync_key_hex,
+            "2026-06-18T10:04:00Z",
+            104,
+        );
+        assert!(matches!(repeated, Err(StoreError::InvalidStoredValue(_))));
+        let stale_pending_reuse = store.rotate_key_envelope_for_device(
+            &intent,
+            &identity.sync_key_hex,
+            "2026-06-18T10:05:00Z",
+            105,
+        );
+        assert!(matches!(
+            stale_pending_reuse,
+            Err(StoreError::InvalidStoredValue(_))
+        ));
+        let summary = store.schema_summary().expect("summary reads");
+        assert_eq!(count(&summary, "device_rotation_intents"), 1);
+    }
+
+    #[test]
+    fn production_device_rotation_rejects_unpersisted_and_expired_intents() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let approval = approve_test_device(&mut store, &identity, "Laptop");
+        let current = store
+            .key_envelope_for_device(&approval.device.device_id)
+            .expect("envelope reads")
+            .expect("envelope exists");
+
+        let never_persisted = rotation_intent_for(
+            &identity.account_id,
+            &approval.device.device_id,
+            current.rotation_generation,
+            100,
+            600,
+        );
+        let missing = store.rotate_key_envelope_for_device(
+            &never_persisted,
+            &identity.sync_key_hex,
+            "2026-06-18T10:02:00Z",
+            102,
+        );
+        assert!(matches!(missing, Err(StoreError::InvalidStoredValue(_))));
+        assert_eq!(
+            store
+                .key_envelope_for_device(&approval.device.device_id)
+                .expect("envelope reads")
+                .expect("envelope exists")
+                .rotation_generation,
+            0
+        );
+
+        let expired = rotation_intent_for(
+            &identity.account_id,
+            &approval.device.device_id,
+            current.rotation_generation,
+            100,
+            1,
+        );
+        store
+            .upsert_device_rotation_intent(&expired)
+            .expect("expired intent persists");
+        let expired_result = store.rotate_key_envelope_for_device(
+            &expired,
+            &identity.sync_key_hex,
+            "2026-06-18T10:02:00Z",
+            101,
+        );
+        assert!(matches!(
+            expired_result,
+            Err(StoreError::InvalidStoredValue(_))
+        ));
+        assert_eq!(
+            store
+                .key_envelope_for_device(&approval.device.device_id)
+                .expect("envelope reads")
+                .expect("envelope exists")
+                .rotation_generation,
+            0
+        );
+    }
+
+    #[test]
+    fn production_device_rotation_rejects_stale_generation_race() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let approval = approve_test_device(&mut store, &identity, "Laptop");
+        let current = store
+            .key_envelope_for_device(&approval.device.device_id)
+            .expect("envelope reads")
+            .expect("envelope exists");
+
+        let first = rotation_intent_for(
+            &identity.account_id,
+            &approval.device.device_id,
+            current.rotation_generation,
+            100,
+            600,
+        );
+        let second = rotation_intent_for(
+            &identity.account_id,
+            &approval.device.device_id,
+            current.rotation_generation,
+            100,
+            600,
+        );
+        store
+            .upsert_device_rotation_intent(&first)
+            .expect("first intent persists");
+        store
+            .upsert_device_rotation_intent(&second)
+            .expect("second intent persists");
+
+        store
+            .rotate_key_envelope_for_device(
+                &first,
+                &identity.sync_key_hex,
+                "2026-06-18T10:02:00Z",
+                102,
+            )
+            .expect("first intent rotates");
+        let stale = store.rotate_key_envelope_for_device(
+            &second,
+            &identity.sync_key_hex,
+            "2026-06-18T10:03:00Z",
+            103,
+        );
+        assert!(matches!(stale, Err(StoreError::InvalidStoredValue(_))));
+        assert_eq!(
+            store
+                .key_envelope_for_device(&approval.device.device_id)
+                .expect("envelope reads")
+                .expect("envelope exists")
+                .rotation_generation,
+            1
+        );
+        assert_eq!(
+            store
+                .device_rotation_intent(&second.id)
+                .expect("intent reads")
+                .expect("intent exists")
+                .status,
+            "pending"
+        );
     }
 
     #[test]
@@ -4175,6 +4951,26 @@ mod tests {
             .persist_pairing_approval(&approval)
             .expect("approval persists");
         approval
+    }
+
+    fn rotation_intent_for(
+        account_id: &str,
+        device_id: &str,
+        current_generation: u64,
+        now_unix: i64,
+        ttl_seconds: i64,
+    ) -> DeviceRotationIntent {
+        devbox_auth::create_device_rotation_intent(devbox_auth::DeviceRotationIntentInput {
+            account_id,
+            device_id,
+            requested_by_session_id: None,
+            reason: "recovery rotation",
+            created_at: "2026-06-18T10:02:00Z",
+            now_unix,
+            ttl_seconds,
+            current_generation,
+        })
+        .expect("rotation intent creates")
     }
 
     fn count(summary: &SchemaSummary, table: &str) -> u64 {
