@@ -1,8 +1,8 @@
 # Local Metadata Store
 
-This slice introduces the Phase 0 SQLite boundary in `crates/devbox-store`.
+This slice introduces the Phase 0 local storage boundary in `crates/devbox-store`.
 
-The store is intentionally a metadata database, not a file-content database. It gives the daemon a transactional place to record what Devbox knows about projects, snapshots, manifests, policy decisions, and restore attempts while keeping actual source bytes in a future content-addressed cache.
+The store is intentionally a metadata database, not a file-content database. It gives the daemon a transactional place to record what Devbox knows about projects, snapshots, manifests, policy decisions, and restore attempts while keeping actual source bytes in a local content-addressed cache.
 
 ## Boundary
 
@@ -17,14 +17,19 @@ SQLite owns:
 - policy definitions and policy evaluation results
 - restore attempt status, target path, safety report references, and errors
 
-The future content-addressed cache owns:
+The local content-addressed cache owns:
 
 - file and chunk bytes
-- packed blob files
-- cache layout and eviction behavior
-- local verification of bytes against content hashes
+- BLAKE3 content hashing
+- deterministic object layout under `blobs/b3/<first-two-hex>/<next-two-hex>/<digest>`
+- temporary files under `tmp/` while a blob write is in progress
+- hash-derived object identity for local bytes
 
 SQLite rows may reference cache objects, but SQLite must not store project files as database BLOBs. This keeps metadata reads fast, avoids oversized transactions, and lets the cache implementation change without rewriting the metadata model.
+
+`BlobCache::open` initializes a cache root without opening SQLite. `write_bytes` and `write_file` stream content through BLAKE3, write the bytes to a temporary file inside the cache root, and then move the completed file into its sharded content-addressed path. Rewriting the same bytes returns the same `BlobId` and path without creating a second committed object. `read`, `exists`, and `path_for` are filesystem operations against that cache root.
+
+The SQLite `blobs.object_ref` column should store a stable reference to this cache object, such as `blobs/b3/aa/bb/<digest>`, plus metadata like hash algorithm and byte length. SQLite owns the metadata row lifecycle; the blob cache owns bytes and paths.
 
 ## Migration Rules
 
@@ -49,13 +54,18 @@ The initial migration creates:
 
 This boundary does not implement:
 
-- file hashing
-- content-addressed writes
+- snapshot manifest creation
+- recording blob metadata rows automatically during cache writes
 - manifest construction
 - snapshot creation
 - restore planning or materialization
 - filesystem watching
 - cloud sync
+- encryption
+- compression
+- packfiles
+- cache eviction or garbage collection
+- read-time integrity verification
 - Electron UI integration
 
 Those behaviors should enter through later focused PRs that use this store rather than expanding it into a snapshot engine.
