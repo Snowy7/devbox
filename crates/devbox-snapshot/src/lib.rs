@@ -1,5 +1,7 @@
 //! Snapshot manifest construction over local project files.
 
+mod restore;
+
 use devbox_core::scanner::evaluate_directory_policy;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision, SnapshotId};
 use devbox_store::{BlobCache, BlobCacheError};
@@ -7,6 +9,11 @@ use std::fmt;
 use std::fs::{self, DirEntry, Metadata};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+
+pub use restore::{
+    RestoreMaterializer, RestoreMissingBlob, RestorePlan, RestorePlanError, RestorePlanSummary,
+    RestoreSkippedEntry, RestoreTargetStatus, RestoreWrite,
+};
 
 const MANIFEST_ID_PREFIX: &str = "snapshot-draft-b3-";
 
