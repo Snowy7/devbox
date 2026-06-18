@@ -1,12 +1,13 @@
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::{ManifestEntryKind, PolicyDecision};
 use devbox_snapshot::{
-    RestoreMaterializer, RestorePlan, RestoreSkippedEntry, RestoreTargetStatus, RestoreWrite,
-    SnapshotManifestBuilder,
+    LocalChangeFeedDiff, RestoreMaterializer, RestorePlan, RestoreSkippedEntry,
+    RestoreTargetStatus, RestoreWrite, SnapshotManifestBuilder,
 };
 use devbox_store::{
-    local_project_id, path_to_store_string, BlobCache, ManifestEntryRecord, NewProject,
-    NewSnapshot, NewSnapshotDraft, NewSnapshotManifestEntry, PersistedSnapshot, Store,
+    local_project_id, path_to_store_string, BlobCache, LocalChangeKind, ManifestEntryRecord,
+    NewPendingLocalChange, NewProject, NewSnapshot, NewSnapshotDraft, NewSnapshotManifestEntry,
+    PendingLocalChangeRecord, PersistedSnapshot, Store,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
         Some("scan") => run_scan(&args[1..]),
         Some("status") => run_status(&args[1..]),
         Some("snapshot") => run_snapshot(&args[1..]),
+        Some("changes") => run_changes(&args[1..]),
         Some("restore" | "explain") => {
             println!("devbox: command placeholder; daemon integration is not implemented yet");
             ExitCode::SUCCESS
@@ -39,6 +41,43 @@ fn main() -> ExitCode {
         Some(command) => {
             eprintln!("devbox: unknown command '{command}'");
             eprintln!("Run 'devbox --help' for usage.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_changes(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("scan") => match parse_changes_scan_args(&args[1..])
+            .and_then(|args| changes_scan(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                ExitCode::from(1)
+            }
+        },
+        Some("list") => match parse_changes_list_args(&args[1..])
+            .and_then(|args| changes_list(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                ExitCode::from(1)
+            }
+        },
+        Some("clear") => match parse_changes_list_args(&args[1..])
+            .and_then(|args| changes_clear(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("devbox: changes requires scan, list, or clear");
+            print_changes_usage();
             ExitCode::from(2)
         }
     }
@@ -110,6 +149,19 @@ struct SnapshotRestoreArgs {
     apply: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangesScanArgs {
+    db_path: String,
+    cache_root: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangesListArgs {
+    db_path: String,
+    project_id: Option<String>,
+}
+
 fn parse_snapshot_create_args(args: &[String]) -> Result<SnapshotCreateArgs, String> {
     let mut db_path = None;
     let mut cache_root = None;
@@ -160,6 +212,85 @@ fn parse_snapshot_create_args(args: &[String]) -> Result<SnapshotCreateArgs, Str
         cache_root,
         dry_run,
         path,
+    })
+}
+
+fn parse_changes_scan_args(args: &[String]) -> Result<ChangesScanArgs, String> {
+    let mut db_path = None;
+    let mut cache_root = None;
+    let mut path = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--cache" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--cache requires a path".to_string())?;
+                cache_root = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown changes scan option '{value}'"));
+            }
+            value => {
+                if path.replace(value.to_string()).is_some() {
+                    return Err("changes scan accepts exactly one project path".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(ChangesScanArgs {
+        db_path: db_path.ok_or_else(|| "changes scan requires --db <DB_PATH>".to_string())?,
+        cache_root: cache_root
+            .ok_or_else(|| "changes scan requires --cache <CACHE_ROOT>".to_string())?,
+        path: path.ok_or_else(|| "changes scan requires a project path".to_string())?,
+    })
+}
+
+fn parse_changes_list_args(args: &[String]) -> Result<ChangesListArgs, String> {
+    let mut db_path = None;
+    let mut project_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--db requires a path".to_string())?;
+                db_path = Some(value.clone());
+            }
+            "--project" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--project requires a project id".to_string())?;
+                project_id = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown changes list option '{value}'"));
+            }
+            _ => return Err("changes list accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(ChangesListArgs {
+        db_path: db_path.ok_or_else(|| "changes list requires --db <DB_PATH>".to_string())?,
+        project_id,
     })
 }
 
@@ -307,6 +438,96 @@ fn snapshot_create(args: &SnapshotCreateArgs) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+fn changes_scan(args: &ChangesScanArgs) -> Result<(), Box<dyn std::error::Error>> {
+    preflight_cache_root(Path::new(&args.cache_root), Path::new(&args.path))?;
+    preflight_db_path(Path::new(&args.db_path), Path::new(&args.path))?;
+
+    let cache = BlobCache::open(&args.cache_root)?;
+    let current = SnapshotManifestBuilder::new(cache).build_draft(&args.path)?;
+
+    let mut store = Store::open_file(&args.db_path)?;
+    store.apply_migrations()?;
+    let detected_at = store.current_timestamp()?;
+    let project_id = local_project_id(current.root()).to_string();
+    let root_path = current.root().display().to_string();
+    let display_name = current
+        .root()
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root_path.clone());
+    let project_kind = project_kind_for_root(current.root());
+    let base = store.latest_snapshot_for_project(&project_id)?;
+    let diff = LocalChangeFeedDiff::compare(base.as_ref(), &current);
+    let change_ids = diff
+        .changes()
+        .iter()
+        .map(|change| change.stable_id(&project_id, diff.base_snapshot_id()))
+        .collect::<Vec<_>>();
+    let pending = diff
+        .changes()
+        .iter()
+        .enumerate()
+        .map(|(index, change)| NewPendingLocalChange {
+            id: &change_ids[index],
+            base_snapshot_id: diff.base_snapshot_id(),
+            relative_path: change.relative_path(),
+            kind: change.kind().clone(),
+            previous_blob_id: change.previous_blob_id(),
+            blob_id: change.blob_id(),
+            object_ref: change.object_ref(),
+            size_bytes: change.size_bytes(),
+        })
+        .collect::<Vec<_>>();
+
+    store.replace_pending_local_changes(
+        &NewProject {
+            id: &project_id,
+            root_path: &root_path,
+            kind: &project_kind,
+            display_name: &display_name,
+            discovered_at: &detected_at,
+        },
+        &pending,
+        &detected_at,
+    )?;
+
+    print_changes_scan_summary(
+        &project_id,
+        diff.base_snapshot_id(),
+        diff.summary(),
+        pending.len(),
+        &args.db_path,
+        &args.cache_root,
+    );
+
+    Ok(())
+}
+
+fn changes_list(args: &ChangesListArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let changes = store.list_pending_local_changes(args.project_id.as_deref())?;
+
+    println!(
+        "Project id\tBase snapshot id\tChange\tPath\tBytes\tBlob id\tPrevious blob id\tDetected at"
+    );
+    for change in &changes {
+        print_pending_change(change);
+    }
+
+    Ok(())
+}
+
+fn changes_clear(args: &ChangesListArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let cleared = store.clear_pending_local_changes(args.project_id.as_deref())?;
+
+    println!("Cleared pending changes: {cleared}");
+
+    Ok(())
+}
+
 fn snapshot_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_snapshot_restore_args(args).map_err(|message| {
         format!(
@@ -335,6 +556,54 @@ fn snapshot_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     print_restore_apply_result(&plan, summary.bytes_to_write);
 
     Ok(())
+}
+
+fn print_changes_scan_summary(
+    project_id: &str,
+    base_snapshot_id: Option<&str>,
+    summary: &devbox_snapshot::LocalChangeSummary,
+    pending_operations: usize,
+    db_path: &str,
+    cache_root: &str,
+) {
+    println!("Project id: {project_id}");
+    println!("Base snapshot id: {}", base_snapshot_id.unwrap_or("-"));
+    println!("Created: {}", summary.created());
+    println!("Modified: {}", summary.modified());
+    println!("Deleted: {}", summary.deleted());
+    println!("Unchanged: {}", summary.unchanged());
+    println!("Skipped/deferred: {}", summary.skipped_deferred());
+    println!("Pending upload bytes: {}", summary.bytes_to_upload());
+    println!("Deleted bytes: {}", summary.bytes_deleted());
+    println!("Pending operations: {pending_operations}");
+    println!("SQLite database: {db_path}");
+    println!("Blob cache: {cache_root}");
+}
+
+fn print_pending_change(change: &PendingLocalChangeRecord) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        change.project_id,
+        change.base_snapshot_id.as_deref().unwrap_or("-"),
+        local_change_kind_name(&change.change_kind),
+        path_to_store_string(&change.relative_path),
+        change.size_bytes,
+        change
+            .blob_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "-".to_string()),
+        change
+            .previous_blob_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "-".to_string()),
+        change.detected_at,
+    );
+}
+
+fn local_change_kind_name(kind: &LocalChangeKind) -> &'static str {
+    kind.as_str()
 }
 
 fn snapshot_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -635,6 +904,13 @@ fn print_snapshot_usage() {
     );
 }
 
+fn print_changes_usage() {
+    eprintln!("Usage:");
+    eprintln!("  devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>");
+    eprintln!("  devbox changes list --db <DB_PATH> [--project <PROJECT_ID>]");
+    eprintln!("  devbox changes clear --db <DB_PATH> [--project <PROJECT_ID>]");
+}
+
 fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::error::Error>> {
     let path = Path::new(db_path);
     if !path.is_file() {
@@ -908,6 +1184,7 @@ fn print_help() {
     println!("Commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
+    println!("  changes    Scan, list, and clear the pending local change feed");
     println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
     println!("  restore    Placeholder for snapshot restore");
     println!("  explain    Placeholder for policy and sync explanations");

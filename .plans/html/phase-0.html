@@ -23,7 +23,7 @@
         <div>
           <div class="eyebrow">4 to 6 weeks</div>
           <h1>Make local snapshots boringly safe.</h1>
-          <p class="lead">Before cloud sync, prove Devbox can scan projects, classify files, snapshot WIP, restore safely, and avoid corrupting Git repos.</p>
+          <p class="lead">Before cloud sync, prove Devbox can scan projects, classify files, snapshot WIP, restore safely, detect local changes, and avoid corrupting Git repos.</p>
         </div>
         <div class="callout green">
           <strong>Exit gate:</strong> snapshot and restore 20 representative repos with no Git corruption, uncommitted work preserved, and generated directories suppressed by policy.
@@ -39,7 +39,7 @@
           </article>
           <article class="card workstream blue-line">
             <h3>Snapshot Engine</h3>
-            <p>Create manifests, hash chunks with BLAKE3, store content-addressed files, and record operations in SQLite.</p>
+            <p>Create manifests, hash chunks with BLAKE3, store content-addressed files, and record pending local change operations in SQLite.</p>
           </article>
           <article class="card workstream amber-line">
             <h3>Restore Engine</h3>
@@ -56,6 +56,7 @@
           <li>Default dev policy for `node_modules`, `.next`, `dist`, `target`, `.venv`, `.cache`, and common build outputs.</li>
           <li>Git detector that records repo root, HEAD, dirty state, ignored state, remotes, submodules, and worktree shape.</li>
           <li>CLI commands: `devbox scan`, `devbox snapshot`, `devbox status`, `devbox restore`, `devbox explain`.</li>
+          <li>Local change feed: compare the current workspace with the latest snapshot and persist pending file operations without cloud upload.</li>
           <li>Destructive test matrix for restore, interrupted writes, symlinks, permissions, case conflicts, and Git status.</li>
         </ul>
       </section>
@@ -93,8 +94,8 @@
             </tr>
             <tr>
               <td>5-6</td>
-              <td>Test hardening and alpha demo path.</td>
-              <td>20 representative repos pass the safety matrix.</td>
+              <td>Local change feed, test hardening, and alpha demo path.</td>
+              <td>20 representative repos pass the safety matrix, and pending operations are repeatable.</td>
             </tr>
           </tbody>
         </table>
@@ -106,4 +107,3 @@
     </main>
   </body>
 </html>
-

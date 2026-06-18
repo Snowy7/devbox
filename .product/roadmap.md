@@ -17,6 +17,7 @@ Deliverables:
 - content-addressed local object store
 - snapshot manifest
 - restore command
+- local change feed / operation log comparing current workspace state to the latest snapshot
 - Git repo detector
 - destructive test suite
 
@@ -26,6 +27,7 @@ Exit criteria:
 - no Git corruption in test matrix
 - can restore uncommitted and untracked files
 - generated directories suppressed by policy
+- pending local operations are deterministic and repeatable without cloud sync
 
 ## Phase 1: Personal Alpha
 
@@ -36,6 +38,7 @@ Goal: two-device sync for trusted alpha users.
 Deliverables:
 
 - account/device pairing
+- long-running watcher that feeds the local operation log
 - encrypted object upload/download
 - second-device materialization
 - CLI: `init`, `status`, `devices`, `snapshot`, `restore`, `pause`
@@ -160,4 +163,3 @@ Exit criteria:
 - users perform meaningful workflows without manual branch/stash/worktree commands
 - teams can keep GitHub/GitLab as system of record while using Devbox locally
 - source-control layer increases retention and paid conversion
-
