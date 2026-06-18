@@ -3,7 +3,11 @@ use devbox_core::PolicyDecision;
 use devbox_snapshot::SnapshotManifestBuilder;
 use devbox_store::BlobCache;
 use devbox_store::Store;
-use std::path::Path;
+use std::ffi::OsString;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -57,6 +61,7 @@ fn run_snapshot(args: &[String]) -> ExitCode {
 }
 
 fn snapshot_dry_run(cache_root: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    preflight_cache_root(Path::new(cache_root), Path::new(path))?;
     let cache = BlobCache::open(cache_root)?;
     let snapshot = SnapshotManifestBuilder::new(cache).build_draft(path)?;
     let summary = snapshot.summary();
@@ -72,6 +77,127 @@ fn snapshot_dry_run(cache_root: &str, path: &str) -> Result<(), Box<dyn std::err
     println!("SQLite persistence: deferred");
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum SnapshotCliPreflightError {
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    CacheInsideSnapshotRoot {
+        cache_root: PathBuf,
+        snapshot_root: PathBuf,
+    },
+}
+
+impl fmt::Display for SnapshotCliPreflightError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { path, source } => {
+                write!(f, "could not validate {}: {source}", path.display())
+            }
+            Self::CacheInsideSnapshotRoot {
+                cache_root,
+                snapshot_root,
+            } => write!(
+                f,
+                "blob cache root {} is inside snapshot root {}; choose a cache outside the project",
+                cache_root.display(),
+                snapshot_root.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotCliPreflightError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::CacheInsideSnapshotRoot { .. } => None,
+        }
+    }
+}
+
+fn preflight_cache_root(
+    cache_root: &Path,
+    snapshot_root: &Path,
+) -> Result<(), SnapshotCliPreflightError> {
+    let snapshot_root =
+        fs::canonicalize(snapshot_root).map_err(|source| SnapshotCliPreflightError::Io {
+            path: snapshot_root.to_path_buf(),
+            source,
+        })?;
+    let cache_root = resolve_without_creating(cache_root)?;
+
+    if cache_root == snapshot_root || cache_root.starts_with(&snapshot_root) {
+        return Err(SnapshotCliPreflightError::CacheInsideSnapshotRoot {
+            cache_root,
+            snapshot_root,
+        });
+    }
+
+    Ok(())
+}
+
+fn resolve_without_creating(path: &Path) -> Result<PathBuf, SnapshotCliPreflightError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| SnapshotCliPreflightError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .join(path)
+    };
+    let absolute = lexical_normalize(&absolute);
+
+    if absolute.exists() {
+        return fs::canonicalize(&absolute).map_err(|source| SnapshotCliPreflightError::Io {
+            path: absolute,
+            source,
+        });
+    }
+
+    let mut existing = absolute.clone();
+    let mut missing = Vec::<OsString>::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        missing.push(name.to_os_string());
+        if !existing.pop() {
+            break;
+        }
+    }
+
+    let mut resolved =
+        fs::canonicalize(&existing).map_err(|source| SnapshotCliPreflightError::Io {
+            path: absolute,
+            source,
+        })?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+
+    Ok(resolved)
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+        }
+    }
+    normalized
 }
 
 fn run_status(args: &[String]) -> ExitCode {
@@ -191,4 +317,38 @@ fn print_help() {
     println!("Options:");
     println!("  -h, --help     Print help");
     println!("  -V, --version  Print version");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preflight_rejects_in_tree_cache_without_creating_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).expect("project dir creates");
+        let cache_root = root.join("z-cache");
+
+        let error =
+            preflight_cache_root(&cache_root, &root).expect_err("in-tree cache root is rejected");
+
+        assert!(matches!(
+            error,
+            SnapshotCliPreflightError::CacheInsideSnapshotRoot { .. }
+        ));
+        assert!(!cache_root.exists());
+    }
+
+    #[test]
+    fn preflight_allows_outside_cache_without_creating_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).expect("project dir creates");
+        let cache_root = dir.path().join("cache");
+
+        preflight_cache_root(&cache_root, &root).expect("outside cache root is accepted");
+
+        assert!(!cache_root.exists());
+    }
 }

@@ -36,7 +36,7 @@ The CLI exposes the current surface as:
 devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>
 ```
 
-This command creates local blob-cache objects for included files and prints the draft manifest summary. It intentionally does not write SQLite metadata.
+This command validates that the cache root is outside the snapshot root before initializing the cache, then creates local blob-cache objects for included files and prints the draft manifest summary. It intentionally does not write SQLite metadata.
 
 ## Manifest Entries
 
@@ -53,7 +53,7 @@ Directory entries are sorted by filesystem name before recursion so repeated run
 
 Current directory exclusions come from the scanner policy and include `.git`, `node_modules`, `target`, `.venv`, build outputs, language caches, and tool caches. These exclusions apply to directories before descent, not to ordinary regular files that happen to share names such as `build` or `dist`.
 
-The blob cache root is Devbox-owned state. If the cache root is inside the snapshot root, the builder rejects the draft with an explicit error rather than trying to snapshot or explain its own object cache.
+The blob cache root is Devbox-owned state. If the cache root is inside the snapshot root, the dry-run CLI rejects it before `BlobCache::open` can create directories. The builder keeps the same validation as defense in depth rather than trying to snapshot or explain its own object cache.
 
 Only regular files are written to `BlobCache`. Symlinks and unsupported filesystem node types are represented as requiring a future user or safety decision so restore semantics can be designed deliberately.
 

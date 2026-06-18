@@ -14,3 +14,6 @@ path = "src/main.rs"
 devbox-core = { path = "../devbox-core" }
 devbox-snapshot = { path = "../devbox-snapshot" }
 devbox-store = { path = "../devbox-store" }
+
+[dev-dependencies]
+tempfile = "3"
