@@ -1,5 +1,6 @@
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::PolicyDecision;
+use devbox_store::Store;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -14,7 +15,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("scan") => run_scan(&args[1..]),
-        Some("snapshot" | "status" | "restore" | "explain") => {
+        Some("status") => run_status(&args[1..]),
+        Some("snapshot" | "restore" | "explain") => {
             println!("devbox: command placeholder; daemon integration is not implemented yet");
             ExitCode::SUCCESS
         }
@@ -28,6 +30,42 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn run_status(args: &[String]) -> ExitCode {
+    match args {
+        [] => {
+            println!("devbox: status placeholder; pass --db <PATH> to inspect local metadata");
+            ExitCode::SUCCESS
+        }
+        [flag, path] if flag == "--db" => match status_for_db(path) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("devbox: status accepts either no arguments or --db <PATH>");
+            eprintln!("Usage: devbox status --db <PATH>");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn status_for_db(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open_file(path)?;
+    store.apply_migrations()?;
+    let summary = store.schema_summary()?;
+
+    println!("Metadata database: {path}");
+    println!("Schema version: {}", summary.version);
+    println!("Tables:");
+    for table in summary.tables {
+        println!("- {}: {}", table.table, table.rows);
+    }
+
+    Ok(())
 }
 
 fn run_scan(args: &[String]) -> ExitCode {
@@ -104,7 +142,7 @@ fn print_help() {
     println!("Commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
     println!("  snapshot   Placeholder for local snapshot creation");
-    println!("  status     Placeholder for workspace timeline status");
+    println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
     println!("  restore    Placeholder for snapshot restore");
     println!("  explain    Placeholder for policy and sync explanations");
     println!();

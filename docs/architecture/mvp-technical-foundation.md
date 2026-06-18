@@ -10,6 +10,7 @@ The Rust workspace is rooted at `Cargo.toml` and contains four crates:
 - `crates/devbox-daemon`: placeholder daemon binary that will own filesystem watching, snapshot creation, restore, and local metadata writes.
 - `crates/devbox-cli`: `devbox` CLI binary with `--version`, read-only `scan <path>`, and placeholders for the future commands `snapshot`, `status`, `restore`, and `explain`.
 - `crates/devbox-git`: placeholder Git adapter boundary. Git repositories must be inspected and reconstructed through a dedicated adapter rather than by syncing `.git` as ordinary files.
+- `crates/devbox-store`: SQLite local metadata boundary with idempotent migrations, foreign-key enforcement, schema summary reporting, and a small project/snapshot metadata API.
 
 ## Desktop Boundary
 
@@ -32,14 +33,23 @@ This keeps the riskiest behavior in a testable Rust core and prevents UI state f
 
 ## Local Metadata and Storage Direction
 
-SQLite will be used for local metadata when snapshot implementation begins. Blob content will be addressed by BLAKE3 hashes and stored in a local content-addressed cache. Remote object storage will later sit behind an S3-compatible interface so Cloudflare R2 is an implementation choice, not a domain dependency.
+SQLite is used for local metadata through the `devbox-store` crate. The initial schema records projects, snapshots, manifest entries, blob and chunk references, operations, policies, policy evaluations, and restore attempts. SQLite stores identifiers, paths, sizes, policy decisions, operation state, and object references. It does not store file contents as database BLOBs.
+
+Blob content will be addressed by BLAKE3 hashes and stored in a future local content-addressed cache on disk. SQLite rows point at that cache through object references so metadata transactions stay small and content storage can evolve separately. Remote object storage will later sit behind an S3-compatible interface so Cloudflare R2 is an implementation choice, not a domain dependency.
+
+The CLI can conservatively inspect a local metadata database with:
+
+```text
+devbox status --db <PATH>
+```
+
+That command opens the SQLite store, applies migrations idempotently, and prints the schema version plus table counts. It does not create snapshots, hash files, restore files, or start the daemon.
 
 ## Current Non-Goals
 
 This slice does not implement:
 
 - file watching
-- SQLite schema
 - content hashing
 - snapshot manifests beyond core type definitions
 - restore logic
