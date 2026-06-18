@@ -10,6 +10,7 @@ This repository currently contains the product foundation and MVP planning artif
 
 - [.product](.product/README.md) - product strategy, market sizing, KPIs, architecture, roadmap, and sources.
 - [.plans](.plans/README.md) - MVP execution plan with static HTML pages for phases, architecture, and validation.
+- [docs/alpha-cli-distribution.md](docs/alpha-cli-distribution.md) - GitHub Release packaging for alpha CLI binaries.
 
 ## Current Stack Direction
 
