@@ -3,6 +3,7 @@
 mod restore;
 
 use devbox_core::scanner::{evaluate_directory_policy, ProjectScanner};
+use devbox_core::secrets::{SecretDetector, SecretFinding};
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision, SnapshotId};
 use devbox_store::{
     local_project_id, path_to_store_string, BlobCache, BlobCacheError, LocalChangeKind,
@@ -12,7 +13,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, DirEntry, Metadata};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 pub use restore::{
@@ -21,6 +22,7 @@ pub use restore::{
 };
 
 const MANIFEST_ID_PREFIX: &str = "snapshot-draft-b3-";
+const SECRET_SCAN_PREFIX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct SnapshotManifestBuilder {
@@ -160,6 +162,7 @@ pub struct SnapshotSummary {
     included_directories: usize,
     included_symlinks: usize,
     excluded_entries: usize,
+    blocked_secret_entries: usize,
     total_file_bytes: u64,
 }
 
@@ -171,6 +174,7 @@ impl SnapshotSummary {
             included_directories: 0,
             included_symlinks: 0,
             excluded_entries: 0,
+            blocked_secret_entries: 0,
             total_file_bytes: 0,
         };
 
@@ -186,7 +190,11 @@ impl SnapshotSummary {
                     ManifestEntryKind::Unsupported => {}
                 },
                 PolicyDecision::Exclude { .. } => summary.excluded_entries += 1,
-                PolicyDecision::RequiresUserDecision { .. } => {}
+                PolicyDecision::RequiresUserDecision { reason } => {
+                    if is_secret_block_reason(reason) {
+                        summary.blocked_secret_entries += 1;
+                    }
+                }
             }
         }
 
@@ -211,6 +219,10 @@ impl SnapshotSummary {
 
     pub fn excluded_entries(&self) -> usize {
         self.excluded_entries
+    }
+
+    pub fn blocked_secret_entries(&self) -> usize {
+        self.blocked_secret_entries
     }
 
     pub fn total_file_bytes(&self) -> u64 {
@@ -363,6 +375,10 @@ pub fn scan_local_change_feed(
         cache_root: options.cache_root.clone(),
         project_root: current.root().to_path_buf(),
     })
+}
+
+pub fn is_secret_block_reason(reason: &str) -> bool {
+    reason.starts_with("secret blocked by policy rule ")
 }
 
 impl LocalChangeFeedDiff {
@@ -865,6 +881,19 @@ fn walk_directory(
 
         match kind {
             ManifestEntryKind::File => {
+                let findings = scan_file_for_secrets(&child_path)?;
+                if let Some(finding) = findings.first() {
+                    entries.push(SnapshotManifestEntry::new(
+                        relative_path,
+                        ManifestEntryKind::File,
+                        Some(metadata.len()),
+                        None,
+                        None,
+                        secret_policy_decision(finding),
+                    ));
+                    continue;
+                }
+
                 let blob = blob_cache.write_file(&child_path).map_err(|source| {
                     SnapshotError::BlobCache {
                         path: child_path.clone(),
@@ -915,6 +944,29 @@ fn walk_directory(
     }
 
     Ok(())
+}
+
+fn scan_file_for_secrets(path: &Path) -> Result<Vec<SecretFinding>, SnapshotError> {
+    let file = fs::File::open(path).map_err(|source| SnapshotError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut reader = file.take(SECRET_SCAN_PREFIX_BYTES);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|source| SnapshotError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(SecretDetector.scan_bytes(&bytes))
+}
+
+fn secret_policy_decision(finding: &SecretFinding) -> PolicyDecision {
+    PolicyDecision::RequiresUserDecision {
+        reason: finding.policy_reason(),
+    }
 }
 
 fn entry_kind(metadata: &Metadata) -> ManifestEntryKind {
@@ -1147,6 +1199,82 @@ mod tests {
             fixture.cache.read(blob_id).expect("blob reads"),
             b"hello snapshot\n"
         );
+    }
+
+    #[test]
+    fn blocks_secret_files_before_blob_cache_write() {
+        let fixture = TestProject::new();
+        let raw_secret = synthetic_token("sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456");
+        fixture.write("src/main.rs", "fn main() {}\n");
+        fixture.write("secrets.env", &format!("OPENAI_API_KEY={raw_secret}\n"));
+
+        let snapshot = fixture.build();
+        let entry = snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.relative_path() == Path::new("secrets.env"))
+            .expect("secret-bearing file entry exists");
+
+        assert_eq!(entry.kind(), &ManifestEntryKind::File);
+        assert_eq!(entry.blob_id(), None);
+        assert_eq!(entry.object_ref(), None);
+        assert_eq!(
+            entry.size_bytes(),
+            Some(raw_secret.len() as u64 + "OPENAI_API_KEY=\n".len() as u64)
+        );
+        assert!(matches!(
+            entry.policy_decision(),
+            PolicyDecision::RequiresUserDecision { reason }
+                if is_secret_block_reason(reason)
+                    && reason.contains("openai_api_key")
+                    && reason.contains("line 1")
+                    && reason.contains("sk-<redacted>")
+                    && !reason.contains(&raw_secret)
+        ));
+        assert_eq!(snapshot.summary().included_files(), 1);
+        assert_eq!(snapshot.summary().blocked_secret_entries(), 1);
+        assert_eq!(fixture.object_file_count(), 1);
+    }
+
+    #[test]
+    fn diff_excludes_blocked_secret_files_from_uploadable_changes() {
+        let fixture = TestProject::new();
+        let raw_secret = synthetic_token("ghp_", "abcdefghijklmnopqrstuvwxyz1234567890");
+        fixture.write("README.md", "safe\n");
+        fixture.write("token.txt", &format!("token={raw_secret}\n"));
+        let current = fixture.build();
+
+        let diff = LocalChangeFeedDiff::compare(None, &current);
+
+        assert_eq!(diff.summary().created(), 1);
+        assert_eq!(diff.summary().skipped_deferred(), 1);
+        assert_eq!(diff.changes().len(), 1);
+        assert_eq!(diff.changes()[0].relative_path(), Path::new("README.md"));
+        assert!(!current
+            .entries()
+            .iter()
+            .any(|entry| entry.relative_path() == Path::new("token.txt")
+                && entry.blob_id().is_some()));
+    }
+
+    #[test]
+    fn secret_detection_uses_bounded_file_prefix() {
+        let fixture = TestProject::new();
+        let raw_secret = synthetic_token("sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456");
+        let mut content = "a".repeat(SECRET_SCAN_PREFIX_BYTES as usize + 8);
+        content.push_str(&raw_secret);
+        fixture.write("large.txt", &content);
+
+        let snapshot = fixture.build();
+        let entry = snapshot
+            .entries()
+            .iter()
+            .find(|entry| entry.relative_path() == Path::new("large.txt"))
+            .expect("large file entry exists");
+
+        assert_eq!(entry.policy_decision(), &PolicyDecision::Include);
+        assert!(entry.blob_id().is_some());
+        assert_eq!(snapshot.summary().blocked_secret_entries(), 0);
     }
 
     #[test]
@@ -1463,5 +1591,9 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn synthetic_token(prefix: &str, tail: &str) -> String {
+        [prefix, tail].concat()
     }
 }

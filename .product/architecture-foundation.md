@@ -71,8 +71,10 @@ Current Phase 1 foundation status:
   device/project cursor primitives exist in SQLite
 - local/mock second-device materialization can publish/import an encrypted snapshot bundle through a
   local filesystem remote and apply it safely with the existing restore engine
+- local high-confidence secret detection blocks detected files before blob-cache writes and local
+  publish paths
 - real cloud authentication, hosted metadata, real object-storage credentials, production pairing UX,
-  and conflict resolution remain later Phase 1 work
+  explicit secret allow policy, and conflict resolution remain later Phase 1 work
 
 ## Content Addressing
 
@@ -135,6 +137,10 @@ Important caveat: some projects intentionally commit or depend on directories na
 ## Secrets
 
 Secrets are blocked by default unless explicitly allowed.
+
+Current local foundation: high-confidence provider tokens, private-key PEM headers, and selected
+dotenv-style high-entropy secret assignments are blocked before regular file bytes are written to
+the local blob cache. Blocked files are represented as manifest policy entries without blob refs.
 
 Policy modes:
 

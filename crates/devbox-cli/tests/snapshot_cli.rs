@@ -98,6 +98,71 @@ fn snapshot_create_list_and_show_smoke() {
 }
 
 #[test]
+fn snapshot_blocks_secret_files_without_printing_raw_values() {
+    let fixture = SnapshotCliFixture::new();
+    let raw_secret = synthetic_token("sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456");
+    fixture.write("README.md", "safe\n");
+    fixture.write("secrets.env", &format!("OPENAI_API_KEY={raw_secret}\n"));
+
+    assert_success(&run_devbox([
+        "init",
+        "--db",
+        fixture.db_path(),
+        "--device-name",
+        "Desk",
+    ]));
+    let create = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&create);
+    let create_stdout = stdout(&create);
+    assert!(create_stdout.contains("Blocked secrets: 1"));
+    assert!(
+        create_stdout.contains("SECRET\tsecrets.env\tsecret blocked by policy rule openai_api_key")
+    );
+    assert!(create_stdout.contains("sk-<redacted>"));
+    assert!(!create_stdout.contains(&raw_secret));
+
+    let snapshot_id = prefixed_value(&create_stdout, "Snapshot id: ");
+    let show = run_devbox([
+        "snapshot",
+        "show",
+        "--db",
+        fixture.db_path(),
+        snapshot_id.as_str(),
+    ]);
+    assert_success(&show);
+    let show_stdout = stdout(&show);
+    assert!(show_stdout.contains("Blocked secrets: 1"));
+    assert!(show_stdout.contains("secrets.env\tfile\trequires_user_decision"));
+    assert!(show_stdout.contains("sk-<redacted>"));
+    assert!(!show_stdout.contains(&raw_secret));
+    assert_eq!(
+        manifest_entry_blob_refs(fixture.db_path(), snapshot_id.as_str(), "secrets.env"),
+        (None, None)
+    );
+
+    let publish = run_devbox([
+        "sync",
+        "publish-snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        snapshot_id.as_str(),
+    ]);
+    assert_success(&publish);
+    assert!(stdout(&publish).contains("Included blob count: 1"));
+}
+
+#[test]
 fn init_is_idempotent_and_devices_list_current_local_device() {
     let fixture = SnapshotCliFixture::new();
 
@@ -890,12 +955,35 @@ fn pending_change_row_count(db_path: &str) -> u64 {
     .expect("pending change count reads")
 }
 
+fn manifest_entry_blob_refs(
+    db_path: &str,
+    snapshot_id: &str,
+    path: &str,
+) -> (Option<String>, Option<String>) {
+    let conn = Connection::open(db_path).expect("metadata database opens");
+    conn.query_row(
+        r#"
+        SELECT me.blob_id, b.object_ref
+        FROM manifest_entries me
+        LEFT JOIN blobs b ON b.id = me.blob_id
+        WHERE me.snapshot_id = ?1 AND me.path = ?2
+        "#,
+        params![snapshot_id, path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("manifest entry reads")
+}
+
 fn prefixed_value(output: &str, prefix: &str) -> String {
     output
         .lines()
         .find_map(|line| line.strip_prefix(prefix))
         .expect("prefixed value prints")
         .to_string()
+}
+
+fn synthetic_token(prefix: &str, tail: &str) -> String {
+    [prefix, tail].concat()
 }
 
 fn blob_id_for_path(output: &str, path: &str) -> String {

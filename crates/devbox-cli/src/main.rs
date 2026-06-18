@@ -9,9 +9,9 @@ use devbox_materialize::{
     MaterializationRequest, PublishSnapshotRequest,
 };
 use devbox_snapshot::{
-    preflight_cache_root, preflight_db_path, scan_local_change_feed, LocalChangeFeedScanOptions,
-    RestoreMaterializer, RestorePlan, RestoreSkippedEntry, RestoreTargetStatus, RestoreWrite,
-    SnapshotManifestBuilder,
+    is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
+    LocalChangeFeedScanOptions, RestoreMaterializer, RestorePlan, RestoreSkippedEntry,
+    RestoreTargetStatus, RestoreWrite, SnapshotManifestBuilder, SnapshotManifestEntry,
 };
 use devbox_store::{
     local_project_id, path_to_store_string, BlobCache, EnsureLocalIdentityOptions, LocalChangeKind,
@@ -1527,6 +1527,8 @@ fn snapshot_dry_run(cache_root: &str, path: &str) -> Result<(), Box<dyn std::err
     println!("Included directories: {}", summary.included_directories());
     println!("Included symlinks: {}", summary.included_symlinks());
     println!("Policy exclusions: {}", summary.excluded_entries());
+    println!("Blocked secrets: {}", summary.blocked_secret_entries());
+    print_draft_blocked_secret_entries(snapshot.entries());
     println!("Included file bytes: {}", summary.total_file_bytes());
     println!("SQLite persistence: deferred");
 
@@ -1807,8 +1809,14 @@ fn print_persisted_snapshot_summary(
     db_path: &str,
     cache_root: &str,
 ) {
-    let (included_files, included_directories, included_symlinks, deferred_entries, excluded) =
-        summarize_entries(&persisted.entries);
+    let (
+        included_files,
+        included_directories,
+        included_symlinks,
+        deferred_entries,
+        excluded,
+        blocked_secrets,
+    ) = summarize_entries(&persisted.entries);
 
     println!("Snapshot id: {}", persisted.snapshot.id);
     println!("Project id: {}", persisted.project.id);
@@ -1824,6 +1832,8 @@ fn print_persisted_snapshot_summary(
     println!("Included symlinks: {included_symlinks}");
     println!("Policy exclusions: {excluded}");
     println!("Deferred entries: {deferred_entries}");
+    println!("Blocked secrets: {blocked_secrets}");
+    print_persisted_blocked_secret_entries(&persisted.entries);
     println!(
         "Included file bytes: {}",
         persisted.snapshot.total_size_bytes
@@ -1832,9 +1842,43 @@ fn print_persisted_snapshot_summary(
     println!("Blob cache: {cache_root}");
 }
 
+fn print_draft_blocked_secret_entries(entries: &[SnapshotManifestEntry]) {
+    for entry in entries {
+        if let PolicyDecision::RequiresUserDecision { reason } = entry.policy_decision() {
+            if is_secret_block_reason(reason) {
+                println!(
+                    "SECRET\t{}\t{}",
+                    path_to_store_string(entry.relative_path()),
+                    reason
+                );
+            }
+        }
+    }
+}
+
+fn print_persisted_blocked_secret_entries(entries: &[ManifestEntryRecord]) {
+    for entry in entries {
+        if let PolicyDecision::RequiresUserDecision { reason } = &entry.policy_decision {
+            if is_secret_block_reason(reason) {
+                println!(
+                    "SECRET\t{}\t{}",
+                    path_to_store_string(&entry.relative_path),
+                    reason
+                );
+            }
+        }
+    }
+}
+
 fn print_snapshot_detail(persisted: &PersistedSnapshot) {
-    let (included_files, included_directories, included_symlinks, deferred_entries, excluded) =
-        summarize_entries(&persisted.entries);
+    let (
+        included_files,
+        included_directories,
+        included_symlinks,
+        deferred_entries,
+        excluded,
+        blocked_secrets,
+    ) = summarize_entries(&persisted.entries);
 
     println!("Snapshot id: {}", persisted.snapshot.id);
     println!("Project id: {}", persisted.project.id);
@@ -1850,6 +1894,7 @@ fn print_snapshot_detail(persisted: &PersistedSnapshot) {
     println!("Included symlinks: {included_symlinks}");
     println!("Policy exclusions: {excluded}");
     println!("Deferred entries: {deferred_entries}");
+    println!("Blocked secrets: {blocked_secrets}");
     println!(
         "Included file bytes: {}",
         persisted.snapshot.total_size_bytes
@@ -1970,12 +2015,15 @@ fn restore_block_reason(plan: &RestorePlan) -> String {
     "restore apply blocked".to_string()
 }
 
-fn summarize_entries(entries: &[ManifestEntryRecord]) -> (usize, usize, usize, usize, usize) {
+fn summarize_entries(
+    entries: &[ManifestEntryRecord],
+) -> (usize, usize, usize, usize, usize, usize) {
     let mut included_files = 0;
     let mut included_directories = 0;
     let mut included_symlinks = 0;
     let mut deferred_entries = 0;
     let mut excluded_entries = 0;
+    let mut blocked_secret_entries = 0;
 
     for entry in entries {
         match &entry.policy_decision {
@@ -1986,7 +2034,12 @@ fn summarize_entries(entries: &[ManifestEntryRecord]) -> (usize, usize, usize, u
                 devbox_core::ManifestEntryKind::Unsupported => deferred_entries += 1,
             },
             PolicyDecision::Exclude { .. } => excluded_entries += 1,
-            PolicyDecision::RequiresUserDecision { .. } => deferred_entries += 1,
+            PolicyDecision::RequiresUserDecision { reason } => {
+                deferred_entries += 1;
+                if is_secret_block_reason(reason) {
+                    blocked_secret_entries += 1;
+                }
+            }
         }
     }
 
@@ -1996,6 +2049,7 @@ fn summarize_entries(entries: &[ManifestEntryRecord]) -> (usize, usize, usize, u
         included_symlinks,
         deferred_entries,
         excluded_entries,
+        blocked_secret_entries,
     )
 }
 
