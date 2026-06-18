@@ -67,12 +67,23 @@ impl std::error::Error for AuthError {}
 
 pub type AuthResult<T> = Result<T, AuthError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LocalIdentityView {
     pub account_id: String,
     pub device_id: String,
     pub device_name: String,
     pub sync_key_hex: String,
+}
+
+impl fmt::Debug for LocalIdentityView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalIdentityView")
+            .field("account_id", &self.account_id)
+            .field("device_id", &self.device_id)
+            .field("device_name", &self.device_name)
+            .field("sync_key_hex", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,13 +108,25 @@ pub struct PairingInvitation {
     pub approved_device_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PairingInvitationToken {
     pub id: String,
     pub account_id: String,
     pub inviter_device_id: String,
     pub expires_at_unix: i64,
     secret_hex: String,
+}
+
+impl fmt::Debug for PairingInvitationToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingInvitationToken")
+            .field("id", &self.id)
+            .field("account_id", &self.account_id)
+            .field("inviter_device_id", &self.inviter_device_id)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("secret_hex", &"<redacted>")
+            .finish()
+    }
 }
 
 impl PairingInvitationToken {
@@ -150,7 +173,7 @@ pub struct PairingInvitationDraft {
     pub token: PairingInvitationToken,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApprovedDevice {
     pub device_id: String,
     pub account_id: String,
@@ -158,6 +181,19 @@ pub struct ApprovedDevice {
     pub device_key_hex: String,
     pub invitation_id: String,
     pub approved_at: String,
+}
+
+impl fmt::Debug for ApprovedDevice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApprovedDevice")
+            .field("device_id", &self.device_id)
+            .field("account_id", &self.account_id)
+            .field("display_name", &self.display_name)
+            .field("device_key_hex", &"<redacted>")
+            .field("invitation_id", &self.invitation_id)
+            .field("approved_at", &self.approved_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,10 +206,19 @@ pub struct KeyEnvelope {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PairingApproval {
     pub device: ApprovedDevice,
     pub envelope: KeyEnvelope,
+}
+
+impl fmt::Debug for PairingApproval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingApproval")
+            .field("device", &self.device)
+            .field("envelope", &self.envelope)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -520,5 +565,43 @@ mod tests {
 
         assert_eq!(approval.device.display_name, "Travel laptop");
         assert_eq!(opened, identity().sync_key_hex);
+    }
+
+    #[test]
+    fn debug_output_redacts_secret_bearing_domain_objects() {
+        let identity = identity();
+        let draft = create_pairing_invitation(&identity, "2026-06-18T10:00:00Z", 100, 600)
+            .expect("invitation creates");
+        let token_text = draft.token.expose_for_cli();
+        let token_secret = token_text
+            .rsplit(':')
+            .next()
+            .expect("token contains secret")
+            .to_string();
+        let approval = approve_pairing_invitation(
+            &identity,
+            &draft.invitation,
+            &draft.token,
+            "Travel laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        )
+        .expect("approval works");
+        let device_key = approval.device.device_key_hex.clone();
+
+        let formatted_identity = format!("{identity:?}");
+        let formatted_token = format!("{:?}", draft.token);
+        let formatted_draft = format!("{draft:?}");
+        let formatted_device = format!("{:?}", approval.device);
+        let formatted_approval = format!("{approval:?}");
+
+        assert!(!formatted_identity.contains(&identity.sync_key_hex));
+        assert!(!formatted_token.contains(&token_secret));
+        assert!(!formatted_draft.contains(&token_secret));
+        assert!(!formatted_device.contains(&device_key));
+        assert!(!formatted_approval.contains(&device_key));
+        assert!(formatted_identity.contains("<redacted>"));
+        assert!(formatted_token.contains("<redacted>"));
+        assert!(formatted_device.contains("<redacted>"));
     }
 }

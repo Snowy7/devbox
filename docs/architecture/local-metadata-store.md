@@ -65,7 +65,7 @@ The existing `restore_attempts` table is still reserved for a later operation lo
 
 ## Migration Rules
 
-`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `5`.
+`Store::open_in_memory` and `Store::open_file` enable SQLite foreign-key enforcement immediately. `Store::apply_migrations` is idempotent and currently creates schema version `6`.
 
 The initial migration creates:
 
@@ -107,6 +107,10 @@ Schema version `5` adds local/mock auth and device-pairing metadata:
 These tables are local client state for the trusted personal alpha foundation. They model auth
 session summaries, pairing records, trusted-device metadata, encrypted key envelope references,
 revocation markers, and local cursor checkpoints without adding hosted backend behavior.
+
+Schema version `6` adds a unique invitation claim index for `trusted_devices.invitation_id`. The
+store also claims a pairing invitation inside the approval transaction with `status = 'pending'` so
+the same invitation cannot approve two devices.
 
 ## Deferred
 

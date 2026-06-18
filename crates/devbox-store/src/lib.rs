@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -44,6 +44,7 @@ pub enum StoreError {
     InvalidSnapshotDraft(String),
     InvalidStoredValue(String),
     DuplicateSnapshotId(String),
+    PairingInvitationAlreadyClaimed(String),
 }
 
 impl fmt::Display for StoreError {
@@ -58,6 +59,9 @@ impl fmt::Display for StoreError {
             Self::InvalidSnapshotDraft(message) => f.write_str(message),
             Self::InvalidStoredValue(message) => f.write_str(message),
             Self::DuplicateSnapshotId(id) => write!(f, "snapshot already exists: {id}"),
+            Self::PairingInvitationAlreadyClaimed(id) => {
+                write!(f, "pairing invitation is already claimed or missing: {id}")
+            }
         }
     }
 }
@@ -70,7 +74,8 @@ impl std::error::Error for StoreError {
             | Self::InvalidMigrationState(_)
             | Self::InvalidSnapshotDraft(_)
             | Self::InvalidStoredValue(_)
-            | Self::DuplicateSnapshotId(_) => None,
+            | Self::DuplicateSnapshotId(_)
+            | Self::PairingInvitationAlreadyClaimed(_) => None,
         }
     }
 }
@@ -147,6 +152,11 @@ impl Store {
 
         if version < 5 {
             self.conn.execute_batch(MIGRATION_5_AUTH_DEVICE_PAIRING)?;
+        }
+
+        if version < 6 {
+            self.conn
+                .execute_batch(MIGRATION_6_PAIRING_INVITATION_SINGLE_USE)?;
         }
 
         Ok(())
@@ -596,6 +606,20 @@ impl Store {
                 approval.envelope.created_at,
             ],
         )?;
+        let claimed = tx.execute(
+            r#"
+            UPDATE pairing_invitations
+            SET status = 'approved',
+                approved_device_id = ?1
+            WHERE id = ?2 AND status = 'pending'
+            "#,
+            params![approval.device.device_id, approval.device.invitation_id],
+        )?;
+        if claimed != 1 {
+            return Err(StoreError::PairingInvitationAlreadyClaimed(
+                approval.device.invitation_id.clone(),
+            ));
+        }
         tx.execute(
             r#"
             INSERT INTO trusted_devices (
@@ -616,15 +640,6 @@ impl Store {
                 approval.device.approved_at,
                 approval.envelope.id,
             ],
-        )?;
-        tx.execute(
-            r#"
-            UPDATE pairing_invitations
-            SET status = 'approved',
-                approved_device_id = ?1
-            WHERE id = ?2
-            "#,
-            params![approval.device.device_id, approval.device.invitation_id],
         )?;
         tx.commit()?;
 
@@ -1927,6 +1942,20 @@ PRAGMA user_version = 5;
 COMMIT;
 "#;
 
+const MIGRATION_6_PAIRING_INVITATION_SINGLE_USE: &str = r#"
+BEGIN;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trusted_devices_invitation_unique
+    ON trusted_devices(invitation_id);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (6, 'pairing_invitation_single_use');
+
+PRAGMA user_version = 6;
+
+COMMIT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2164,6 +2193,77 @@ mod tests {
         for id in approved_device_ids {
             assert!(trust.iter().any(|device| device.device_id == id));
         }
+    }
+
+    #[test]
+    fn pairing_invitation_can_only_be_persisted_once() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let view = local_identity_view(&identity);
+        let draft = devbox_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
+            .expect("invitation creates");
+        store
+            .insert_pairing_invitation(&draft.invitation)
+            .expect("invitation persists");
+        let loaded = store
+            .pairing_invitation(&draft.invitation.id)
+            .expect("invitation reads")
+            .expect("invitation exists");
+        let first = devbox_auth::approve_pairing_invitation(
+            &view,
+            &loaded,
+            &draft.token,
+            "Laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        )
+        .expect("first approval creates");
+        let second = devbox_auth::approve_pairing_invitation(
+            &view,
+            &loaded,
+            &draft.token,
+            "Second laptop",
+            "2026-06-18T10:01:01Z",
+            102,
+        )
+        .expect("second approval object can be derived from stale pending state");
+
+        store
+            .persist_pairing_approval(&first)
+            .expect("first approval persists");
+        let error = store
+            .persist_pairing_approval(&second)
+            .expect_err("second approval cannot claim invitation");
+
+        assert!(matches!(
+            error,
+            StoreError::PairingInvitationAlreadyClaimed(id) if id == draft.invitation.id
+        ));
+        let trust = store.list_device_trust().expect("trust lists");
+        assert_eq!(
+            trust
+                .iter()
+                .filter(|device| device.trust_state == "approved")
+                .count(),
+            1
+        );
+        assert!(store
+            .device_trust(&second.device.device_id)
+            .expect("second device lookup works")
+            .is_none());
+        assert_eq!(
+            store
+                .pairing_invitation(&draft.invitation.id)
+                .expect("invitation reads")
+                .expect("invitation exists")
+                .approved_device_id
+                .as_deref(),
+            Some(first.device.device_id.as_str())
+        );
     }
 
     #[test]

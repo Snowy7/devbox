@@ -36,7 +36,7 @@ The crate deliberately does not open SQLite, talk to a network service, or print
 
 ## Local Metadata
 
-Schema version `5` adds local-only tables:
+Schema versions `5` and `6` add local-only auth/device-pairing state:
 
 - `auth_sessions`
 - `pairing_invitations`
@@ -49,6 +49,10 @@ These rows let the CLI and future daemon code exercise trust-state semantics wit
 backend. Raw local account/device key material remains local SQLite state and is never printed by the
 CLI. Pairing tokens are intentionally printed for the manual mock approval path; they are not a
 production pairing UX.
+
+Schema version `6` adds a unique invitation claim index so a pairing invitation can approve at most
+one trusted device. `Store::persist_pairing_approval` also claims invitations with
+`WHERE status = 'pending'` inside the approval transaction.
 
 ## CLI Smoke Path
 
