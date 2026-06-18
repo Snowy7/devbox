@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "crates/devbox-cli",
+    "crates/devbox-core",
+    "crates/devbox-daemon",
+    "crates/devbox-git",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Snowy7/devbox"
+rust-version = "1.75"
