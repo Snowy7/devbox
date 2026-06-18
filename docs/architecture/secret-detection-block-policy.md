@@ -14,7 +14,7 @@ It does not implement:
 - team policy administration
 - production cloud authentication
 - hosted metadata enforcement
-- real R2/S3 credentials or object layout
+- managed R2/S3 credential provisioning or hosted object indexing
 - encrypted personal/team secret envelopes
 - an override UI
 

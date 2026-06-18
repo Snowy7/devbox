@@ -391,6 +391,128 @@ fn sync_upload_and_download_encrypts_remote_object_bytes() {
 }
 
 #[test]
+fn sync_remote_check_s3_validate_only_redacts_credentials() {
+    let check = run_devbox([
+        "sync",
+        "remote",
+        "check",
+        "--remote-kind",
+        "s3",
+        "--s3-endpoint",
+        "https://example.r2.cloudflarestorage.com",
+        "--s3-bucket",
+        "devbox-alpha",
+        "--s3-region",
+        "auto",
+        "--s3-prefix",
+        "accounts/acct/projects",
+        "--s3-access-key-env",
+        "DEVBOX_R2_ACCESS_KEY_ID",
+        "--s3-secret-key-env",
+        "DEVBOX_R2_SECRET_ACCESS_KEY",
+        "--validate-only",
+    ]);
+    assert_success(&check);
+    let output = stdout(&check);
+
+    assert!(output.contains("Sync remote check"));
+    assert!(output.contains("Remote provider: s3-compatible"));
+    assert!(output.contains("Remote endpoint host: example.r2.cloudflarestorage.com"));
+    assert!(output.contains("Remote bucket: devbox-alpha"));
+    assert!(output.contains("Remote region: auto"));
+    assert!(output.contains("Remote prefix: accounts/acct/projects"));
+    assert!(output.contains("Credential access key env: DEVBOX_R2_ACCESS_KEY_ID"));
+    assert!(output.contains("Credential secret key env: DEVBOX_R2_SECRET_ACCESS_KEY"));
+    assert!(output.contains("Network check: skipped"));
+    assert!(output.contains("Credentials redacted: true"));
+    assert!(!output.contains("AKIA"));
+    assert!(!output.contains("secret-value"));
+}
+
+#[test]
+fn sync_remote_check_local_validate_only_does_not_create_remote_root() {
+    let fixture = SnapshotCliFixture::new();
+
+    let check = run_devbox([
+        "sync",
+        "remote",
+        "check",
+        "--remote",
+        fixture.remote_path(),
+        "--validate-only",
+    ]);
+    assert_success(&check);
+    let output = stdout(&check);
+
+    assert!(output.contains("Remote provider: local filesystem"));
+    assert!(output.contains("Remote credentials: not used"));
+    assert!(output.contains("Network check: skipped"));
+    assert!(!fixture.remote_path_buf().exists());
+}
+
+#[test]
+fn sync_remote_check_s3_session_token_requires_named_access_and_secret_envs() {
+    let check = run_devbox([
+        "sync",
+        "remote",
+        "check",
+        "--remote-kind",
+        "s3",
+        "--s3-endpoint",
+        "https://example.r2.cloudflarestorage.com",
+        "--s3-bucket",
+        "devbox-alpha",
+        "--s3-session-token-env",
+        "DEVBOX_R2_SESSION_TOKEN",
+        "--validate-only",
+    ]);
+    assert_failure(&check);
+    let error = stderr(&check);
+
+    assert!(error
+        .contains("--s3-session-token-env requires --s3-access-key-env and --s3-secret-key-env"));
+}
+
+#[test]
+fn sync_remote_check_rejects_s3_flags_without_s3_remote_kind() {
+    let fixture = SnapshotCliFixture::new();
+
+    let check = run_devbox([
+        "sync",
+        "remote",
+        "check",
+        "--remote",
+        fixture.remote_path(),
+        "--s3-endpoint",
+        "https://example.r2.cloudflarestorage.com",
+        "--s3-bucket",
+        "devbox-alpha",
+        "--validate-only",
+    ]);
+    assert_failure(&check);
+    let error = stderr(&check);
+
+    assert!(error.contains(
+        "sync remote check received --s3-* flags; add --remote-kind s3 to use an S3-compatible remote"
+    ));
+
+    let region_only = run_devbox([
+        "sync",
+        "remote",
+        "check",
+        "--remote",
+        fixture.remote_path(),
+        "--s3-region",
+        "us-east-1",
+        "--validate-only",
+    ]);
+    assert_failure(&region_only);
+    assert!(stderr(&region_only).contains(
+        "sync remote check received --s3-* flags; add --remote-kind s3 to use an S3-compatible remote"
+    ));
+}
+
+#[test]
 fn sync_snapshot_publish_import_and_materialize_smoke_uses_two_local_contexts() {
     let fixture = SnapshotCliFixture::new();
     let plaintext = "hello from device one\n";

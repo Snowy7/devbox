@@ -26,7 +26,8 @@ use devbox_store::{
 };
 use devbox_sync::{
     download_blob_to_cache, encrypted_blob_object_key, upload_blob_from_cache,
-    LocalFilesystemBlobProvider, ObjectKey, SyncKey,
+    LocalFilesystemBlobProvider, ObjectKey, RemoteBlobProvider, S3CompatibleBlobProvider,
+    S3CompatibleConfig, S3CredentialsSource, S3RedactedConfig, SyncKey,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -299,7 +300,7 @@ struct DeviceRevokeArgs {
 struct SyncBlobArgs {
     db_path: String,
     cache_root: String,
-    remote_root: String,
+    remote: SyncRemoteArgs,
     blob_id: String,
     object_key: Option<String>,
 }
@@ -308,7 +309,7 @@ struct SyncBlobArgs {
 struct SyncSnapshotArgs {
     db_path: String,
     cache_root: String,
-    remote_root: String,
+    remote: SyncRemoteArgs,
     snapshot_id: String,
     mock_key_source_db: Option<String>,
 }
@@ -317,11 +318,54 @@ struct SyncSnapshotArgs {
 struct SyncMaterializeArgs {
     db_path: String,
     cache_root: String,
-    remote_root: String,
+    remote: SyncRemoteArgs,
     target: String,
     snapshot_id: String,
     mock_key_source_db: Option<String>,
     apply: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncRemoteKindArg {
+    Local,
+    S3,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncRemoteArgs {
+    kind: SyncRemoteKindArg,
+    local_root: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_bucket: Option<String>,
+    s3_region: String,
+    s3_region_explicit: bool,
+    s3_prefix: Option<String>,
+    s3_access_key_env: Option<String>,
+    s3_secret_key_env: Option<String>,
+    s3_session_token_env: Option<String>,
+}
+
+impl Default for SyncRemoteArgs {
+    fn default() -> Self {
+        Self {
+            kind: SyncRemoteKindArg::Local,
+            local_root: None,
+            s3_endpoint: None,
+            s3_bucket: None,
+            s3_region: "auto".to_string(),
+            s3_region_explicit: false,
+            s3_prefix: None,
+            s3_access_key_env: None,
+            s3_secret_key_env: None,
+            s3_session_token_env: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncRemoteCheckArgs {
+    remote: SyncRemoteArgs,
+    validate_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,6 +554,23 @@ fn run_sync(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("remote") => match args.get(1).map(String::as_str) {
+            Some("check") => match parse_sync_remote_check_args(&args[2..])
+                .and_then(|args| sync_remote_check(&args).map_err(|error| error.to_string()))
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    print_sync_usage();
+                    ExitCode::from(1)
+                }
+            },
+            _ => {
+                eprintln!("devbox: sync remote requires check");
+                print_sync_usage();
+                ExitCode::from(2)
+            }
+        },
         Some("cursor") => match args.get(1).map(String::as_str) {
             Some("get") => match parse_sync_cursor_args(&args[2..], false)
                 .and_then(|args| sync_cursor_get(&args).map_err(|error| error.to_string()))
@@ -539,7 +600,7 @@ fn run_sync(args: &[String]) -> ExitCode {
         },
         _ => {
             eprintln!(
-                "devbox: sync requires publish-snapshot, import-snapshot, materialize, preflight, upload, download, or cursor"
+                "devbox: sync requires publish-snapshot, import-snapshot, materialize, preflight, upload, download, remote, or cursor"
             );
             print_sync_usage();
             ExitCode::from(2)
@@ -737,13 +798,18 @@ fn parse_device_revoke_args(args: &[String]) -> Result<DeviceRevokeArgs, String>
 fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
     let mut db_path = None;
     let mut cache_root = None;
-    let mut remote_root = None;
+    let mut remote = SyncRemoteArgs::default();
     let mut object_key = None;
     let mut blob_id = None;
     let mut index = 0;
 
     while index < args.len() {
-        match args[index].as_str() {
+        let current = args[index].as_str();
+        if parse_sync_remote_arg(current, args, &mut index, &mut remote)? {
+            index += 1;
+            continue;
+        }
+        match current {
             "--db" => {
                 index += 1;
                 let value = args
@@ -757,13 +823,6 @@ fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
                     .get(index)
                     .ok_or_else(|| "--cache requires a path".to_string())?;
                 cache_root = Some(value.clone());
-            }
-            "--remote" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "--remote requires a directory".to_string())?;
-                remote_root = Some(value.clone());
             }
             "--object-key" => {
                 index += 1;
@@ -788,8 +847,7 @@ fn parse_sync_blob_args(args: &[String]) -> Result<SyncBlobArgs, String> {
     Ok(SyncBlobArgs {
         db_path: db_path.ok_or_else(|| "sync requires --db <DB_PATH>".to_string())?,
         cache_root: cache_root.ok_or_else(|| "sync requires --cache <CACHE_ROOT>".to_string())?,
-        remote_root: remote_root
-            .ok_or_else(|| "sync requires --remote <REMOTE_DIR>".to_string())?,
+        remote: finalize_sync_remote(remote, "sync")?,
         blob_id: blob_id.ok_or_else(|| "sync requires a blob id".to_string())?,
         object_key,
     })
@@ -801,13 +859,18 @@ fn parse_sync_snapshot_args(
 ) -> Result<SyncSnapshotArgs, String> {
     let mut db_path = None;
     let mut cache_root = None;
-    let mut remote_root = None;
+    let mut remote = SyncRemoteArgs::default();
     let mut snapshot_id = None;
     let mut mock_key_source_db = None;
     let mut index = 0;
 
     while index < args.len() {
-        match args[index].as_str() {
+        let current = args[index].as_str();
+        if parse_sync_remote_arg(current, args, &mut index, &mut remote)? {
+            index += 1;
+            continue;
+        }
+        match current {
             "--db" => {
                 index += 1;
                 let value = args
@@ -821,13 +884,6 @@ fn parse_sync_snapshot_args(
                     .get(index)
                     .ok_or_else(|| "--cache requires a path".to_string())?;
                 cache_root = Some(value.clone());
-            }
-            "--remote" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "--remote requires a directory".to_string())?;
-                remote_root = Some(value.clone());
             }
             "--mock-key-source-db" if allow_mock_key_source => {
                 index += 1;
@@ -858,8 +914,7 @@ fn parse_sync_snapshot_args(
         db_path: db_path.ok_or_else(|| "sync snapshot requires --db <DB_PATH>".to_string())?,
         cache_root: cache_root
             .ok_or_else(|| "sync snapshot requires --cache <CACHE_ROOT>".to_string())?,
-        remote_root: remote_root
-            .ok_or_else(|| "sync snapshot requires --remote <REMOTE_DIR>".to_string())?,
+        remote: finalize_sync_remote(remote, "sync snapshot")?,
         snapshot_id: snapshot_id
             .ok_or_else(|| "sync snapshot requires a snapshot id".to_string())?,
         mock_key_source_db,
@@ -869,7 +924,7 @@ fn parse_sync_snapshot_args(
 fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, String> {
     let mut db_path = None;
     let mut cache_root = None;
-    let mut remote_root = None;
+    let mut remote = SyncRemoteArgs::default();
     let mut target = None;
     let mut snapshot_id = None;
     let mut mock_key_source_db = None;
@@ -878,7 +933,12 @@ fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, S
     let mut index = 0;
 
     while index < args.len() {
-        match args[index].as_str() {
+        let current = args[index].as_str();
+        if parse_sync_remote_arg(current, args, &mut index, &mut remote)? {
+            index += 1;
+            continue;
+        }
+        match current {
             "--db" => {
                 index += 1;
                 let value = args
@@ -892,13 +952,6 @@ fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, S
                     .get(index)
                     .ok_or_else(|| "--cache requires a path".to_string())?;
                 cache_root = Some(value.clone());
-            }
-            "--remote" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "--remote requires a directory".to_string())?;
-                remote_root = Some(value.clone());
             }
             "--to" => {
                 index += 1;
@@ -945,14 +998,201 @@ fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, S
         db_path: db_path.ok_or_else(|| "sync materialize requires --db <DB_PATH>".to_string())?,
         cache_root: cache_root
             .ok_or_else(|| "sync materialize requires --cache <CACHE_ROOT>".to_string())?,
-        remote_root: remote_root
-            .ok_or_else(|| "sync materialize requires --remote <REMOTE_DIR>".to_string())?,
+        remote: finalize_sync_remote(remote, "sync materialize")?,
         target: target.ok_or_else(|| "sync materialize requires --to <TARGET_DIR>".to_string())?,
         snapshot_id: snapshot_id
             .ok_or_else(|| "sync materialize requires a snapshot id".to_string())?,
         mock_key_source_db,
         apply,
     })
+}
+
+fn parse_sync_remote_check_args(args: &[String]) -> Result<SyncRemoteCheckArgs, String> {
+    let mut remote = SyncRemoteArgs::default();
+    let mut validate_only = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        let current = args[index].as_str();
+        if parse_sync_remote_arg(current, args, &mut index, &mut remote)? {
+            index += 1;
+            continue;
+        }
+        match current {
+            "--validate-only" => {
+                validate_only = true;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown sync remote check option '{value}'"));
+            }
+            _ => return Err("sync remote check accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(SyncRemoteCheckArgs {
+        remote: finalize_sync_remote(remote, "sync remote check")?,
+        validate_only,
+    })
+}
+
+fn parse_sync_remote_arg(
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+    remote: &mut SyncRemoteArgs,
+) -> Result<bool, String> {
+    match flag {
+        "--remote-kind" => {
+            *index += 1;
+            let value = args
+                .get(*index)
+                .ok_or_else(|| "--remote-kind requires local or s3".to_string())?;
+            remote.kind = match value.as_str() {
+                "local" => SyncRemoteKindArg::Local,
+                "s3" => SyncRemoteKindArg::S3,
+                _ => return Err("--remote-kind requires local or s3".to_string()),
+            };
+            Ok(true)
+        }
+        "--remote" => {
+            *index += 1;
+            let value = args
+                .get(*index)
+                .ok_or_else(|| "--remote requires a directory".to_string())?;
+            remote.local_root = Some(value.clone());
+            Ok(true)
+        }
+        "--s3-endpoint" => {
+            *index += 1;
+            let value = args
+                .get(*index)
+                .ok_or_else(|| "--s3-endpoint requires a URL".to_string())?;
+            remote.s3_endpoint = Some(value.clone());
+            Ok(true)
+        }
+        "--s3-bucket" => {
+            *index += 1;
+            let value = args
+                .get(*index)
+                .ok_or_else(|| "--s3-bucket requires a bucket".to_string())?;
+            remote.s3_bucket = Some(value.clone());
+            Ok(true)
+        }
+        "--s3-region" => {
+            *index += 1;
+            let value = args
+                .get(*index)
+                .ok_or_else(|| "--s3-region requires a region".to_string())?;
+            remote.s3_region = value.clone();
+            remote.s3_region_explicit = true;
+            Ok(true)
+        }
+        "--s3-prefix" => {
+            *index += 1;
+            let value = args
+                .get(*index)
+                .ok_or_else(|| "--s3-prefix requires a prefix".to_string())?;
+            remote.s3_prefix = Some(value.clone());
+            Ok(true)
+        }
+        "--s3-access-key-env" => {
+            *index += 1;
+            let value = args.get(*index).ok_or_else(|| {
+                "--s3-access-key-env requires an environment variable name".to_string()
+            })?;
+            remote.s3_access_key_env = Some(value.clone());
+            Ok(true)
+        }
+        "--s3-secret-key-env" => {
+            *index += 1;
+            let value = args.get(*index).ok_or_else(|| {
+                "--s3-secret-key-env requires an environment variable name".to_string()
+            })?;
+            remote.s3_secret_key_env = Some(value.clone());
+            Ok(true)
+        }
+        "--s3-session-token-env" => {
+            *index += 1;
+            let value = args.get(*index).ok_or_else(|| {
+                "--s3-session-token-env requires an environment variable name".to_string()
+            })?;
+            remote.s3_session_token_env = Some(value.clone());
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn finalize_sync_remote(
+    remote: SyncRemoteArgs,
+    command_name: &str,
+) -> Result<SyncRemoteArgs, String> {
+    match remote.kind {
+        SyncRemoteKindArg::Local => {
+            if remote.local_root.is_none() {
+                return Err(format!("{command_name} requires --remote <REMOTE_DIR>"));
+            }
+            if remote.has_s3_options() {
+                return Err(format!(
+                    "{command_name} received --s3-* flags; add --remote-kind s3 to use an S3-compatible remote"
+                ));
+            }
+            Ok(remote)
+        }
+        SyncRemoteKindArg::S3 => {
+            if remote.local_root.is_some() {
+                return Err(format!(
+                    "{command_name} uses --s3-endpoint/--s3-bucket for --remote-kind s3, not --remote"
+                ));
+            }
+            if remote.s3_endpoint.is_none() {
+                return Err(format!(
+                    "{command_name} requires --s3-endpoint <URL> for --remote-kind s3"
+                ));
+            }
+            if remote.s3_bucket.is_none() {
+                return Err(format!(
+                    "{command_name} requires --s3-bucket <BUCKET> for --remote-kind s3"
+                ));
+            }
+            match (
+                remote.s3_access_key_env.as_ref(),
+                remote.s3_secret_key_env.as_ref(),
+            ) {
+                (Some(_), Some(_)) => {}
+                (None, None) => {
+                    if remote.s3_session_token_env.is_some() {
+                        return Err(
+                            "--s3-session-token-env requires --s3-access-key-env and --s3-secret-key-env"
+                                .to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    return Err(
+                        "--s3-access-key-env and --s3-secret-key-env must be provided together"
+                            .to_string(),
+                    );
+                }
+            }
+            let _ = s3_config_from_args(&remote).map_err(|error| error.to_string())?;
+            Ok(remote)
+        }
+    }
+}
+
+impl SyncRemoteArgs {
+    fn has_s3_options(&self) -> bool {
+        self.s3_endpoint.is_some()
+            || self.s3_bucket.is_some()
+            || self.s3_region_explicit
+            || self.s3_prefix.is_some()
+            || self.s3_access_key_env.is_some()
+            || self.s3_secret_key_env.is_some()
+            || self.s3_session_token_env.is_some()
+    }
 }
 
 fn parse_sync_preflight_args(args: &[String]) -> Result<SyncPreflightArgs, String> {
@@ -1563,6 +1803,169 @@ fn devices_revoke(args: &DeviceRevokeArgs) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+enum RemoteProviderDescription {
+    Local { root: PathBuf },
+    S3 { redacted: S3RedactedConfig },
+}
+
+fn open_remote_provider(
+    remote: &SyncRemoteArgs,
+) -> Result<(Box<dyn RemoteBlobProvider>, RemoteProviderDescription), Box<dyn std::error::Error>> {
+    match remote.kind {
+        SyncRemoteKindArg::Local => {
+            let root = remote
+                .local_root
+                .as_ref()
+                .ok_or("local remote requires --remote <REMOTE_DIR>")?;
+            let provider = LocalFilesystemBlobProvider::open(root)?;
+            let description = RemoteProviderDescription::Local {
+                root: provider.root().to_path_buf(),
+            };
+            Ok((Box::new(provider), description))
+        }
+        SyncRemoteKindArg::S3 => {
+            let config = s3_config_from_args(remote)?;
+            let redacted = config.redacted();
+            let provider = S3CompatibleBlobProvider::from_env(config)?;
+            Ok((
+                Box::new(provider),
+                RemoteProviderDescription::S3 { redacted },
+            ))
+        }
+    }
+}
+
+fn s3_config_from_args(
+    remote: &SyncRemoteArgs,
+) -> Result<S3CompatibleConfig, Box<dyn std::error::Error>> {
+    let credentials = match (
+        remote.s3_access_key_env.as_ref(),
+        remote.s3_secret_key_env.as_ref(),
+    ) {
+        (Some(access), Some(secret)) => S3CredentialsSource::env(
+            access.clone(),
+            secret.clone(),
+            remote.s3_session_token_env.clone(),
+        )?,
+        (None, None) => {
+            if remote.s3_session_token_env.is_some() {
+                return Err(
+                    "--s3-session-token-env requires --s3-access-key-env and --s3-secret-key-env"
+                        .into(),
+                );
+            }
+            S3CredentialsSource::default()
+        }
+        _ => {
+            return Err(
+                "--s3-access-key-env and --s3-secret-key-env must be provided together".into(),
+            );
+        }
+    };
+
+    Ok(S3CompatibleConfig::new(
+        remote
+            .s3_endpoint
+            .as_deref()
+            .ok_or("--s3-endpoint is required")?,
+        remote
+            .s3_bucket
+            .as_deref()
+            .ok_or("--s3-bucket is required")?,
+        remote.s3_region.as_str(),
+        remote.s3_prefix.as_deref(),
+        credentials,
+    )?)
+}
+
+fn print_remote_description(description: &RemoteProviderDescription) {
+    match description {
+        RemoteProviderDescription::Local { root } => {
+            println!("Remote provider: local filesystem");
+            println!("Remote root: {}", root.display());
+            println!("Remote credentials: not used");
+        }
+        RemoteProviderDescription::S3 { redacted } => {
+            println!("Remote provider: s3-compatible");
+            println!("Remote endpoint host: {}", redacted.endpoint_host);
+            println!("Remote bucket: {}", redacted.bucket);
+            println!("Remote region: {}", redacted.region);
+            println!(
+                "Remote prefix: {}",
+                redacted.prefix.as_deref().unwrap_or("-")
+            );
+            println!("Credential access key env: {}", redacted.access_key_env);
+            println!("Credential secret key env: {}", redacted.secret_key_env);
+            println!(
+                "Credential session token env: {}",
+                redacted.session_token_env.as_deref().unwrap_or("-")
+            );
+        }
+    }
+}
+
+fn print_cloud_auth_boundary(description: &RemoteProviderDescription) {
+    match description {
+        RemoteProviderDescription::Local { .. } => {
+            println!("Cloud authentication: not configured");
+        }
+        RemoteProviderDescription::S3 { .. } => {
+            println!("Cloud authentication: credentials loaded from environment");
+        }
+    }
+}
+
+fn sync_remote_check(args: &SyncRemoteCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Sync remote check");
+    match args.remote.kind {
+        SyncRemoteKindArg::Local => {
+            let root = args
+                .remote
+                .local_root
+                .as_ref()
+                .ok_or("local remote requires --remote <REMOTE_DIR>")?;
+            let description = RemoteProviderDescription::Local {
+                root: PathBuf::from(root),
+            };
+            print_remote_description(&description);
+            if args.validate_only {
+                println!("Network check: skipped");
+            } else {
+                let (provider, _) = open_remote_provider(&args.remote)?;
+                let probe = ObjectKey::new("devbox/remote-check/probe")?;
+                let status = if provider.head(&probe)?.is_some() {
+                    "present"
+                } else {
+                    "missing"
+                };
+                println!("Probe object: {status}");
+            }
+        }
+        SyncRemoteKindArg::S3 => {
+            let config = s3_config_from_args(&args.remote)?;
+            let redacted = config.redacted();
+            print_remote_description(&RemoteProviderDescription::S3 { redacted });
+            if args.validate_only {
+                println!("Network check: skipped");
+            } else {
+                let provider = S3CompatibleBlobProvider::from_env(config)?;
+                let probe = ObjectKey::new("devbox/remote-check/probe")?;
+                let status = if provider.head(&probe)?.is_some() {
+                    "present"
+                } else {
+                    "missing"
+                };
+                println!("Probe object: {status}");
+            }
+        }
+    }
+    println!("Credentials redacted: true");
+    println!("Status: ok");
+
+    Ok(())
+}
+
 fn sync_upload(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_existing_metadata_store(&args.db_path)?;
     store.apply_migrations()?;
@@ -1573,8 +1976,9 @@ fn sync_upload(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> {
     let blob_id = BlobId::from_blake3_hex(&args.blob_id)?;
     let object_key = sync_object_key(&blob_id, args.object_key.as_deref())?;
     let cache = BlobCache::open(&args.cache_root)?;
-    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
-    let uploaded = upload_blob_from_cache(&cache, &provider, &sync_key, &blob_id, &object_key)?;
+    let (provider, remote_description) = open_remote_provider(&args.remote)?;
+    let uploaded =
+        upload_blob_from_cache(&cache, provider.as_ref(), &sync_key, &blob_id, &object_key)?;
 
     println!("Sync upload: encrypted local-remote object");
     println!("Blob id: {blob_id}");
@@ -1582,9 +1986,8 @@ fn sync_upload(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("Plaintext bytes: {}", uploaded.plaintext_bytes);
     println!("Remote bytes: {}", uploaded.remote_bytes);
     println!("Uploaded: {}", uploaded.uploaded);
-    println!("Remote provider: local filesystem");
-    println!("Remote root: {}", provider.root().display());
-    println!("Cloud authentication: not configured");
+    print_remote_description(&remote_description);
+    print_cloud_auth_boundary(&remote_description);
 
     Ok(())
 }
@@ -1599,8 +2002,9 @@ fn sync_download(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> 
     let blob_id = BlobId::from_blake3_hex(&args.blob_id)?;
     let object_key = sync_object_key(&blob_id, args.object_key.as_deref())?;
     let cache = BlobCache::open(&args.cache_root)?;
-    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
-    let downloaded = download_blob_to_cache(&cache, &provider, &sync_key, &blob_id, &object_key)?;
+    let (provider, remote_description) = open_remote_provider(&args.remote)?;
+    let downloaded =
+        download_blob_to_cache(&cache, provider.as_ref(), &sync_key, &blob_id, &object_key)?;
 
     println!("Sync download: decrypted into local blob cache");
     println!("Blob id: {blob_id}");
@@ -1608,22 +2012,21 @@ fn sync_download(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> 
     println!("Plaintext bytes: {}", downloaded.plaintext_bytes);
     println!("Remote bytes: {}", downloaded.remote_bytes);
     println!("Blob cache: {}", cache.root().display());
-    println!("Remote provider: local filesystem");
-    println!("Remote root: {}", provider.root().display());
-    println!("Cloud authentication: not configured");
+    print_remote_description(&remote_description);
+    print_cloud_auth_boundary(&remote_description);
 
     Ok(())
 }
 
 fn sync_publish_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let (provider, remote_description) = open_remote_provider(&args.remote)?;
     let published = publish_snapshot(
         &PublishSnapshotRequest {
             db_path: PathBuf::from(&args.db_path),
             cache_root: PathBuf::from(&args.cache_root),
             snapshot_id: args.snapshot_id.clone(),
         },
-        &provider,
+        provider.as_ref(),
     )?;
 
     println!("Sync publish snapshot: encrypted local/mock bundle");
@@ -1642,17 +2045,16 @@ fn sync_publish_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::err
     println!("Uploaded blob count: {}", published.uploaded_blob_count);
     println!("Plaintext blob bytes: {}", published.plaintext_blob_bytes);
     println!("Remote blob bytes: {}", published.remote_blob_bytes);
-    println!("Remote provider: local filesystem");
-    println!("Remote root: {}", provider.root().display());
+    print_remote_description(&remote_description);
     println!(
-        "Boundary: local/mock second-device foundation; production backend/R2/UI not configured"
+        "Boundary: local/mock second-device foundation with pluggable encrypted object remote; hosted metadata/auth/UI not configured"
     );
 
     Ok(())
 }
 
 fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let (provider, remote_description) = open_remote_provider(&args.remote)?;
     let imported = match import_snapshot(
         &ImportSnapshotRequest {
             db_path: PathBuf::from(&args.db_path),
@@ -1660,7 +2062,7 @@ fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::erro
             key_source_db_path: args.mock_key_source_db.as_ref().map(PathBuf::from),
             snapshot_id: args.snapshot_id.clone(),
         },
-        &provider,
+        provider.as_ref(),
     ) {
         Ok(imported) => imported,
         Err(MaterializeError::PreflightBlocked(outcome)) => {
@@ -1684,8 +2086,7 @@ fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::erro
     println!("Remote blob bytes: {}", imported.remote_blob_bytes);
     println!("Cursor value: {}", imported.cursor_value);
     println!("Cursor updated at: {}", imported.cursor_updated_at);
-    println!("Remote provider: local filesystem");
-    println!("Remote root: {}", provider.root().display());
+    print_remote_description(&remote_description);
     if args.mock_key_source_db.is_some() {
         println!(
             "Trust bootstrap: local/mock --mock-key-source-db used; raw keys were not printed"
@@ -1694,14 +2095,14 @@ fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::erro
         println!("Trust bootstrap: receiver local identity key");
     }
     println!(
-        "Boundary: local/mock second-device foundation; production backend/R2/UI not configured"
+        "Boundary: local/mock second-device foundation with pluggable encrypted object remote; hosted metadata/auth/UI not configured"
     );
 
     Ok(())
 }
 
 fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let provider = LocalFilesystemBlobProvider::open(&args.remote_root)?;
+    let (provider, remote_description) = open_remote_provider(&args.remote)?;
     let outcome = match materialize_snapshot(
         &MaterializationRequest {
             db_path: PathBuf::from(&args.db_path),
@@ -1711,7 +2112,7 @@ fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error
             target: PathBuf::from(&args.target),
             apply: args.apply,
         },
-        &provider,
+        provider.as_ref(),
     ) {
         Ok(outcome) => outcome,
         Err(MaterializeError::PreflightBlocked(outcome)) => {
@@ -1743,8 +2144,7 @@ fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error
     println!("Bytes to write: {}", outcome.plan.bytes_to_write);
     println!("Cursor value: {}", outcome.import.cursor_value);
     println!("Cursor updated at: {}", outcome.import.cursor_updated_at);
-    println!("Remote provider: local filesystem");
-    println!("Remote root: {}", provider.root().display());
+    print_remote_description(&remote_description);
     if args.mock_key_source_db.is_some() {
         println!(
             "Trust bootstrap: local/mock --mock-key-source-db used; raw keys were not printed"
@@ -1753,7 +2153,7 @@ fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error
         println!("Trust bootstrap: receiver local identity key");
     }
     println!(
-        "Boundary: local/mock second-device foundation; production backend/R2/UI not configured"
+        "Boundary: local/mock second-device foundation with pluggable encrypted object remote; hosted metadata/auth/UI not configured"
     );
 
     Ok(())
@@ -2759,6 +3159,13 @@ fn print_sync_usage() {
     );
     eprintln!(
         "  devbox sync download --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> <BLOB_ID> [--object-key <KEY>]"
+    );
+    eprintln!("  devbox sync remote check --remote <REMOTE_DIR> [--validate-only]");
+    eprintln!(
+        "  devbox sync remote check --remote-kind s3 --s3-endpoint <URL> --s3-bucket <BUCKET> [--s3-region <REGION>] [--s3-prefix <PREFIX>] [--s3-access-key-env <ENV> --s3-secret-key-env <ENV>] [--s3-session-token-env <ENV>] [--validate-only]"
+    );
+    eprintln!(
+        "  Add --remote-kind s3 plus the --s3-* flags above to publish-snapshot, import-snapshot, materialize, upload, or download."
     );
     eprintln!(
         "  devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID> [--device <DEVICE_ID>]"

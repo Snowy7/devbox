@@ -12,8 +12,9 @@ The implementation is local-first:
 - `devbox-store` still owns local SQLite cursors, snapshots, conflicts, and conflict rows.
 - `devbox-cli` exposes a scriptable `devbox sync preflight` command.
 
-It does not add production auth, hosted metadata, server-side cursors, real R2/S3, Electron UI,
-automatic merge/apply resolution, Git replacement UX, or a hosted conflict service.
+It does not add production auth, hosted metadata, server-side cursors, managed R2/S3 credential
+provisioning, Electron UI, automatic merge/apply resolution, Git replacement UX, or a hosted
+conflict service.
 
 ## Preflight Semantics
 

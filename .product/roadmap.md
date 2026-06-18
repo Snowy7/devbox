@@ -51,6 +51,7 @@ Completed foundations:
 - local watcher daemon feeding the pending operation log
 - local account/current-device identity and key material
 - encrypted remote blob transport through a local filesystem provider
+- S3-compatible encrypted remote blob provider foundation for Cloudflare R2, AWS S3, and MinIO
 - local/mock auth session, pairing invitation, approved-device trust, key envelope, revocation, and
   cursor primitives
 - local/mock second-device materialization through an encrypted local filesystem remote, including
@@ -66,7 +67,7 @@ Remaining auth and pairing work:
 - production sign-in and account ownership proof
 - hosted metadata service and server-side device/project cursors
 - production pairing UX, recovery, and rotation flows
-- real cloud object credentials
+- managed cloud object credentials, provisioning, and rotation
 - explicit path-scoped secret allow/template/envelope policy
 - automatic conflict merge/apply resolution and user-facing conflict flows
 

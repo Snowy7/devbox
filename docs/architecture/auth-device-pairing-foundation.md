@@ -16,7 +16,8 @@ This is not production authentication.
 
 The implementation uses the existing local SQLite metadata store and a local/mock provider boundary.
 It does not add OAuth, hosted sign-in, account billing identity, a deployed metadata service,
-production recovery flows, real R2/S3 credentials, or second-device project materialization.
+production recovery flows, managed R2/S3 credential provisioning, or second-device project
+materialization.
 
 A mock auth session proves that local account ownership state can be represented and queried. It is
 not a cloud session and must not be treated as durable proof outside the local metadata boundary.
