@@ -359,9 +359,14 @@ impl S3CompatibleBlobProvider {
                 let content_length = response
                     .header("content-length")
                     .and_then(|value| value.parse::<u64>().ok());
+                let bytes = if method == "HEAD" {
+                    Vec::new()
+                } else {
+                    read_response_bytes(response)?
+                };
                 Ok(S3Response {
                     status,
-                    bytes: read_response_bytes(response)?,
+                    bytes,
                     content_length,
                 })
             }
@@ -369,7 +374,11 @@ impl S3CompatibleBlobProvider {
                 let content_length = response
                     .header("content-length")
                     .and_then(|value| value.parse::<u64>().ok());
-                let bytes = read_response_bytes(response)?;
+                let bytes = if method == "HEAD" {
+                    Vec::new()
+                } else {
+                    read_response_bytes(response)?
+                };
                 Ok(S3Response {
                     status,
                     bytes,
