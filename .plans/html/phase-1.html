@@ -99,6 +99,7 @@
           <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
           <li>Production-shaped account ownership proof and account session primitives model provider subject/email/domain proof, token-hash sessions, expiration, revocation, and no-network CLI/dev persistence.</li>
           <li>Hosted metadata handlers now support explicit mock-dev headers for tests/dev plus production-shaped account-session bearer auth resolved through the hosted session store, with account-scoped device/project/snapshot/cursor operations.</li>
+          <li>Hosted metadata can now run as a single-instance alpha API with `/ready`, one-time invite login, bearer session status/logout, and mock-dev auth disabled by default in the server binary.</li>
           <li>Managed object credential lease primitives model account/session/project-scoped R2/S3/MinIO-compatible provider references, capabilities, expiration, revocation, and rotation generation without live provider provisioning.</li>
           <li>Production-shaped pairing recovery and rotation primitives model recovery grant references, revocation, device rotation intents, and key-envelope rotation generation without printing raw secrets or key material.</li>
           <li>Local/mock second-device materialization now proves encrypted publish/import, deferred materialize cursor commit, and safe restore-engine apply.</li>
@@ -106,7 +107,7 @@
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
           <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
           <li>No-network Electron alpha shell, explicit path-scoped secret policy records, and guarded manual conflict resolution records are now in place.</li>
-          <li>Live OAuth/login integration, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
+          <li>OAuth/OIDC login, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
         </ul>
       </section>
 

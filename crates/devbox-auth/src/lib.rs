@@ -571,6 +571,20 @@ pub fn create_account_session(
     })
 }
 
+pub fn generate_session_token() -> AuthResult<String> {
+    Ok(format!(
+        "devbox-session-{}",
+        random_key_hex("session token")?
+    ))
+}
+
+pub fn generate_alpha_invite_code() -> AuthResult<String> {
+    Ok(format!(
+        "devbox-invite-{}",
+        random_key_hex("alpha invite code")?
+    ))
+}
+
 pub fn validate_account_session(
     session: &AccountSession,
     raw_session_token: &str,

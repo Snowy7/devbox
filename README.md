@@ -33,11 +33,13 @@ This repository currently contains the product foundation and MVP planning artif
   managed object credential leases with account/session/project scoping, R2/S3/MinIO-shaped provider
   references, redacted credential references, expiration, revocation, and rotation generation. Local
   pairing now includes no-network recovery grants and device key-envelope rotation intents for future
-  production pairing/recovery flows. The private-alpha desktop shell now provides a no-network
-  Electron control surface for status, projects, sync activity, conflicts, devices, secret policy,
-  and settings. Live sign-in, live Cloudflare/AWS credential provisioning, production deployment
-  hardening, automatic conflict resolution, and paid/team/agent/Git-replacement work remain
-  deferred.
+  production pairing/recovery flows. The hosted metadata service can now run as a single-instance
+  alpha API with one-time invite login, bearer session status/logout, `/ready`, and mock-dev auth
+  disabled by default in the server binary. The private-alpha desktop shell now provides a
+  no-network Electron control surface for status, projects, sync activity, conflicts, devices,
+  secret policy, and settings. OAuth, live Cloudflare/AWS credential provisioning, Postgres-backed
+  production deployment hardening, automatic conflict resolution, and paid/team/agent/Git-replacement
+  work remain deferred.
 
 ## Local MVP Surface
 
@@ -47,11 +49,15 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>`
 - `devbox changes list --db <DB_PATH> [--project <PROJECT_ID>]`
 - `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]`
+- `devbox metadata alpha-invite create --db <METADATA_DB> --email <EMAIL>|--domain <DOMAIN>`
 - `devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET>`
 - `devbox metadata credential-lease check --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox metadata credential-lease rotate --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox metadata credential-lease revoke --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN>`
+- `devbox auth hosted-login --api <URL> --email <EMAIL> --invite-code-env <ENV>`
+- `devbox auth hosted-status --api <URL> [--session-token-env <ENV>]`
+- `devbox auth hosted-logout --api <URL> [--session-token-env <ENV>]`
 - `devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>`
 - `devbox auth revoke-session --db <DB_PATH> <SESSION_ID>`
 - `devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF>`
@@ -69,9 +75,9 @@ Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
 For import/materialize, the hosted metadata account scope is either passed explicitly with
 `--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
-local/mock trust bootstrap. Production-shaped account/session proof primitives and session-auth
-hosted metadata request handling exist, but live provider login, production deployment hardening,
-and UI onboarding remain deferred.
+local/mock trust bootstrap. Invite-based hosted alpha login and session-auth hosted metadata request
+handling exist, but OAuth, production credential brokering, production deployment hardening, and UI
+onboarding remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

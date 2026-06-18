@@ -27,11 +27,13 @@ models now cover provider subject/email/domain proof, token-hash sessions, expir
 and no-network CLI/dev persistence. Hosted metadata now has explicit mock-dev header auth for
 tests/dev plus production-shaped account-session bearer auth resolved through the hosted session
 store, with handlers scoping devices/projects/snapshots/cursors to the authenticated account.
+Hosted metadata can now run as a single-instance alpha API with `/ready`, one-time invite login,
+bearer session status/logout, and mock-dev auth disabled by default in the server binary.
 Hosted metadata now also models account/session/project-scoped managed object credential leases
 with redacted provider references, expiration, revocation, rotation generation, and no-network
 mock/dev CLI smoke commands. Local pairing now includes no-network recovery grant references,
 revocation, device rotation intents, and key-envelope rotation generation. The final private-alpha
 surface now adds a no-network Electron shell, explicit path-scoped secret policy records, and guarded
-manual conflict resolution records. Live OAuth/login integration, live Cloudflare/AWS credential
+manual conflict resolution records. OAuth/OIDC provider login, live Cloudflare/AWS credential
 provisioning, production pairing UX, automatic merge/apply resolution, paid/team/agent/Git
 replacement work, and production deployment hardening remain deferred.
