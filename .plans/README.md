@@ -16,6 +16,9 @@ Current Phase 1 foundation status: snapshot/restore, manual change-feed scanning
 local account/current-device identity, encrypted blob transport through a local filesystem remote
 provider, local/mock auth plus device-pairing trust primitives, local/mock second-device
 materialization through an encrypted local remote, local high-confidence secret blocking, and local
-conflict-as-divergent-snapshot compare/persist metadata are in place. Real cloud authentication,
-hosted metadata, real R2/S3 credentials, production pairing UX, server-side cursors, explicit secret
-allow policy, automatic merge, and conflict UI remain later Phase 1 work.
+conflict-as-divergent-snapshot compare/persist metadata are in place. Local sync preflight now
+uses device/project cursors to refuse divergent local/mock import and materialization before file
+blobs are downloaded or applied, while persisting readable conflict records. Real cloud
+authentication, hosted metadata, real R2/S3 credentials, production pairing UX, server-side
+cursors, explicit secret allow policy, automatic merge/apply resolution, and conflict UI remain
+later Phase 1 work.

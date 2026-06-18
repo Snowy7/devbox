@@ -566,6 +566,116 @@ fn sync_snapshot_publish_import_and_materialize_smoke_uses_two_local_contexts() 
 }
 
 #[test]
+fn sync_import_refuses_when_receiver_cursor_has_diverged() {
+    let fixture = SnapshotCliFixture::new();
+    fixture.write("README.md", "incoming\n");
+
+    assert_success(&run_devbox([
+        "init",
+        "--db",
+        fixture.db_path(),
+        "--device-name",
+        "Desk",
+    ]));
+    assert_success(&run_devbox([
+        "init",
+        "--db",
+        fixture.receiver_db_path(),
+        "--device-name",
+        "Laptop",
+    ]));
+
+    let create = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&create);
+    let create_stdout = stdout(&create);
+    let incoming_id = prefixed_value(&create_stdout, "Snapshot id: ");
+    let project_id = prefixed_value(&create_stdout, "Project id: ");
+
+    let publish = run_devbox([
+        "sync",
+        "publish-snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        &incoming_id,
+    ]);
+    assert_success(&publish);
+
+    insert_manual_snapshot(
+        fixture.receiver_db_path(),
+        &project_id,
+        "snapshot-base",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base\n",
+        "2026-06-18T10:00:00Z",
+    );
+    insert_manual_snapshot(
+        fixture.receiver_db_path(),
+        &project_id,
+        "snapshot-local",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "local\n",
+        "2026-06-18T10:01:00Z",
+    );
+    assert_success(&run_devbox([
+        "sync",
+        "cursor",
+        "set",
+        "--db",
+        fixture.receiver_db_path(),
+        "--project",
+        &project_id,
+        "--value",
+        "snapshot-base",
+    ]));
+
+    let import = run_devbox([
+        "sync",
+        "import-snapshot",
+        "--db",
+        fixture.receiver_db_path(),
+        "--cache",
+        fixture.download_cache_path(),
+        "--remote",
+        fixture.remote_path(),
+        "--mock-key-source-db",
+        fixture.db_path(),
+        &incoming_id,
+    ]);
+    assert_failure(&import);
+    let import_stdout = stdout(&import);
+    assert!(import_stdout.contains("Preflight: blocked"));
+    assert!(import_stdout.contains("Local snapshot id: snapshot-local"));
+    assert!(import_stdout.contains(&format!("Incoming snapshot id: {incoming_id}")));
+    assert!(import_stdout.contains("Both modified different: 1"));
+    assert!(stderr(&import).contains("sync import-snapshot refused by local preflight"));
+    assert!(!fixture.download_cache_path_buf().join("blobs").exists());
+
+    let cursor_get = run_devbox([
+        "sync",
+        "cursor",
+        "get",
+        "--db",
+        fixture.receiver_db_path(),
+        "--project",
+        &project_id,
+    ]);
+    assert_success(&cursor_get);
+    assert!(stdout(&cursor_get).contains("Cursor value: snapshot-base"));
+    assert_eq!(conflict_row_count(fixture.receiver_db_path()), 1);
+}
+
+#[test]
 fn snapshot_dry_run_stays_non_persisting() {
     let fixture = SnapshotCliFixture::new();
     fixture.write("README.md", "hello\n");
@@ -727,6 +837,30 @@ fn conflicts_compare_list_show_and_resolve_divergent_snapshots() {
     ]);
     assert_success(&incoming);
     let incoming_id = prefixed_value(&stdout(&incoming), "Snapshot id: ");
+    let project_id = prefixed_value(&stdout(&incoming), "Project id: ");
+
+    let preflight = run_devbox([
+        "sync",
+        "preflight",
+        "--db",
+        fixture.db_path(),
+        "--project",
+        &project_id,
+        "--base",
+        &base_id,
+        "--local",
+        &local_id,
+        "--incoming",
+        &incoming_id,
+    ]);
+    assert_failure(&preflight);
+    let preflight_stdout = stdout(&preflight);
+    assert!(preflight_stdout.contains("Preflight: blocked"));
+    assert!(preflight_stdout.contains(&format!("Project id: {project_id}")));
+    assert!(preflight_stdout.contains("Both modified different: 1"));
+    assert!(preflight_stdout.contains("Policy blocked: 1"));
+    assert!(stderr(&preflight).contains("sync preflight blocked"));
+    let conflict_id = prefixed_value(&preflight_stdout, "Conflict id: ");
 
     let compare = run_devbox([
         "conflicts",
@@ -755,7 +889,10 @@ fn conflicts_compare_list_show_and_resolve_divergent_snapshots() {
     assert!(!compare_stdout.contains(&raw_base_secret));
     assert!(!compare_stdout.contains(&raw_local_secret));
     assert!(!compare_stdout.contains(&raw_incoming_secret));
-    let conflict_id = prefixed_value(&compare_stdout, "Conflict id: ");
+    assert_eq!(
+        prefixed_value(&compare_stdout, "Conflict id: "),
+        conflict_id
+    );
 
     let second_compare = run_devbox([
         "conflicts",
@@ -1092,6 +1229,78 @@ fn pending_change_row_count(db_path: &str) -> u64 {
         row.get(0)
     })
     .expect("pending change count reads")
+}
+
+fn conflict_row_count(db_path: &str) -> u64 {
+    let conn = Connection::open(db_path).expect("metadata database opens");
+    conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))
+        .expect("conflict count reads")
+}
+
+fn insert_manual_snapshot(
+    db_path: &str,
+    project_id: &str,
+    snapshot_id: &str,
+    blob_id: &str,
+    content: &str,
+    created_at: &str,
+) {
+    let conn = Connection::open(db_path).expect("metadata database opens");
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO projects (id, root_path, kind, display_name, discovered_at)
+        VALUES (?1, '/workspace/devbox', 'local', 'devbox', ?2)
+        "#,
+        params![project_id, created_at],
+    )
+    .expect("project inserts");
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO blobs (id, hash_algorithm, size_bytes, object_ref, created_at)
+        VALUES (?1, 'blake3', ?2, ?3, ?4)
+        "#,
+        params![
+            blob_id,
+            content.len() as u64,
+            format!("blobs/b3/{blob_id}"),
+            created_at
+        ],
+    )
+    .expect("blob inserts");
+    conn.execute(
+        r#"
+        INSERT INTO snapshots (
+            id,
+            project_id,
+            parent_snapshot_id,
+            created_at,
+            reason,
+            manifest_entry_count,
+            total_size_bytes
+        )
+        VALUES (?1, ?2, NULL, ?3, 'test', 1, ?4)
+        "#,
+        params![snapshot_id, project_id, created_at, content.len() as u64],
+    )
+    .expect("snapshot inserts");
+    conn.execute(
+        r#"
+        INSERT INTO manifest_entries (
+            snapshot_id,
+            path,
+            entry_kind,
+            blob_id,
+            target_path,
+            file_mode,
+            size_bytes,
+            policy_decision,
+            policy_reason
+        )
+        VALUES (?1, 'README.md', 'file', ?2, NULL, NULL, ?3, 'include', NULL)
+        "#,
+        params![snapshot_id, blob_id, content.len() as u64],
+    )
+    .expect("manifest entry inserts");
 }
 
 fn manifest_entry_blob_refs(

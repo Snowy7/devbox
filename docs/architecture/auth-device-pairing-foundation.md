@@ -72,7 +72,10 @@ devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID>
 
 Existing commands such as `devbox init`, `devbox devices list`, `devbox sync upload/download`,
 `devbox sync publish-snapshot/import-snapshot/materialize`, `devbox snapshot`, and
-`devbox snapshot restore` continue to work.
+`devbox snapshot restore` continue to work. Local/mock import and materialize now reconcile the
+receiving device/project cursor with the latest local and incoming snapshots before downloading file
+blobs or applying workspace bytes. Divergent local and incoming snapshots create a local conflict
+record and do not advance the cursor.
 
 ## Deferred
 
@@ -83,4 +86,4 @@ Remaining Phase 1 work includes:
 - real cloud object storage credentials
 - production pairing UX and recovery
 - production second-device project materialization UX
-- conflict-as-divergent-snapshot flows
+- automatic conflict merge/apply resolution and user-facing conflict flows

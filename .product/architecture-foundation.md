@@ -75,8 +75,12 @@ Current Phase 1 foundation status:
   publish paths
 - local conflict records compare divergent snapshots with path-level metadata rows and persist them
   in SQLite without source bytes
+- local sync preflight reconciles receiving device/project cursors with local and incoming
+  snapshots, refuses divergent local/mock import or materialization, and persists readable conflict
+  records without advancing the cursor
 - real cloud authentication, hosted metadata, real object-storage credentials, production pairing UX,
-  explicit secret allow policy, automatic merge, and conflict UI remain later Phase 1 work
+  explicit secret allow policy, automatic merge/apply resolution, and conflict UI remain later Phase
+  1 work
 
 ## Content Addressing
 
@@ -185,7 +189,9 @@ project-a
 7. Upload missing blobs and encrypted manifest.
 8. Update device cursor.
 9. On receiving device, compare local cursor and policy.
-10. Materialize snapshot atomically with rollback.
+10. Refuse divergent local and incoming snapshots with a readable conflict record before applying
+    bytes.
+11. Materialize snapshot atomically with rollback when preflight and restore safety allow.
 
 The first alpha workflow proves desktop-to-laptop continuation, but the account/device architecture
 must remain multi-device-capable. A local installation should have one current local device identity,

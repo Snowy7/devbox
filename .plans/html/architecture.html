@@ -109,7 +109,8 @@ Rust backend
           <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a second SQLite/cache context and safe restore-engine apply.</li>
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
           <li>Local conflict records compare and persist divergent snapshot rows without source bytes.</li>
-          <li>Production sign-in, hosted metadata, recovery, real object-storage credentials, explicit secret allow policy, automatic merge, and conflict UI remain deferred.</li>
+          <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>
+          <li>Production sign-in, hosted metadata, recovery, real object-storage credentials, explicit secret allow policy, automatic merge/apply resolution, and conflict UI remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
         </ul>
       </section>

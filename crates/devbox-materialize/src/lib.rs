@@ -1,11 +1,15 @@
 //! Local/mock second-device snapshot publish, import, and materialization.
 
 use devbox_auth::DeviceProjectCursor;
+use devbox_conflict::{
+    compare_snapshots, ComparableEntry, ComparableSnapshot, ConflictCompareError, PathComparisonRow,
+};
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision};
 use devbox_snapshot::{RestoreMaterializer, RestorePlan, RestorePlanError, RestorePlanSummary};
 use devbox_store::{
-    path_to_store_string, BlobCache, BlobCacheError, ManifestEntryRecord, NewProject, NewSnapshot,
-    NewSnapshotDraft, NewSnapshotManifestEntry, PersistedSnapshot, Store, StoreError,
+    path_to_store_string, BlobCache, BlobCacheError, ConflictWithRows, ManifestEntryRecord,
+    NewConflict, NewConflictRow, NewProject, NewSnapshot, NewSnapshotDraft,
+    NewSnapshotManifestEntry, PersistedSnapshot, Store, StoreError,
 };
 use devbox_sync::{
     decrypt_payload, download_blob_to_cache, encrypt_payload, encrypted_blob_object_key,
@@ -26,6 +30,8 @@ pub enum MaterializeError {
     Restore(RestorePlanError),
     Json(serde_json::Error),
     DomainId(DomainIdError),
+    ConflictCompare(ConflictCompareError),
+    PreflightBlocked(Box<SyncPreflightOutcome>),
     SnapshotNotFound(String),
     LocalIdentityMissing,
     InvalidBundle(String),
@@ -41,6 +47,13 @@ impl fmt::Display for MaterializeError {
             Self::Restore(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::DomainId(error) => write!(f, "{error}"),
+            Self::ConflictCompare(error) => write!(f, "{error}"),
+            Self::PreflightBlocked(outcome) => write!(
+                f,
+                "sync preflight blocked project {}: conflict {}",
+                outcome.project_id,
+                outcome.conflict_id().unwrap_or("missing-conflict-id")
+            ),
             Self::SnapshotNotFound(id) => write!(f, "snapshot not found: {id}"),
             Self::LocalIdentityMissing => {
                 f.write_str("local identity is not initialized; run devbox init --db <DB_PATH>")
@@ -67,7 +80,9 @@ impl std::error::Error for MaterializeError {
             Self::Restore(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::DomainId(error) => Some(error),
+            Self::ConflictCompare(error) => Some(error),
             Self::SnapshotNotFound(_)
+            | Self::PreflightBlocked(_)
             | Self::LocalIdentityMissing
             | Self::InvalidBundle(_)
             | Self::RemoteObjectAlreadyExists(_) => None,
@@ -111,6 +126,12 @@ impl From<DomainIdError> for MaterializeError {
     }
 }
 
+impl From<ConflictCompareError> for MaterializeError {
+    fn from(error: ConflictCompareError) -> Self {
+        Self::ConflictCompare(error)
+    }
+}
+
 pub type MaterializeResult<T> = Result<T, MaterializeError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +157,15 @@ pub struct MaterializationRequest {
     pub snapshot_id: String,
     pub target: PathBuf,
     pub apply: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncPreflightRequest {
+    pub db_path: PathBuf,
+    pub project_id: String,
+    pub base_snapshot_id: Option<String>,
+    pub local_snapshot_id: Option<String>,
+    pub incoming_snapshot_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +210,76 @@ pub struct MaterializationOutcome {
     pub apply_allowed: bool,
     pub plan: RestorePlanSummary,
     pub applied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPreflightStatus {
+    Ok,
+    Blocked,
+}
+
+impl SyncPreflightStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncPreflightOutcome {
+    pub status: SyncPreflightStatus,
+    pub project_id: String,
+    pub base_snapshot_id: Option<String>,
+    pub local_snapshot_id: Option<String>,
+    pub incoming_snapshot_id: String,
+    pub conflict: Option<ConflictWithRows>,
+}
+
+impl SyncPreflightOutcome {
+    pub fn ok(
+        project_id: String,
+        base_snapshot_id: Option<String>,
+        local_snapshot_id: Option<String>,
+        incoming_snapshot_id: String,
+    ) -> Self {
+        Self {
+            status: SyncPreflightStatus::Ok,
+            project_id,
+            base_snapshot_id,
+            local_snapshot_id,
+            incoming_snapshot_id,
+            conflict: None,
+        }
+    }
+
+    pub fn blocked(
+        project_id: String,
+        base_snapshot_id: Option<String>,
+        local_snapshot_id: Option<String>,
+        incoming_snapshot_id: String,
+        conflict: ConflictWithRows,
+    ) -> Self {
+        Self {
+            status: SyncPreflightStatus::Blocked,
+            project_id,
+            base_snapshot_id,
+            local_snapshot_id,
+            incoming_snapshot_id,
+            conflict: Some(conflict),
+        }
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        self.status == SyncPreflightStatus::Blocked
+    }
+
+    pub fn conflict_id(&self) -> Option<&str> {
+        self.conflict
+            .as_ref()
+            .map(|conflict| conflict.conflict.id.as_str())
+    }
 }
 
 pub fn published_snapshot_object_key(snapshot_id: &str) -> MaterializeResult<ObjectKey> {
@@ -247,6 +347,17 @@ pub fn publish_snapshot(
     })
 }
 
+pub fn sync_preflight(request: &SyncPreflightRequest) -> MaterializeResult<SyncPreflightOutcome> {
+    let mut store = open_store(&request.db_path)?;
+    sync_preflight_in_store(
+        &mut store,
+        &request.project_id,
+        request.base_snapshot_id.as_deref(),
+        request.local_snapshot_id.as_deref(),
+        &request.incoming_snapshot_id,
+    )
+}
+
 pub fn import_snapshot(
     request: &ImportSnapshotRequest,
     provider: &impl RemoteBlobProvider,
@@ -263,6 +374,40 @@ pub fn import_snapshot(
     let plaintext = decrypt_payload(&sync_key, &manifest_object_key, &encrypted)?;
     let envelope: SnapshotBundleEnvelope = serde_json::from_slice(&plaintext)?;
     envelope.validate(&request.snapshot_id)?;
+
+    let receiver_cursor = receiver_store.device_project_cursor(
+        &receiver_identity.account_id,
+        &receiver_identity.device_id,
+        &envelope.project.id,
+    )?;
+    let base_snapshot_id = receiver_cursor
+        .as_ref()
+        .map(|cursor| cursor.cursor_value.clone());
+    let local_snapshot_id = receiver_store
+        .latest_snapshot_for_project_excluding(&envelope.project.id, &envelope.snapshot.id)?
+        .map(|snapshot| snapshot.snapshot.id);
+    let incoming_exists = receiver_store
+        .snapshot_with_entries(&envelope.snapshot.id)?
+        .is_some();
+    if preflight_should_block(
+        base_snapshot_id.as_deref(),
+        local_snapshot_id.as_deref(),
+        &envelope.snapshot.id,
+    ) {
+        if !incoming_exists {
+            persist_envelope(&mut receiver_store, &envelope)?;
+        }
+        let preflight = sync_preflight_in_store(
+            &mut receiver_store,
+            &envelope.project.id,
+            base_snapshot_id.as_deref(),
+            local_snapshot_id.as_deref(),
+            &envelope.snapshot.id,
+        )?;
+        if preflight.is_blocked() {
+            return Err(MaterializeError::PreflightBlocked(Box::new(preflight)));
+        }
+    }
 
     let cache = BlobCache::open(&request.cache_root)?;
     let mut downloaded_blob_count = 0;
@@ -380,6 +525,149 @@ fn sync_key_for_import(
     };
 
     Ok(SyncKey::from_hex(&key_hex)?)
+}
+
+fn sync_preflight_in_store(
+    store: &mut Store,
+    project_id: &str,
+    base_snapshot_id: Option<&str>,
+    local_snapshot_id: Option<&str>,
+    incoming_snapshot_id: &str,
+) -> MaterializeResult<SyncPreflightOutcome> {
+    let incoming = store
+        .snapshot_with_entries(incoming_snapshot_id)?
+        .ok_or_else(|| MaterializeError::SnapshotNotFound(incoming_snapshot_id.to_string()))?;
+    if incoming.project.id != project_id {
+        return Err(MaterializeError::InvalidBundle(format!(
+            "incoming snapshot {} belongs to project {}, not {project_id}",
+            incoming.snapshot.id, incoming.project.id
+        )));
+    }
+
+    let local = local_snapshot_id
+        .map(|id| {
+            store
+                .snapshot_with_entries(id)?
+                .ok_or_else(|| MaterializeError::SnapshotNotFound(id.to_string()))
+        })
+        .transpose()?;
+    if let Some(local) = &local {
+        if local.project.id != project_id {
+            return Err(MaterializeError::InvalidBundle(format!(
+                "local snapshot {} belongs to project {}, not {project_id}",
+                local.snapshot.id, local.project.id
+            )));
+        }
+    }
+
+    if !preflight_should_block(base_snapshot_id, local_snapshot_id, incoming_snapshot_id) {
+        return Ok(SyncPreflightOutcome::ok(
+            project_id.to_string(),
+            base_snapshot_id.map(str::to_string),
+            local_snapshot_id.map(str::to_string),
+            incoming_snapshot_id.to_string(),
+        ));
+    }
+
+    let base = base_snapshot_id
+        .map(|id| {
+            store
+                .snapshot_with_entries(id)?
+                .ok_or_else(|| MaterializeError::SnapshotNotFound(id.to_string()))
+        })
+        .transpose()?;
+    if let Some(base) = &base {
+        if base.project.id != project_id {
+            return Err(MaterializeError::InvalidBundle(format!(
+                "base snapshot {} belongs to project {}, not {project_id}",
+                base.snapshot.id, base.project.id
+            )));
+        }
+    }
+
+    let local = local.expect("local_snapshot_id was present above");
+    let base_comparable = base.as_ref().map(snapshot_to_comparable);
+    let local_comparable = snapshot_to_comparable(&local);
+    let incoming_comparable = snapshot_to_comparable(&incoming);
+    let comparison = compare_snapshots(
+        base_comparable.as_ref(),
+        &local_comparable,
+        &incoming_comparable,
+    )?;
+    let created_at = store.current_timestamp()?;
+    let rows = comparison
+        .rows()
+        .iter()
+        .map(new_conflict_row)
+        .collect::<Vec<_>>();
+    let conflict = store.persist_conflict(
+        &NewConflict {
+            id: comparison.conflict_id(),
+            project_id: comparison.project_id(),
+            base_snapshot_id: comparison.base_snapshot_id(),
+            local_snapshot_id: comparison.local_snapshot_id(),
+            incoming_snapshot_id: comparison.incoming_snapshot_id(),
+            summary: comparison.summary(),
+            created_at: &created_at,
+        },
+        &rows,
+    )?;
+
+    Ok(SyncPreflightOutcome::blocked(
+        project_id.to_string(),
+        base_snapshot_id.map(str::to_string),
+        local_snapshot_id.map(str::to_string),
+        incoming_snapshot_id.to_string(),
+        conflict,
+    ))
+}
+
+fn preflight_should_block(
+    base_snapshot_id: Option<&str>,
+    local_snapshot_id: Option<&str>,
+    incoming_snapshot_id: &str,
+) -> bool {
+    !(local_snapshot_id.is_none()
+        || local_snapshot_id == Some(incoming_snapshot_id)
+        || base_snapshot_id == local_snapshot_id
+        || base_snapshot_id == Some(incoming_snapshot_id))
+}
+
+fn snapshot_to_comparable(snapshot: &PersistedSnapshot) -> ComparableSnapshot {
+    ComparableSnapshot::new(
+        snapshot.project.id.clone(),
+        snapshot.snapshot.id.clone(),
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| {
+                ComparableEntry::new(
+                    entry.relative_path.clone(),
+                    entry.kind.clone(),
+                    entry.size_bytes,
+                    entry.blob_id.clone(),
+                    entry.object_ref.clone(),
+                    entry.policy_decision.clone(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn new_conflict_row(row: &PathComparisonRow) -> NewConflictRow<'_> {
+    NewConflictRow {
+        path: row.path(),
+        state: row.state(),
+        entry_kind: row.entry_kind(),
+        base_blob_id: row.base_blob_id(),
+        local_blob_id: row.local_blob_id(),
+        incoming_blob_id: row.incoming_blob_id(),
+        base_size_bytes: row.base_size_bytes(),
+        local_size_bytes: row.local_size_bytes(),
+        incoming_size_bytes: row.incoming_size_bytes(),
+        local_policy_decision: row.local_policy_decision(),
+        incoming_policy_decision: row.incoming_policy_decision(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -878,6 +1166,180 @@ mod tests {
     }
 
     #[test]
+    fn preflight_allows_when_local_has_not_diverged_from_base() {
+        let fixture = FoundationFixture::new();
+        let project_id = "project-preflight-ok";
+        persist_manual_snapshot(
+            &fixture.receiver_db,
+            project_id,
+            "snapshot-base",
+            &[manual_file("README.md", b"base\n")],
+        );
+        persist_manual_snapshot(
+            &fixture.receiver_db,
+            project_id,
+            "snapshot-incoming",
+            &[manual_file("README.md", b"incoming\n")],
+        );
+
+        let outcome = sync_preflight(&SyncPreflightRequest {
+            db_path: fixture.receiver_db.clone(),
+            project_id: project_id.to_string(),
+            base_snapshot_id: Some("snapshot-base".to_string()),
+            local_snapshot_id: Some("snapshot-base".to_string()),
+            incoming_snapshot_id: "snapshot-incoming".to_string(),
+        })
+        .expect("safe preflight succeeds");
+
+        assert_eq!(outcome.status, SyncPreflightStatus::Ok);
+        assert!(outcome.conflict.is_none());
+        let store = Store::open_file(&fixture.receiver_db).expect("receiver opens");
+        store.apply_migrations().expect("migrations apply");
+        assert!(store
+            .list_conflicts(Some(project_id))
+            .expect("conflicts list")
+            .is_empty());
+    }
+
+    #[test]
+    fn preflight_blocks_unknown_base_when_local_state_exists() {
+        let fixture = FoundationFixture::new();
+        let project_id = "project-unknown-base";
+        persist_manual_snapshot(
+            &fixture.receiver_db,
+            project_id,
+            "snapshot-local",
+            &[manual_file("README.md", b"local\n")],
+        );
+        persist_manual_snapshot(
+            &fixture.receiver_db,
+            project_id,
+            "snapshot-incoming",
+            &[manual_file("README.md", b"incoming\n")],
+        );
+
+        let outcome = sync_preflight(&SyncPreflightRequest {
+            db_path: fixture.receiver_db.clone(),
+            project_id: project_id.to_string(),
+            base_snapshot_id: None,
+            local_snapshot_id: Some("snapshot-local".to_string()),
+            incoming_snapshot_id: "snapshot-incoming".to_string(),
+        })
+        .expect("unknown-base preflight persists a conflict");
+
+        assert_eq!(outcome.status, SyncPreflightStatus::Blocked);
+        let conflict = outcome.conflict.expect("conflict exists");
+        assert_eq!(conflict.conflict.base_snapshot_id, None);
+        assert_eq!(conflict.conflict.both_modified_different_count, 1);
+    }
+
+    #[test]
+    fn import_preflight_blocks_divergence_without_cursor_advance_or_blob_download() {
+        let fixture = FoundationFixture::new();
+        let raw_secret = synthetic_token("sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456");
+        fixture.write("README.md", "incoming\n");
+        fixture.write("secret.env", &format!("OPENAI_API_KEY={raw_secret}\n"));
+        let incoming_snapshot_id = fixture.persist_source_snapshot();
+        let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
+        publish_snapshot(
+            &PublishSnapshotRequest {
+                db_path: fixture.source_db.clone(),
+                cache_root: fixture.source_cache.clone(),
+                snapshot_id: incoming_snapshot_id.clone(),
+            },
+            &provider,
+        )
+        .expect("snapshot publishes");
+        let source = Store::open_file(&fixture.source_db)
+            .expect("source opens")
+            .snapshot_with_entries(&incoming_snapshot_id)
+            .expect("source snapshot loads")
+            .expect("source snapshot exists");
+        let project_id = source.project.id.clone();
+
+        persist_manual_snapshot(
+            &fixture.receiver_db,
+            &project_id,
+            "snapshot-base",
+            &[
+                manual_file("README.md", b"base\n"),
+                manual_secret(
+                    "secret.env",
+                    "secret blocked by policy rule openai_api_key at line 1: sk-<redacted>",
+                ),
+            ],
+        );
+        persist_manual_snapshot(
+            &fixture.receiver_db,
+            &project_id,
+            "snapshot-local",
+            &[
+                manual_file("README.md", b"local\n"),
+                manual_secret(
+                    "secret.env",
+                    "secret blocked by policy rule openai_api_key at line 1: sk-<redacted>",
+                ),
+            ],
+        );
+        set_receiver_cursor(&fixture, &project_id, "snapshot-base");
+
+        let first = import_snapshot(
+            &ImportSnapshotRequest {
+                db_path: fixture.receiver_db.clone(),
+                cache_root: fixture.receiver_cache.clone(),
+                key_source_db_path: Some(fixture.source_db.clone()),
+                snapshot_id: incoming_snapshot_id.clone(),
+            },
+            &provider,
+        )
+        .expect_err("divergent import is blocked");
+        let first_conflict_id = match first {
+            MaterializeError::PreflightBlocked(outcome) => {
+                assert_eq!(outcome.status, SyncPreflightStatus::Blocked);
+                let conflict = outcome.conflict.expect("conflict exists");
+                assert_eq!(conflict.conflict.local_snapshot_id, "snapshot-local");
+                assert_eq!(conflict.conflict.incoming_snapshot_id, incoming_snapshot_id);
+                assert_eq!(conflict.conflict.policy_blocked_count, 1);
+                assert!(conflict.rows.iter().any(|row| {
+                    matches!(
+                        &row.local_policy_decision,
+                        Some(PolicyDecision::RequiresUserDecision { reason })
+                            if reason.contains("sk-<redacted>") && !reason.contains(&raw_secret)
+                    )
+                }));
+                conflict.conflict.id
+            }
+            error => panic!("unexpected error: {error}"),
+        };
+
+        assert_receiver_cursor(&fixture, &project_id, "snapshot-base");
+        assert!(!fixture.receiver_cache.join("blobs").exists());
+
+        let second = import_snapshot(
+            &ImportSnapshotRequest {
+                db_path: fixture.receiver_db.clone(),
+                cache_root: fixture.receiver_cache.clone(),
+                key_source_db_path: Some(fixture.source_db.clone()),
+                snapshot_id: incoming_snapshot_id,
+            },
+            &provider,
+        )
+        .expect_err("repeat divergent import is blocked");
+        match second {
+            MaterializeError::PreflightBlocked(outcome) => {
+                assert_eq!(outcome.conflict_id(), Some(first_conflict_id.as_str()));
+            }
+            error => panic!("unexpected error: {error}"),
+        }
+        let store = Store::open_file(&fixture.receiver_db).expect("receiver opens");
+        store.apply_migrations().expect("migrations apply");
+        let conflicts = store
+            .list_conflicts(Some(&project_id))
+            .expect("conflicts list");
+        assert_eq!(conflicts.len(), 1);
+    }
+
+    #[test]
     fn missing_remote_blob_fails_before_metadata_import() {
         let fixture = FoundationFixture::new();
         fixture.write("README.md", "missing remote blob\n");
@@ -1123,5 +1585,122 @@ mod tests {
 
     fn synthetic_token(prefix: &str, tail: &str) -> String {
         [prefix, tail].concat()
+    }
+
+    #[derive(Debug, Clone)]
+    struct ManualEntry {
+        path: PathBuf,
+        kind: ManifestEntryKind,
+        size_bytes: u64,
+        blob_id: Option<BlobId>,
+        object_ref: Option<String>,
+        policy_decision: PolicyDecision,
+    }
+
+    fn manual_file(path: &str, content: &[u8]) -> ManualEntry {
+        let blob_id = blob_id_for(content);
+        ManualEntry {
+            path: PathBuf::from(path),
+            kind: ManifestEntryKind::File,
+            size_bytes: content.len() as u64,
+            object_ref: Some(format!("blobs/b3/{}", blob_id.as_str())),
+            blob_id: Some(blob_id),
+            policy_decision: PolicyDecision::Include,
+        }
+    }
+
+    fn manual_secret(path: &str, reason: &str) -> ManualEntry {
+        ManualEntry {
+            path: PathBuf::from(path),
+            kind: ManifestEntryKind::File,
+            size_bytes: 0,
+            blob_id: None,
+            object_ref: None,
+            policy_decision: PolicyDecision::RequiresUserDecision {
+                reason: reason.to_string(),
+            },
+        }
+    }
+
+    fn persist_manual_snapshot(
+        db_path: &Path,
+        project_id: &str,
+        snapshot_id: &str,
+        entries: &[ManualEntry],
+    ) {
+        let mut store = Store::open_file(db_path).expect("store opens");
+        store.apply_migrations().expect("migrations apply");
+        let created_at = store.current_timestamp().expect("timestamp reads");
+        let draft_entries = entries
+            .iter()
+            .map(|entry| NewSnapshotManifestEntry {
+                relative_path: &entry.path,
+                kind: entry.kind.clone(),
+                size_bytes: entry.size_bytes,
+                blob_id: entry.blob_id.as_ref(),
+                object_ref: entry.object_ref.as_deref(),
+                policy_decision: &entry.policy_decision,
+            })
+            .collect::<Vec<_>>();
+        let total_size_bytes = entries.iter().map(|entry| entry.size_bytes).sum();
+        let draft = NewSnapshotDraft {
+            project: NewProject {
+                id: project_id,
+                root_path: "/workspace/devbox",
+                kind: "local",
+                display_name: "devbox",
+                discovered_at: &created_at,
+            },
+            snapshot: NewSnapshot {
+                id: snapshot_id,
+                project_id,
+                parent_snapshot_id: None,
+                created_at: &created_at,
+                reason: "test",
+                manifest_entry_count: entries.len() as u64,
+                total_size_bytes,
+            },
+            entries: draft_entries,
+        };
+        store
+            .persist_draft_snapshot(&draft)
+            .expect("manual snapshot persists");
+    }
+
+    fn blob_id_for(content: &[u8]) -> BlobId {
+        BlobId::from_blake3_hex(blake3::hash(content).to_hex().to_string())
+            .expect("BLAKE3 produces valid blob ids")
+    }
+
+    fn set_receiver_cursor(fixture: &FoundationFixture, project_id: &str, cursor_value: &str) {
+        let store = Store::open_file(&fixture.receiver_db).expect("receiver opens");
+        store.apply_migrations().expect("migrations apply");
+        let identity = store
+            .local_identity()
+            .expect("identity reads")
+            .expect("identity exists");
+        store
+            .upsert_device_project_cursor(&DeviceProjectCursor {
+                account_id: identity.account_id,
+                device_id: identity.device_id,
+                project_id: project_id.to_string(),
+                cursor_value: cursor_value.to_string(),
+                updated_at: store.current_timestamp().expect("timestamp reads"),
+            })
+            .expect("cursor persists");
+    }
+
+    fn assert_receiver_cursor(fixture: &FoundationFixture, project_id: &str, expected: &str) {
+        let store = Store::open_file(&fixture.receiver_db).expect("receiver opens");
+        store.apply_migrations().expect("migrations apply");
+        let identity = store
+            .local_identity()
+            .expect("identity reads")
+            .expect("identity exists");
+        let cursor = store
+            .device_project_cursor(&identity.account_id, &identity.device_id, project_id)
+            .expect("cursor reads")
+            .expect("cursor exists");
+        assert_eq!(cursor.cursor_value, expected);
     }
 }
