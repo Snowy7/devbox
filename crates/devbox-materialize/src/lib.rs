@@ -5,6 +5,11 @@ use devbox_conflict::{
     compare_snapshots, ComparableEntry, ComparableSnapshot, ConflictCompareError, PathComparisonRow,
 };
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision};
+use devbox_metadata::{
+    DeviceProjectCursorRecord, MetadataError, MetadataStore,
+    PublishSnapshotRequest as MetadataPublishSnapshotRequest, PublishedSnapshotRecord,
+    UpdateCursorRequest, UpsertDeviceRequest, UpsertProjectRequest,
+};
 use devbox_snapshot::{RestoreMaterializer, RestorePlan, RestorePlanError, RestorePlanSummary};
 use devbox_store::{
     path_to_store_string, BlobCache, BlobCacheError, ConflictWithRows, ManifestEntryRecord,
@@ -31,6 +36,7 @@ pub enum MaterializeError {
     Json(serde_json::Error),
     DomainId(DomainIdError),
     ConflictCompare(ConflictCompareError),
+    Metadata(MetadataError),
     PreflightBlocked(Box<SyncPreflightOutcome>),
     SnapshotNotFound(String),
     LocalIdentityMissing,
@@ -48,6 +54,7 @@ impl fmt::Display for MaterializeError {
             Self::Json(error) => write!(f, "{error}"),
             Self::DomainId(error) => write!(f, "{error}"),
             Self::ConflictCompare(error) => write!(f, "{error}"),
+            Self::Metadata(error) => write!(f, "hosted metadata error: {error}"),
             Self::PreflightBlocked(outcome) => write!(
                 f,
                 "sync preflight blocked project {}: conflict {}",
@@ -81,6 +88,7 @@ impl std::error::Error for MaterializeError {
             Self::Json(error) => Some(error),
             Self::DomainId(error) => Some(error),
             Self::ConflictCompare(error) => Some(error),
+            Self::Metadata(error) => Some(error),
             Self::SnapshotNotFound(_)
             | Self::PreflightBlocked(_)
             | Self::LocalIdentityMissing
@@ -132,7 +140,72 @@ impl From<ConflictCompareError> for MaterializeError {
     }
 }
 
+impl From<MetadataError> for MaterializeError {
+    fn from(error: MetadataError) -> Self {
+        Self::Metadata(error)
+    }
+}
+
 pub type MaterializeResult<T> = Result<T, MaterializeError>;
+
+pub trait HostedMetadataClient {
+    fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MaterializeResult<()>;
+    fn upsert_project(&mut self, request: UpsertProjectRequest) -> MaterializeResult<()>;
+    fn publish_snapshot(
+        &mut self,
+        request: MetadataPublishSnapshotRequest,
+    ) -> MaterializeResult<PublishedSnapshotRecord>;
+    fn snapshot(
+        &mut self,
+        account_id: &str,
+        project_id: &str,
+        snapshot_id: &str,
+    ) -> MaterializeResult<Option<PublishedSnapshotRecord>>;
+    fn compare_and_set_cursor(
+        &mut self,
+        request: UpdateCursorRequest,
+    ) -> MaterializeResult<DeviceProjectCursorRecord>;
+}
+
+impl<T: MetadataStore + ?Sized> HostedMetadataClient for T {
+    fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MaterializeResult<()> {
+        MetadataStore::upsert_device(self, request)?;
+        Ok(())
+    }
+
+    fn upsert_project(&mut self, request: UpsertProjectRequest) -> MaterializeResult<()> {
+        MetadataStore::upsert_project(self, request)?;
+        Ok(())
+    }
+
+    fn publish_snapshot(
+        &mut self,
+        request: MetadataPublishSnapshotRequest,
+    ) -> MaterializeResult<PublishedSnapshotRecord> {
+        Ok(MetadataStore::publish_snapshot(self, request)?)
+    }
+
+    fn snapshot(
+        &mut self,
+        account_id: &str,
+        project_id: &str,
+        snapshot_id: &str,
+    ) -> MaterializeResult<Option<PublishedSnapshotRecord>> {
+        Ok(MetadataStore::snapshot(
+            self,
+            account_id,
+            project_id,
+            snapshot_id,
+        )?)
+    }
+
+    fn compare_and_set_cursor(
+        &mut self,
+        request: UpdateCursorRequest,
+    ) -> MaterializeResult<DeviceProjectCursorRecord> {
+        Ok(MetadataStore::compare_and_set_cursor(self, request)?)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishSnapshotRequest {
@@ -157,6 +230,12 @@ pub struct MaterializationRequest {
     pub snapshot_id: String,
     pub target: PathBuf,
     pub apply: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedMetadataImportOptions {
+    pub account_id: String,
+    pub project_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +374,22 @@ pub fn publish_snapshot(
     request: &PublishSnapshotRequest,
     provider: &(impl RemoteBlobProvider + ?Sized),
 ) -> MaterializeResult<PublishedSnapshotBundle> {
+    publish_snapshot_inner(request, provider, None)
+}
+
+pub fn publish_snapshot_with_metadata(
+    request: &PublishSnapshotRequest,
+    provider: &(impl RemoteBlobProvider + ?Sized),
+    metadata: &mut impl HostedMetadataClient,
+) -> MaterializeResult<PublishedSnapshotBundle> {
+    publish_snapshot_inner(request, provider, Some(metadata))
+}
+
+fn publish_snapshot_inner(
+    request: &PublishSnapshotRequest,
+    provider: &(impl RemoteBlobProvider + ?Sized),
+    metadata: Option<&mut dyn HostedMetadataClient>,
+) -> MaterializeResult<PublishedSnapshotBundle> {
     let store = open_store(&request.db_path)?;
     let identity = store
         .local_identity()?
@@ -331,6 +426,18 @@ pub fn publish_snapshot(
     let manifest_put =
         put_encrypted_manifest(provider, &sync_key, &manifest_object_key, &plaintext)?;
 
+    if let Some(metadata) = metadata {
+        let published_at = store.current_timestamp()?;
+        register_published_snapshot_metadata(
+            metadata,
+            &identity,
+            &persisted,
+            &manifest_object_key,
+            &plaintext,
+            &published_at,
+        )?;
+    }
+
     Ok(PublishedSnapshotBundle {
         account_id: identity.account_id,
         device_id: identity.device_id,
@@ -362,12 +469,31 @@ pub fn import_snapshot(
     request: &ImportSnapshotRequest,
     provider: &(impl RemoteBlobProvider + ?Sized),
 ) -> MaterializeResult<ImportedSnapshotBundle> {
-    import_snapshot_inner(request, provider, true)
+    import_snapshot_inner(request, provider, None, None, None, true)
+}
+
+pub fn import_snapshot_with_metadata(
+    request: &ImportSnapshotRequest,
+    provider: &(impl RemoteBlobProvider + ?Sized),
+    metadata: &mut impl HostedMetadataClient,
+    options: &HostedMetadataImportOptions,
+) -> MaterializeResult<ImportedSnapshotBundle> {
+    import_snapshot_inner(
+        request,
+        provider,
+        Some(metadata),
+        Some(options.account_id.as_str()),
+        Some(options.project_id.as_str()),
+        true,
+    )
 }
 
 fn import_snapshot_inner(
     request: &ImportSnapshotRequest,
     provider: &(impl RemoteBlobProvider + ?Sized),
+    mut metadata: Option<&mut dyn HostedMetadataClient>,
+    metadata_account_id: Option<&str>,
+    metadata_project_id: Option<&str>,
     advance_cursor: bool,
 ) -> MaterializeResult<ImportedSnapshotBundle> {
     let mut receiver_store = open_store(&request.db_path)?;
@@ -375,13 +501,39 @@ fn import_snapshot_inner(
         .local_identity()?
         .ok_or(MaterializeError::LocalIdentityMissing)?;
     let sync_key = sync_key_for_import(request, &receiver_identity.sync_key_hex)?;
-    let manifest_object_key = published_snapshot_object_key(&request.snapshot_id)?;
+    let manifest_object_key = if let Some(client) = metadata.as_mut() {
+        resolve_manifest_object_key(
+            Some(&mut **client),
+            &receiver_store,
+            &receiver_identity,
+            metadata_account_id,
+            metadata_project_id,
+            &request.snapshot_id,
+        )?
+    } else {
+        resolve_manifest_object_key(
+            None,
+            &receiver_store,
+            &receiver_identity,
+            metadata_account_id,
+            metadata_project_id,
+            &request.snapshot_id,
+        )?
+    };
     let encrypted = provider
         .get(&manifest_object_key)?
         .ok_or_else(|| SyncError::MissingRemoteObject(manifest_object_key.clone()))?;
     let plaintext = decrypt_payload(&sync_key, &manifest_object_key, &encrypted)?;
     let envelope: SnapshotBundleEnvelope = serde_json::from_slice(&plaintext)?;
     envelope.validate(&request.snapshot_id)?;
+    if let Some(project_id) = metadata_project_id {
+        if envelope.project.id != project_id {
+            return Err(MaterializeError::InvalidBundle(format!(
+                "hosted metadata snapshot belongs to project {}, not {project_id}",
+                envelope.project.id
+            )));
+        }
+    }
 
     let receiver_cursor = receiver_store.device_project_cursor(
         &receiver_identity.account_id,
@@ -445,13 +597,27 @@ fn import_snapshot_inner(
     };
 
     let cursor_updated_at = if advance_cursor {
-        advance_import_cursor(
-            &receiver_store,
-            &receiver_identity.account_id,
-            &receiver_identity.device_id,
-            &envelope.project.id,
-            &envelope.snapshot.id,
-        )?
+        if let Some(client) = metadata.as_mut() {
+            advance_import_cursor(
+                &receiver_store,
+                &receiver_identity.account_id,
+                &receiver_identity.device_id,
+                &envelope.project.id,
+                &envelope.snapshot.id,
+                metadata_account_id,
+                Some(&mut **client),
+            )?
+        } else {
+            advance_import_cursor(
+                &receiver_store,
+                &receiver_identity.account_id,
+                &receiver_identity.device_id,
+                &envelope.project.id,
+                &envelope.snapshot.id,
+                None,
+                None,
+            )?
+        }
     } else {
         "-".to_string()
     };
@@ -477,16 +643,56 @@ pub fn materialize_snapshot(
     request: &MaterializationRequest,
     provider: &(impl RemoteBlobProvider + ?Sized),
 ) -> MaterializeResult<MaterializationOutcome> {
-    let mut import = import_snapshot_inner(
-        &ImportSnapshotRequest {
-            db_path: request.db_path.clone(),
-            cache_root: request.cache_root.clone(),
-            key_source_db_path: request.key_source_db_path.clone(),
-            snapshot_id: request.snapshot_id.clone(),
-        },
+    materialize_snapshot_inner(request, provider, None, None, None)
+}
+
+pub fn materialize_snapshot_with_metadata(
+    request: &MaterializationRequest,
+    provider: &(impl RemoteBlobProvider + ?Sized),
+    metadata: &mut impl HostedMetadataClient,
+    options: &HostedMetadataImportOptions,
+) -> MaterializeResult<MaterializationOutcome> {
+    materialize_snapshot_inner(
+        request,
         provider,
-        false,
-    )?;
+        Some(metadata),
+        Some(options.account_id.as_str()),
+        Some(options.project_id.as_str()),
+    )
+}
+
+fn materialize_snapshot_inner(
+    request: &MaterializationRequest,
+    provider: &(impl RemoteBlobProvider + ?Sized),
+    mut metadata: Option<&mut dyn HostedMetadataClient>,
+    metadata_account_id: Option<&str>,
+    metadata_project_id: Option<&str>,
+) -> MaterializeResult<MaterializationOutcome> {
+    let import_request = ImportSnapshotRequest {
+        db_path: request.db_path.clone(),
+        cache_root: request.cache_root.clone(),
+        key_source_db_path: request.key_source_db_path.clone(),
+        snapshot_id: request.snapshot_id.clone(),
+    };
+    let mut import = if let Some(client) = metadata.as_mut() {
+        import_snapshot_inner(
+            &import_request,
+            provider,
+            Some(&mut **client),
+            metadata_account_id,
+            metadata_project_id,
+            false,
+        )?
+    } else {
+        import_snapshot_inner(
+            &import_request,
+            provider,
+            None,
+            metadata_account_id,
+            metadata_project_id,
+            false,
+        )?
+    };
 
     let store = open_store(&request.db_path)?;
     let persisted = store
@@ -503,13 +709,27 @@ pub fn materialize_snapshot(
         RestoreMaterializer::new(cache).apply(&plan)?;
         applied = true;
     }
-    import.cursor_updated_at = advance_import_cursor(
-        &store,
-        &import.receiver_account_id,
-        &import.receiver_device_id,
-        &import.project_id,
-        &import.snapshot_id,
-    )?;
+    import.cursor_updated_at = if let Some(client) = metadata.as_mut() {
+        advance_import_cursor(
+            &store,
+            &import.receiver_account_id,
+            &import.receiver_device_id,
+            &import.project_id,
+            &import.snapshot_id,
+            metadata_account_id,
+            Some(&mut **client),
+        )?
+    } else {
+        advance_import_cursor(
+            &store,
+            &import.receiver_account_id,
+            &import.receiver_device_id,
+            &import.project_id,
+            &import.snapshot_id,
+            None,
+            None,
+        )?
+    };
 
     Ok(MaterializationOutcome {
         import,
@@ -545,14 +765,111 @@ fn sync_key_for_import(
     Ok(SyncKey::from_hex(&key_hex)?)
 }
 
+fn register_published_snapshot_metadata(
+    metadata: &mut dyn HostedMetadataClient,
+    identity: &devbox_store::LocalIdentityRecord,
+    persisted: &PersistedSnapshot,
+    manifest_object_key: &ObjectKey,
+    manifest_plaintext: &[u8],
+    published_at: &str,
+) -> MaterializeResult<()> {
+    metadata.upsert_device(UpsertDeviceRequest {
+        account_id: identity.account_id.clone(),
+        device_id: identity.device_id.clone(),
+        display_name: identity.device_name.clone(),
+        last_seen_at: published_at.to_string(),
+    })?;
+    metadata.upsert_project(UpsertProjectRequest {
+        account_id: identity.account_id.clone(),
+        project_id: persisted.project.id.clone(),
+        display_name: persisted.project.display_name.clone(),
+        root_hint: persisted.project.root_path.clone(),
+        project_kind: persisted.project.kind.clone(),
+        updated_at: published_at.to_string(),
+    })?;
+    metadata.publish_snapshot(MetadataPublishSnapshotRequest {
+        account_id: identity.account_id.clone(),
+        project_id: persisted.project.id.clone(),
+        snapshot_id: persisted.snapshot.id.clone(),
+        parent_snapshot_id: persisted.snapshot.parent_snapshot_id.clone(),
+        manifest_object_key: manifest_object_key.to_string(),
+        manifest_hash: format!("blake3:{}", blake3::hash(manifest_plaintext).to_hex()),
+        manifest_entry_count: persisted.snapshot.manifest_entry_count,
+        total_size_bytes: persisted.snapshot.total_size_bytes,
+        published_by_device_id: identity.device_id.clone(),
+        published_at: published_at.to_string(),
+    })?;
+
+    Ok(())
+}
+
+fn resolve_manifest_object_key(
+    metadata: Option<&mut dyn HostedMetadataClient>,
+    store: &Store,
+    identity: &devbox_store::LocalIdentityRecord,
+    metadata_account_id: Option<&str>,
+    metadata_project_id: Option<&str>,
+    snapshot_id: &str,
+) -> MaterializeResult<ObjectKey> {
+    let Some(metadata) = metadata else {
+        return published_snapshot_object_key(snapshot_id);
+    };
+    let project_id = metadata_project_id.ok_or_else(|| {
+        MaterializeError::InvalidBundle(
+            "hosted metadata import requires a metadata project id".to_string(),
+        )
+    })?;
+    let account_id = metadata_account_id.ok_or_else(|| {
+        MaterializeError::InvalidBundle(
+            "hosted metadata import requires a metadata account id".to_string(),
+        )
+    })?;
+    let now = store.current_timestamp()?;
+    metadata.upsert_device(UpsertDeviceRequest {
+        account_id: account_id.to_string(),
+        device_id: identity.device_id.clone(),
+        display_name: identity.device_name.clone(),
+        last_seen_at: now,
+    })?;
+    let snapshot = metadata
+        .snapshot(account_id, project_id, snapshot_id)?
+        .ok_or_else(|| MetadataError::NotFound {
+            entity: "snapshot",
+            id: snapshot_id.to_string(),
+        })?;
+
+    Ok(ObjectKey::new(snapshot.manifest_object_key)?)
+}
+
 fn advance_import_cursor(
     store: &Store,
     account_id: &str,
     device_id: &str,
     project_id: &str,
     snapshot_id: &str,
+    metadata_account_id: Option<&str>,
+    metadata: Option<&mut dyn HostedMetadataClient>,
 ) -> MaterializeResult<String> {
     let updated_at = store.current_timestamp()?;
+    let expected_cursor = store
+        .device_project_cursor(account_id, device_id, project_id)?
+        .map(|cursor| cursor.cursor_value);
+    if let Some(metadata) = metadata {
+        let hosted_account_id = metadata_account_id.ok_or_else(|| {
+            MaterializeError::InvalidBundle(
+                "hosted metadata cursor update requires a metadata account id".to_string(),
+            )
+        })?;
+        metadata.compare_and_set_cursor(UpdateCursorRequest {
+            account_id: hosted_account_id.to_string(),
+            device_id: device_id.to_string(),
+            project_id: project_id.to_string(),
+            expected_cursor,
+            next_cursor: Some(snapshot_id.to_string()),
+            updated_at: updated_at.clone(),
+        })?;
+    }
+
     let cursor = DeviceProjectCursor {
         account_id: account_id.to_string(),
         device_id: device_id.to_string(),
@@ -1056,6 +1373,7 @@ fn policy_from_wire(decision: &str, reason: Option<String>) -> MaterializeResult
 #[cfg(test)]
 mod tests {
     use super::*;
+    use devbox_metadata::InMemoryMetadataStore;
     use devbox_snapshot::{RestoreTargetStatus, SnapshotManifestBuilder};
     use devbox_store::{
         local_project_id, BlobCache, EnsureLocalIdentityOptions, NewProject, NewSnapshot,
@@ -1155,6 +1473,211 @@ mod tests {
             .expect("cursor reads")
             .expect("cursor exists");
         assert_eq!(cursor.cursor_value, snapshot_id);
+    }
+
+    #[test]
+    fn hosted_publish_registers_device_project_and_snapshot_metadata() {
+        let fixture = FoundationFixture::new();
+        fixture.write("README.md", "hosted metadata registration\n");
+        let snapshot_id = fixture.persist_source_snapshot();
+        let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
+        let mut metadata = InMemoryMetadataStore::default();
+
+        let published = publish_snapshot_with_metadata(
+            &PublishSnapshotRequest {
+                db_path: fixture.source_db.clone(),
+                cache_root: fixture.source_cache.clone(),
+                snapshot_id: snapshot_id.clone(),
+            },
+            &provider,
+            &mut metadata,
+        )
+        .expect("snapshot publishes with metadata");
+
+        let hosted = devbox_metadata::MetadataStore::snapshot(
+            &metadata,
+            &published.account_id,
+            &published.project_id,
+            &snapshot_id,
+        )
+        .expect("hosted lookup succeeds")
+        .expect("hosted snapshot exists");
+        assert_eq!(hosted.snapshot_id, snapshot_id);
+        assert_eq!(
+            hosted.manifest_object_key,
+            published.manifest_object_key.to_string()
+        );
+        assert_eq!(hosted.manifest_entry_count, 1);
+        assert_eq!(
+            hosted.total_size_bytes,
+            "hosted metadata registration\n".len() as u64
+        );
+    }
+
+    #[test]
+    fn materialize_discovers_manifest_object_key_through_hosted_metadata() {
+        let fixture = FoundationFixture::new();
+        fixture.write("README.md", "metadata-selected manifest\n");
+        let snapshot_id = fixture.persist_source_snapshot();
+        let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
+        let mut metadata = InMemoryMetadataStore::default();
+        let published = publish_snapshot_with_metadata(
+            &PublishSnapshotRequest {
+                db_path: fixture.source_db.clone(),
+                cache_root: fixture.source_cache.clone(),
+                snapshot_id: snapshot_id.clone(),
+            },
+            &provider,
+            &mut metadata,
+        )
+        .expect("snapshot publishes with metadata");
+        let sync_key = sync_key_for_fixture(&fixture.source_db);
+        let original_key = published.manifest_object_key.clone();
+        let original_encrypted = provider
+            .get(&original_key)
+            .expect("manifest get succeeds")
+            .expect("manifest exists");
+        let plaintext =
+            decrypt_payload(&sync_key, &original_key, &original_encrypted).expect("decrypts");
+        let alias_key = ObjectKey::new("encrypted/snapshots/metadata-alias/bundle-v1")
+            .expect("alias key parses");
+        let alias_encrypted =
+            encrypt_payload(&sync_key, &alias_key, &plaintext).expect("alias encrypts");
+        provider
+            .put(&alias_key, &alias_encrypted)
+            .expect("alias manifest writes");
+        fs::remove_file(provider.path_for(&original_key)).expect("original manifest removes");
+        republish_manifest_metadata_with_key(&mut metadata, &published, &alias_key);
+
+        let outcome = materialize_snapshot_with_metadata(
+            &MaterializationRequest {
+                db_path: fixture.receiver_db.clone(),
+                cache_root: fixture.receiver_cache.clone(),
+                key_source_db_path: Some(fixture.source_db.clone()),
+                snapshot_id: snapshot_id.clone(),
+                target: fixture.target.clone(),
+                apply: true,
+            },
+            &provider,
+            &mut metadata,
+            &HostedMetadataImportOptions {
+                account_id: published.account_id.clone(),
+                project_id: published.project_id.clone(),
+            },
+        )
+        .expect("metadata-backed materialization succeeds");
+
+        assert_ne!(
+            outcome.import.source_account_id,
+            outcome.import.receiver_account_id
+        );
+        assert_eq!(outcome.import.manifest_object_key, alias_key);
+        assert!(outcome.applied);
+        assert_eq!(
+            fs::read_to_string(fixture.target.join("README.md")).expect("materialized file reads"),
+            "metadata-selected manifest\n"
+        );
+        assert_receiver_cursor(&fixture, &published.project_id, &snapshot_id);
+        let hosted_cursor = devbox_metadata::MetadataStore::cursor(
+            &metadata,
+            &published.account_id,
+            &outcome.import.receiver_device_id,
+            &published.project_id,
+        )
+        .expect("hosted cursor reads")
+        .expect("hosted cursor exists");
+        assert_eq!(
+            hosted_cursor.cursor_value.as_deref(),
+            Some(snapshot_id.as_str())
+        );
+    }
+
+    #[test]
+    fn hosted_cursor_conflict_prevents_local_cursor_advance() {
+        let fixture = FoundationFixture::new();
+        fixture.write("README.md", "server cursor wins\n");
+        let snapshot_id = fixture.persist_source_snapshot();
+        let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
+        let mut metadata = InMemoryMetadataStore::default();
+        let published = publish_snapshot_with_metadata(
+            &PublishSnapshotRequest {
+                db_path: fixture.source_db.clone(),
+                cache_root: fixture.source_cache.clone(),
+                snapshot_id: snapshot_id.clone(),
+            },
+            &provider,
+            &mut metadata,
+        )
+        .expect("snapshot publishes with metadata");
+        let receiver_identity = local_identity_for_fixture(&fixture.receiver_db);
+        assert_ne!(published.account_id, receiver_identity.account_id);
+        devbox_metadata::MetadataStore::upsert_device(
+            &mut metadata,
+            UpsertDeviceRequest {
+                account_id: published.account_id.clone(),
+                device_id: receiver_identity.device_id.clone(),
+                display_name: receiver_identity.device_name.clone(),
+                last_seen_at: "2026-06-18T11:59:00Z".to_string(),
+            },
+        )
+        .expect("receiver device registers under hosted account");
+        devbox_metadata::MetadataStore::compare_and_set_cursor(
+            &mut metadata,
+            UpdateCursorRequest {
+                account_id: published.account_id.clone(),
+                device_id: receiver_identity.device_id.clone(),
+                project_id: published.project_id.clone(),
+                expected_cursor: None,
+                next_cursor: Some("server-current".to_string()),
+                updated_at: "2026-06-18T12:00:00Z".to_string(),
+            },
+        )
+        .expect("server cursor advances first");
+
+        let error = import_snapshot_with_metadata(
+            &ImportSnapshotRequest {
+                db_path: fixture.receiver_db.clone(),
+                cache_root: fixture.receiver_cache.clone(),
+                key_source_db_path: Some(fixture.source_db.clone()),
+                snapshot_id,
+            },
+            &provider,
+            &mut metadata,
+            &HostedMetadataImportOptions {
+                account_id: published.account_id.clone(),
+                project_id: published.project_id.clone(),
+            },
+        )
+        .expect_err("stale local cursor is rejected");
+
+        match error {
+            MaterializeError::Metadata(MetadataError::CursorPreconditionFailed {
+                current_cursor,
+            }) => assert_eq!(current_cursor.as_deref(), Some("server-current")),
+            error => panic!("unexpected error: {error}"),
+        }
+        let store = Store::open_file(&fixture.receiver_db).expect("receiver opens");
+        store.apply_migrations().expect("migrations apply");
+        assert!(store
+            .device_project_cursor(
+                &receiver_identity.account_id,
+                &receiver_identity.device_id,
+                &published.project_id
+            )
+            .expect("local cursor reads")
+            .is_none());
+        let hosted_cursor = devbox_metadata::MetadataStore::cursor(
+            &metadata,
+            &published.account_id,
+            &receiver_identity.device_id,
+            &published.project_id,
+        )
+        .expect("hosted cursor reads")
+        .expect("hosted cursor exists");
+        assert_eq!(
+            hosted_cursor.cursor_value.as_deref(),
+            Some("server-current")
+        );
     }
 
     #[test]
@@ -1791,6 +2314,43 @@ mod tests {
             .expect("cursor reads")
             .expect("cursor exists");
         assert_eq!(cursor.cursor_value, expected);
+    }
+
+    fn sync_key_for_fixture(db_path: &Path) -> SyncKey {
+        let identity = local_identity_for_fixture(db_path);
+        SyncKey::from_hex(&identity.sync_key_hex).expect("fixture sync key parses")
+    }
+
+    fn local_identity_for_fixture(db_path: &Path) -> devbox_store::LocalIdentityRecord {
+        let store = Store::open_file(db_path).expect("store opens");
+        store.apply_migrations().expect("migrations apply");
+        store
+            .local_identity()
+            .expect("identity reads")
+            .expect("identity exists")
+    }
+
+    fn republish_manifest_metadata_with_key(
+        metadata: &mut InMemoryMetadataStore,
+        published: &PublishedSnapshotBundle,
+        manifest_object_key: &ObjectKey,
+    ) {
+        devbox_metadata::MetadataStore::publish_snapshot(
+            metadata,
+            MetadataPublishSnapshotRequest {
+                account_id: published.account_id.clone(),
+                project_id: published.project_id.clone(),
+                snapshot_id: published.snapshot_id.clone(),
+                parent_snapshot_id: None,
+                manifest_object_key: manifest_object_key.to_string(),
+                manifest_hash: "blake3:metadata-alias".to_string(),
+                manifest_entry_count: published.blob_count as u64,
+                total_size_bytes: published.plaintext_blob_bytes,
+                published_by_device_id: published.device_id.clone(),
+                published_at: "2026-06-18T12:01:00Z".to_string(),
+            },
+        )
+        .expect("metadata alias publishes");
     }
 
     struct RacingManifestProvider {

@@ -20,7 +20,8 @@ compare-and-set cursors, local/mock auth plus device-pairing trust primitives, l
 second-device materialization through encrypted remotes, local high-confidence secret blocking, and
 local conflict-as-divergent-snapshot compare/persist metadata are in place. Local sync preflight now
 uses device/project cursors to refuse divergent local/mock import and materialization before file
-blobs are downloaded or applied, while persisting readable conflict records. Production cloud
-authentication, managed object-storage credential provisioning, production pairing UX, wiring sync
-flows to hosted metadata, explicit secret allow policy, automatic merge/apply resolution, and
-conflict UI remain later Phase 1 work.
+blobs are downloaded or applied, while persisting readable conflict records. Publish/import/materialize
+can now opt into in-process mock-dev hosted metadata for published manifest discovery and
+server-side cursor compare-and-set. Production cloud authentication, managed object-storage
+credential provisioning, production pairing UX, explicit secret allow policy, automatic merge/apply
+resolution, conflict UI, Electron UI, and production deployment hardening remain later Phase 1 work.

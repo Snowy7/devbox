@@ -339,6 +339,7 @@ dependencies = [
  "devbox-auth",
  "devbox-conflict",
  "devbox-core",
+ "devbox-metadata",
  "devbox-snapshot",
  "devbox-store",
  "devbox-sync",

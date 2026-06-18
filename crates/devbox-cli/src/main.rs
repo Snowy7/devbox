@@ -9,11 +9,12 @@ use devbox_conflict::{
 use devbox_core::scanner::ProjectScanner;
 use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision};
 use devbox_materialize::{
-    import_snapshot, materialize_snapshot, publish_snapshot, sync_preflight, ImportSnapshotRequest,
-    MaterializationRequest, MaterializeError, PublishSnapshotRequest, SyncPreflightOutcome,
-    SyncPreflightRequest,
+    import_snapshot, import_snapshot_with_metadata, materialize_snapshot,
+    materialize_snapshot_with_metadata, publish_snapshot, publish_snapshot_with_metadata,
+    sync_preflight, HostedMetadataImportOptions, ImportSnapshotRequest, MaterializationRequest,
+    MaterializeError, PublishSnapshotRequest, SyncPreflightOutcome, SyncPreflightRequest,
 };
-use devbox_metadata::{MetadataAuthMode, MetadataServiceConfig};
+use devbox_metadata::{MetadataAuthMode, MetadataServiceConfig, SqliteMetadataStore};
 use devbox_snapshot::{
     is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
     LocalChangeFeedScanOptions, RestoreMaterializer, RestorePlan, RestoreSkippedEntry,
@@ -312,6 +313,7 @@ struct SyncSnapshotArgs {
     db_path: String,
     cache_root: String,
     remote: SyncRemoteArgs,
+    metadata: SyncMetadataArgs,
     snapshot_id: String,
     mock_key_source_db: Option<String>,
 }
@@ -321,6 +323,7 @@ struct SyncMaterializeArgs {
     db_path: String,
     cache_root: String,
     remote: SyncRemoteArgs,
+    metadata: SyncMetadataArgs,
     target: String,
     snapshot_id: String,
     mock_key_source_db: Option<String>,
@@ -331,6 +334,33 @@ struct SyncMaterializeArgs {
 enum SyncRemoteKindArg {
     Local,
     S3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncMetadataModeArg {
+    LocalMock,
+    MockDevSqlite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncMetadataArgs {
+    mode: SyncMetadataModeArg,
+    db_path: Option<String>,
+    account_id: Option<String>,
+    project_id: Option<String>,
+    endpoint: Option<String>,
+}
+
+impl Default for SyncMetadataArgs {
+    fn default() -> Self {
+        Self {
+            mode: SyncMetadataModeArg::LocalMock,
+            db_path: None,
+            account_id: None,
+            project_id: None,
+            endpoint: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -888,6 +918,7 @@ fn parse_sync_snapshot_args(
     let mut db_path = None;
     let mut cache_root = None;
     let mut remote = SyncRemoteArgs::default();
+    let mut metadata = SyncMetadataArgs::default();
     let mut snapshot_id = None;
     let mut mock_key_source_db = None;
     let mut index = 0;
@@ -895,6 +926,10 @@ fn parse_sync_snapshot_args(
     while index < args.len() {
         let current = args[index].as_str();
         if parse_sync_remote_arg(current, args, &mut index, &mut remote)? {
+            index += 1;
+            continue;
+        }
+        if parse_sync_metadata_arg(current, args, &mut index, &mut metadata)? {
             index += 1;
             continue;
         }
@@ -943,6 +978,7 @@ fn parse_sync_snapshot_args(
         cache_root: cache_root
             .ok_or_else(|| "sync snapshot requires --cache <CACHE_ROOT>".to_string())?,
         remote: finalize_sync_remote(remote, "sync snapshot")?,
+        metadata: finalize_sync_metadata(metadata, "sync snapshot", allow_mock_key_source)?,
         snapshot_id: snapshot_id
             .ok_or_else(|| "sync snapshot requires a snapshot id".to_string())?,
         mock_key_source_db,
@@ -953,6 +989,7 @@ fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, S
     let mut db_path = None;
     let mut cache_root = None;
     let mut remote = SyncRemoteArgs::default();
+    let mut metadata = SyncMetadataArgs::default();
     let mut target = None;
     let mut snapshot_id = None;
     let mut mock_key_source_db = None;
@@ -963,6 +1000,10 @@ fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, S
     while index < args.len() {
         let current = args[index].as_str();
         if parse_sync_remote_arg(current, args, &mut index, &mut remote)? {
+            index += 1;
+            continue;
+        }
+        if parse_sync_metadata_arg(current, args, &mut index, &mut metadata)? {
             index += 1;
             continue;
         }
@@ -1027,6 +1068,7 @@ fn parse_sync_materialize_args(args: &[String]) -> Result<SyncMaterializeArgs, S
         cache_root: cache_root
             .ok_or_else(|| "sync materialize requires --cache <CACHE_ROOT>".to_string())?,
         remote: finalize_sync_remote(remote, "sync materialize")?,
+        metadata: finalize_sync_metadata(metadata, "sync materialize", true)?,
         target: target.ok_or_else(|| "sync materialize requires --to <TARGET_DIR>".to_string())?,
         snapshot_id: snapshot_id
             .ok_or_else(|| "sync materialize requires a snapshot id".to_string())?,
@@ -1099,6 +1141,95 @@ fn parse_metadata_check_args(args: &[String]) -> Result<MetadataCheckArgs, Strin
         endpoint: endpoint.ok_or_else(|| "metadata check requires --endpoint <URL>".to_string())?,
         auth_mode,
     })
+}
+
+fn parse_sync_metadata_arg(
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+    metadata: &mut SyncMetadataArgs,
+) -> Result<bool, String> {
+    match flag {
+        "--metadata-mode" => {
+            *index += 1;
+            let value = args.get(*index).ok_or_else(|| {
+                "--metadata-mode requires local-mock or mock-dev-sqlite".to_string()
+            })?;
+            metadata.mode = match value.as_str() {
+                "local-mock" => SyncMetadataModeArg::LocalMock,
+                "mock-dev-sqlite" => SyncMetadataModeArg::MockDevSqlite,
+                _ => {
+                    return Err("--metadata-mode requires local-mock or mock-dev-sqlite".to_string())
+                }
+            };
+        }
+        "--metadata-db" => {
+            *index += 1;
+            metadata.db_path = args.get(*index).cloned();
+        }
+        "--metadata-account" => {
+            *index += 1;
+            metadata.account_id = args.get(*index).cloned();
+        }
+        "--metadata-project" => {
+            *index += 1;
+            metadata.project_id = args.get(*index).cloned();
+        }
+        "--metadata-endpoint" => {
+            *index += 1;
+            metadata.endpoint = args.get(*index).cloned();
+        }
+        _ => return Ok(false),
+    }
+
+    Ok(true)
+}
+
+fn finalize_sync_metadata(
+    metadata: SyncMetadataArgs,
+    command: &str,
+    require_project_for_metadata: bool,
+) -> Result<SyncMetadataArgs, String> {
+    if metadata.mode == SyncMetadataModeArg::LocalMock {
+        if metadata.db_path.is_some()
+            || metadata.account_id.is_some()
+            || metadata.project_id.is_some()
+            || metadata.endpoint.is_some()
+        {
+            return Err(format!(
+                "{command} metadata flags require --metadata-mode mock-dev-sqlite"
+            ));
+        }
+        return Ok(metadata);
+    }
+
+    if metadata.db_path.is_none() {
+        return Err(format!(
+            "{command} requires --metadata-db <DB_PATH> with --metadata-mode mock-dev-sqlite"
+        ));
+    }
+    if !require_project_for_metadata
+        && (metadata.account_id.is_some() || metadata.project_id.is_some())
+    {
+        return Err(format!(
+            "{command} accepts --metadata-account/--metadata-project only for import-snapshot or materialize"
+        ));
+    }
+    if require_project_for_metadata && metadata.project_id.is_none() {
+        return Err(format!(
+            "{command} requires --metadata-project <PROJECT_ID> with --metadata-mode mock-dev-sqlite"
+        ));
+    }
+    if let Some(endpoint) = &metadata.endpoint {
+        MetadataServiceConfig {
+            endpoint: endpoint.clone(),
+            auth_mode: MetadataAuthMode::MockDevHeaders,
+        }
+        .validate()
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(metadata)
 }
 
 fn parse_sync_remote_arg(
@@ -2082,16 +2213,132 @@ fn sync_download(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+fn open_sync_metadata_store(
+    metadata: &SyncMetadataArgs,
+) -> Result<SqliteMetadataStore, Box<dyn std::error::Error>> {
+    let path = metadata
+        .db_path
+        .as_deref()
+        .ok_or("metadata store path is missing")?;
+    Ok(SqliteMetadataStore::open_file(path)?)
+}
+
+fn metadata_import_options(
+    request: &ImportSnapshotRequest,
+    metadata: &SyncMetadataArgs,
+) -> Result<HostedMetadataImportOptions, Box<dyn std::error::Error>> {
+    let account_id = if let Some(account_id) = &metadata.account_id {
+        account_id.clone()
+    } else if let Some(path) = &request.key_source_db_path {
+        let source_store = Store::open_file(path)?;
+        source_store.apply_migrations()?;
+        source_store
+            .local_identity()?
+            .ok_or("metadata account id could not be derived from --mock-key-source-db")?
+            .account_id
+    } else {
+        return Err(
+            "hosted metadata import requires --metadata-account <ACCOUNT_ID> or --mock-key-source-db <PUBLISHER_DB>"
+                .into(),
+        );
+    };
+
+    Ok(HostedMetadataImportOptions {
+        account_id,
+        project_id: metadata
+            .project_id
+            .clone()
+            .ok_or("metadata project id is missing")?,
+    })
+}
+
+fn import_snapshot_command(
+    request: &ImportSnapshotRequest,
+    provider: &(impl RemoteBlobProvider + ?Sized),
+    metadata: &SyncMetadataArgs,
+) -> Result<devbox_materialize::ImportedSnapshotBundle, MaterializeError> {
+    if metadata.mode == SyncMetadataModeArg::MockDevSqlite {
+        let mut metadata_store = open_sync_metadata_store(metadata)
+            .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
+        let options = metadata_import_options(request, metadata)
+            .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
+        import_snapshot_with_metadata(request, provider, &mut metadata_store, &options)
+    } else {
+        import_snapshot(request, provider)
+    }
+}
+
+fn materialize_snapshot_command(
+    request: &MaterializationRequest,
+    provider: &(impl RemoteBlobProvider + ?Sized),
+    metadata: &SyncMetadataArgs,
+) -> Result<devbox_materialize::MaterializationOutcome, MaterializeError> {
+    if metadata.mode == SyncMetadataModeArg::MockDevSqlite {
+        let mut metadata_store = open_sync_metadata_store(metadata)
+            .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
+        let import_request = ImportSnapshotRequest {
+            db_path: request.db_path.clone(),
+            cache_root: request.cache_root.clone(),
+            key_source_db_path: request.key_source_db_path.clone(),
+            snapshot_id: request.snapshot_id.clone(),
+        };
+        let options = metadata_import_options(&import_request, metadata)
+            .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
+        materialize_snapshot_with_metadata(request, provider, &mut metadata_store, &options)
+    } else {
+        materialize_snapshot(request, provider)
+    }
+}
+
+fn print_sync_metadata_boundary(
+    metadata: &SyncMetadataArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match metadata.mode {
+        SyncMetadataModeArg::LocalMock => {
+            println!(
+                "Boundary: local/mock second-device foundation with pluggable encrypted object remote; hosted metadata/auth/UI not configured"
+            );
+            println!(
+                "Metadata mode: local/mock only; hosted metadata discovery and cursor CAS not configured"
+            );
+        }
+        SyncMetadataModeArg::MockDevSqlite => {
+            println!(
+                "Metadata mode: hosted mock-dev sqlite; manifest discovery and cursor CAS active"
+            );
+            println!("Metadata auth mode: mock-dev-headers");
+            println!("Metadata store: configured");
+            if let Some(endpoint) = &metadata.endpoint {
+                let check = MetadataServiceConfig {
+                    endpoint: endpoint.clone(),
+                    auth_mode: MetadataAuthMode::MockDevHeaders,
+                }
+                .validate()?;
+                println!("Metadata endpoint (sanitized): {}", check.endpoint);
+                println!("Metadata network check: {}", check.network_check);
+            }
+            println!(
+                "Boundary: mock-dev metadata wiring only; production OAuth, managed credentials, deployment hardening, Electron UI, and conflict UI are deferred"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn sync_publish_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
     let (provider, remote_description) = open_remote_provider(&args.remote)?;
-    let published = publish_snapshot(
-        &PublishSnapshotRequest {
-            db_path: PathBuf::from(&args.db_path),
-            cache_root: PathBuf::from(&args.cache_root),
-            snapshot_id: args.snapshot_id.clone(),
-        },
-        provider.as_ref(),
-    )?;
+    let request = PublishSnapshotRequest {
+        db_path: PathBuf::from(&args.db_path),
+        cache_root: PathBuf::from(&args.cache_root),
+        snapshot_id: args.snapshot_id.clone(),
+    };
+    let published = if args.metadata.mode == SyncMetadataModeArg::MockDevSqlite {
+        let mut metadata_store = open_sync_metadata_store(&args.metadata)?;
+        publish_snapshot_with_metadata(&request, provider.as_ref(), &mut metadata_store)?
+    } else {
+        publish_snapshot(&request, provider.as_ref())?
+    };
 
     println!("Sync publish snapshot: encrypted local/mock bundle");
     println!("Account id: {}", published.account_id);
@@ -2110,24 +2357,20 @@ fn sync_publish_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::err
     println!("Plaintext blob bytes: {}", published.plaintext_blob_bytes);
     println!("Remote blob bytes: {}", published.remote_blob_bytes);
     print_remote_description(&remote_description);
-    println!(
-        "Boundary: local/mock second-device foundation with pluggable encrypted object remote; hosted metadata/auth/UI not configured"
-    );
+    print_sync_metadata_boundary(&args.metadata)?;
 
     Ok(())
 }
 
 fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
     let (provider, remote_description) = open_remote_provider(&args.remote)?;
-    let imported = match import_snapshot(
-        &ImportSnapshotRequest {
-            db_path: PathBuf::from(&args.db_path),
-            cache_root: PathBuf::from(&args.cache_root),
-            key_source_db_path: args.mock_key_source_db.as_ref().map(PathBuf::from),
-            snapshot_id: args.snapshot_id.clone(),
-        },
-        provider.as_ref(),
-    ) {
+    let request = ImportSnapshotRequest {
+        db_path: PathBuf::from(&args.db_path),
+        cache_root: PathBuf::from(&args.cache_root),
+        key_source_db_path: args.mock_key_source_db.as_ref().map(PathBuf::from),
+        snapshot_id: args.snapshot_id.clone(),
+    };
+    let imported = match import_snapshot_command(&request, provider.as_ref(), &args.metadata) {
         Ok(imported) => imported,
         Err(MaterializeError::PreflightBlocked(outcome)) => {
             print_sync_preflight_outcome(&outcome);
@@ -2158,26 +2401,22 @@ fn sync_import_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::erro
     } else {
         println!("Trust bootstrap: receiver local identity key");
     }
-    println!(
-        "Boundary: local/mock second-device foundation with pluggable encrypted object remote; hosted metadata/auth/UI not configured"
-    );
+    print_sync_metadata_boundary(&args.metadata)?;
 
     Ok(())
 }
 
 fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let (provider, remote_description) = open_remote_provider(&args.remote)?;
-    let outcome = match materialize_snapshot(
-        &MaterializationRequest {
-            db_path: PathBuf::from(&args.db_path),
-            cache_root: PathBuf::from(&args.cache_root),
-            key_source_db_path: args.mock_key_source_db.as_ref().map(PathBuf::from),
-            snapshot_id: args.snapshot_id.clone(),
-            target: PathBuf::from(&args.target),
-            apply: args.apply,
-        },
-        provider.as_ref(),
-    ) {
+    let request = MaterializationRequest {
+        db_path: PathBuf::from(&args.db_path),
+        cache_root: PathBuf::from(&args.cache_root),
+        key_source_db_path: args.mock_key_source_db.as_ref().map(PathBuf::from),
+        snapshot_id: args.snapshot_id.clone(),
+        target: PathBuf::from(&args.target),
+        apply: args.apply,
+    };
+    let outcome = match materialize_snapshot_command(&request, provider.as_ref(), &args.metadata) {
         Ok(outcome) => outcome,
         Err(MaterializeError::PreflightBlocked(outcome)) => {
             print_sync_preflight_outcome(&outcome);
@@ -2216,9 +2455,7 @@ fn sync_materialize(args: &SyncMaterializeArgs) -> Result<(), Box<dyn std::error
     } else {
         println!("Trust bootstrap: receiver local identity key");
     }
-    println!(
-        "Boundary: local/mock second-device foundation with pluggable encrypted object remote; hosted metadata/auth/UI not configured"
-    );
+    print_sync_metadata_boundary(&args.metadata)?;
 
     Ok(())
 }
@@ -3252,6 +3489,18 @@ fn print_sync_usage() {
         "  Add --remote-kind s3 plus the --s3-* flags above to publish-snapshot, import-snapshot, materialize, upload, or download."
     );
     eprintln!(
+        "  Add --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> to publish-snapshot for hosted mock-dev metadata registration."
+    );
+    eprintln!(
+        "  Add --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> to import-snapshot or materialize for hosted mock-dev manifest discovery and cursor CAS."
+    );
+    eprintln!(
+        "  Import/materialize metadata account scope is --metadata-account <ACCOUNT_ID>, or it is derived from --mock-key-source-db <PUBLISHER_DB> in the local/mock trust bootstrap path."
+    );
+    eprintln!(
+        "  Optional --metadata-endpoint <URL> validates and prints a sanitized label only; sync metadata mode remains in-process and no network check runs."
+    );
+    eprintln!(
         "  devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID> [--device <DEVICE_ID>]"
     );
     eprintln!(
@@ -3487,6 +3736,139 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "metadata endpoint must not contain secret-looking material"
+        );
+    }
+
+    #[test]
+    fn sync_snapshot_args_default_to_local_mock_metadata() {
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--cache".to_string(),
+            "cache".to_string(),
+            "--remote".to_string(),
+            "remote".to_string(),
+            "snapshot-1".to_string(),
+        ];
+
+        let parsed = parse_sync_snapshot_args(&args, false).expect("sync args parse");
+
+        assert_eq!(parsed.metadata.mode, SyncMetadataModeArg::LocalMock);
+        assert_eq!(parsed.metadata.db_path, None);
+        assert_eq!(parsed.metadata.account_id, None);
+        assert_eq!(parsed.metadata.project_id, None);
+    }
+
+    #[test]
+    fn sync_import_metadata_mode_requires_project_id() {
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--cache".to_string(),
+            "cache".to_string(),
+            "--remote".to_string(),
+            "remote".to_string(),
+            "--metadata-mode".to_string(),
+            "mock-dev-sqlite".to_string(),
+            "--metadata-db".to_string(),
+            "metadata.sqlite3".to_string(),
+            "snapshot-1".to_string(),
+        ];
+
+        let error =
+            parse_sync_snapshot_args(&args, true).expect_err("metadata import requires project id");
+
+        assert_eq!(
+            error,
+            "sync snapshot requires --metadata-project <PROJECT_ID> with --metadata-mode mock-dev-sqlite"
+        );
+    }
+
+    #[test]
+    fn sync_metadata_endpoint_validation_does_not_reflect_secret_material() {
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--cache".to_string(),
+            "cache".to_string(),
+            "--remote".to_string(),
+            "remote".to_string(),
+            "--metadata-mode".to_string(),
+            "mock-dev-sqlite".to_string(),
+            "--metadata-db".to_string(),
+            "metadata.sqlite3".to_string(),
+            "--metadata-endpoint".to_string(),
+            "https://metadata.example/sync-key/raw".to_string(),
+            "snapshot-1".to_string(),
+        ];
+
+        let error = parse_sync_snapshot_args(&args, false)
+            .expect_err("secret-looking endpoint is rejected");
+
+        assert_eq!(
+            error,
+            "metadata endpoint must not contain secret-looking material"
+        );
+        assert!(!error.contains("sync-key/raw"));
+    }
+
+    #[test]
+    fn sync_metadata_import_options_derive_account_from_mock_key_source_db() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_db = dir.path().join("source.sqlite3");
+        let mut source = Store::open_file(&source_db).expect("source opens");
+        source.apply_migrations().expect("migrations apply");
+        let source_identity = source
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Desk"),
+            })
+            .expect("source identity initializes");
+
+        let options = metadata_import_options(
+            &ImportSnapshotRequest {
+                db_path: dir.path().join("receiver.sqlite3"),
+                cache_root: dir.path().join("cache"),
+                key_source_db_path: Some(source_db),
+                snapshot_id: "snapshot-1".to_string(),
+            },
+            &SyncMetadataArgs {
+                mode: SyncMetadataModeArg::MockDevSqlite,
+                db_path: Some("metadata.sqlite3".to_string()),
+                account_id: None,
+                project_id: Some("project-1".to_string()),
+                endpoint: None,
+            },
+        )
+        .expect("metadata options derive account");
+
+        assert_eq!(options.account_id, source_identity.account_id);
+        assert_eq!(options.project_id, "project-1");
+    }
+
+    #[test]
+    fn sync_publish_rejects_unused_metadata_account_scope_flags() {
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--cache".to_string(),
+            "cache".to_string(),
+            "--remote".to_string(),
+            "remote".to_string(),
+            "--metadata-mode".to_string(),
+            "mock-dev-sqlite".to_string(),
+            "--metadata-db".to_string(),
+            "metadata.sqlite3".to_string(),
+            "--metadata-account".to_string(),
+            "account-source".to_string(),
+            "snapshot-1".to_string(),
+        ];
+
+        let error =
+            parse_sync_snapshot_args(&args, false).expect_err("publish rejects account scope");
+
+        assert_eq!(
+            error,
+            "sync snapshot accepts --metadata-account/--metadata-project only for import-snapshot or materialize"
         );
     }
 }

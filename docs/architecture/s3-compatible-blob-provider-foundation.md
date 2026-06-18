@@ -96,11 +96,15 @@ devbox sync publish-snapshot \
 network request. Without `--validate-only`, it loads credentials and performs a lightweight `head`
 probe against the remote.
 
+Hosted metadata sync wiring is separate from object transport. Sync commands can opt into
+`--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>` so publish registers manifest metadata
+and import/materialize discover the manifest object key through metadata before reading from the
+configured local or S3-compatible object provider.
+
 ## Deferred
 
 Remaining Phase 1 work includes:
 
-- wiring the hosted metadata service into manifest discovery and cursor arbitration
 - production sign-in and account ownership proof
 - managed R2 credential provisioning and rotation
 - production pairing UX and recovery flows
