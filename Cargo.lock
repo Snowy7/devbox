@@ -84,6 +84,7 @@ dependencies = [
  "devbox-core",
  "devbox-snapshot",
  "devbox-store",
+ "rusqlite",
  "tempfile",
 ]
 

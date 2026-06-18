@@ -1,3 +1,4 @@
+use rusqlite::{params, Connection};
 use std::fs;
 use std::process::{Command, Output};
 
@@ -114,6 +115,53 @@ fn snapshot_dry_run_stays_non_persisting() {
     assert!(output.contains("Draft snapshot id: "));
     assert!(output.contains("SQLite persistence: deferred"));
     assert!(!fixture.db_path_buf().exists());
+}
+
+#[test]
+fn snapshot_restore_rejects_tampered_current_dir_manifest_path() {
+    let fixture = SnapshotCliFixture::new();
+    fixture.write("src/main.rs", "fn main() {}\n");
+
+    let create = run_devbox([
+        "snapshot",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        fixture.project_path(),
+    ]);
+    assert_success(&create);
+    let snapshot_id = stdout(&create)
+        .lines()
+        .find_map(|line| line.strip_prefix("Snapshot id: "))
+        .expect("snapshot id prints")
+        .to_string();
+
+    let conn = Connection::open(fixture.db_path()).expect("metadata database opens");
+    let changed = conn
+        .execute(
+            "UPDATE manifest_entries SET path = ?1 WHERE snapshot_id = ?2 AND path = ?3",
+            params!["src/./main.rs", snapshot_id, "src/main.rs"],
+        )
+        .expect("manifest path tampers");
+    assert_eq!(changed, 1);
+
+    let restore = run_devbox([
+        "snapshot",
+        "restore",
+        "--db",
+        fixture.db_path(),
+        "--cache",
+        fixture.cache_path(),
+        "--to",
+        fixture.target_path(),
+        snapshot_id.as_str(),
+        "--dry-run",
+    ]);
+    assert_failure(&restore);
+
+    assert!(stderr(&restore).contains("unsafe manifest path"));
+    assert!(!fixture.target_path_buf().exists());
 }
 
 #[test]

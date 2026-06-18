@@ -440,6 +440,16 @@ fn safe_restore_path(path: &Path) -> Result<Option<PathBuf>, RestorePlanError> {
         });
     }
 
+    if raw
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == ".")
+    {
+        return Err(RestorePlanError::UnsafeManifestPath {
+            path: path.to_path_buf(),
+            reason: "empty or current directory path segments are not accepted".to_string(),
+        });
+    }
+
     let mut safe = PathBuf::new();
     for component in path.components() {
         match component {
@@ -728,6 +738,63 @@ mod tests {
 
         assert!(matches!(error, RestorePlanError::UnsafeManifestPath { .. }));
         assert!(!fixture.target.exists());
+    }
+
+    #[test]
+    fn rejects_interior_current_directory_segments_before_normalization() {
+        let fixture = RestoreFixture::new();
+        let blob = fixture.cache.write_bytes(b"tampered").expect("blob writes");
+        let snapshot = fixture.snapshot(vec![included_file(
+            "src/./main.rs",
+            blob.id().clone(),
+            blob.object_ref(),
+            8,
+        )]);
+
+        let error =
+            RestorePlan::from_persisted_snapshot(&snapshot, &fixture.cache, &fixture.target)
+                .expect_err("current directory segment is rejected");
+
+        assert!(matches!(error, RestorePlanError::UnsafeManifestPath { .. }));
+        assert!(!fixture.target.exists());
+    }
+
+    #[test]
+    fn rejects_empty_path_segments_before_normalization() {
+        let fixture = RestoreFixture::new();
+        let blob = fixture.cache.write_bytes(b"tampered").expect("blob writes");
+        let snapshot = fixture.snapshot(vec![included_file(
+            "src//main.rs",
+            blob.id().clone(),
+            blob.object_ref(),
+            8,
+        )]);
+
+        let error =
+            RestorePlan::from_persisted_snapshot(&snapshot, &fixture.cache, &fixture.target)
+                .expect_err("empty path segment is rejected");
+
+        assert!(matches!(error, RestorePlanError::UnsafeManifestPath { .. }));
+        assert!(!fixture.target.exists());
+    }
+
+    #[test]
+    fn accepts_normal_nested_paths_after_raw_segment_validation() {
+        let fixture = RestoreFixture::new();
+        let blob = fixture.cache.write_bytes(b"normal").expect("blob writes");
+        let snapshot = fixture.snapshot(vec![included_file(
+            "src/main.rs",
+            blob.id().clone(),
+            blob.object_ref(),
+            6,
+        )]);
+
+        let plan = RestorePlan::from_persisted_snapshot(&snapshot, &fixture.cache, &fixture.target)
+            .expect("normal nested path is accepted");
+
+        assert_eq!(plan.files_to_write()[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(plan.dirs_to_create(), &[PathBuf::from("src")]);
+        assert!(plan.apply_allowed());
     }
 
     #[test]
