@@ -377,6 +377,25 @@ impl MetadataStore for InMemoryMetadataStore {
                 ));
             }
         }
+        if let Some(previous) = self.account_proofs.get(&proof.account_id) {
+            let previous_key = provider_tuple_key(
+                &previous.provider_kind,
+                &previous.provider_issuer,
+                &previous.provider_subject,
+            );
+            if previous_key != provider_key
+                && self.account_sessions.values().any(|session| {
+                    session.account_id == previous.account_id
+                        && session.provider_kind == previous.provider_kind
+                        && session.provider_issuer == previous.provider_issuer
+                        && session.provider_subject == previous.provider_subject
+                })
+            {
+                return Err(MetadataError::InvalidRequest(
+                    "account ownership proof cannot change provider tuple while sessions reference the previous proof".to_string(),
+                ));
+            }
+        }
         let display_name = proof
             .verified_email
             .as_deref()
@@ -2049,6 +2068,15 @@ mod tests {
     }
 
     #[test]
+    fn proof_rebind_with_existing_session_is_rejected_for_in_memory_and_sqlite() {
+        let mut in_memory = InMemoryMetadataStore::default();
+        assert_proof_rebind_with_existing_session_is_rejected(&mut in_memory);
+
+        let mut sqlite = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        assert_proof_rebind_with_existing_session_is_rejected(&mut sqlite);
+    }
+
+    #[test]
     fn sqlite_snapshot_identity_is_project_scoped() {
         let mut store = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
         seed_store(&mut store);
@@ -2534,6 +2562,56 @@ mod tests {
             .expect("project upserts");
     }
 
+    fn assert_proof_rebind_with_existing_session_is_rejected<S: MetadataStore>(store: &mut S) {
+        let raw_token = "raw-hosted-session-token";
+        let original = account_proof();
+        let rebound = account_proof_with_subject("provider-subject-rebound");
+        assert_eq!(original.account_id, rebound.account_id);
+        assert_ne!(original.provider_subject, rebound.provider_subject);
+
+        store
+            .upsert_account_ownership_proof(original.clone())
+            .expect("original proof upserts");
+        let session = devbox_auth::create_account_session(
+            &original,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        store
+            .upsert_account_session(session)
+            .expect("session upserts");
+
+        store
+            .upsert_account_ownership_proof(rebound)
+            .expect_err("proof rebind with existing session is rejected");
+
+        assert!(store
+            .account_for_provider_subject(
+                "oidc-dev",
+                "https://issuer.devbox.local",
+                "provider-subject-123",
+            )
+            .expect("old provider lookup works")
+            .is_some());
+        assert!(store
+            .account_for_provider_subject(
+                "oidc-dev",
+                "https://issuer.devbox.local",
+                "provider-subject-rebound",
+            )
+            .expect("new provider lookup works")
+            .is_none());
+        assert_eq!(
+            authenticate_account_session(store, raw_token, 102)
+                .expect("original session remains authenticatable")
+                .provider_subject,
+            "provider-subject-123"
+        );
+    }
+
     fn device_request() -> UpsertDeviceRequest {
         UpsertDeviceRequest {
             account_id: ACCOUNT.to_string(),
@@ -2570,11 +2648,15 @@ mod tests {
     }
 
     fn account_proof() -> AccountOwnershipProof {
+        account_proof_with_subject("provider-subject-123")
+    }
+
+    fn account_proof_with_subject(provider_subject: &str) -> AccountOwnershipProof {
         devbox_auth::create_account_ownership_proof(devbox_auth::AccountOwnershipProofInput {
             account_id: ACCOUNT,
             provider_kind: "oidc-dev",
             provider_issuer: "https://issuer.devbox.local",
-            provider_subject: "provider-subject-123",
+            provider_subject,
             verified_email: Some("user@example.com"),
             verified_domain: Some("example.com"),
             proof_issued_at: "2026-06-18T10:00:00Z",
