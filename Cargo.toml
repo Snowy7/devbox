@@ -4,6 +4,7 @@ members = [
     "crates/devbox-core",
     "crates/devbox-daemon",
     "crates/devbox-git",
+    "crates/devbox-snapshot",
     "crates/devbox-store",
 ]
 resolver = "2"

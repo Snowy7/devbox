@@ -114,6 +114,7 @@ pub enum ManifestEntryKind {
     File,
     Directory,
     Symlink,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
