@@ -26,11 +26,15 @@ This repository currently contains the product foundation and MVP planning artif
   opt into an in-process mock-dev SQLite metadata store for manifest discovery and cursor
   compare-and-set without network services. A production-shaped account ownership proof and account
   session boundary now models provider subject/email/domain proof, token-hash sessions, expiration,
-  and revocation without live OAuth. Hosted metadata now also models managed object credential
-  leases with account/session/project scoping, R2/S3/MinIO-shaped provider references, redacted
-  credential references, expiration, revocation, and rotation generation. Live sign-in, live
-  Cloudflare/AWS credential provisioning, deployment hardening, Electron UI, automatic conflict
-  resolution, and conflict UI remain later Phase 1 work.
+  and revocation without live OAuth. Hosted metadata HTTP handlers now preserve explicit mock-dev
+  header mode for tests/dev and also accept production-shaped `Authorization: Bearer <session-token>`
+  account-session auth resolved through the hosted session store. Hosted metadata now also models
+  managed object credential leases with account/session/project scoping, R2/S3/MinIO-shaped provider
+  references, redacted credential references, expiration, revocation, and rotation generation. Local
+  pairing now includes no-network recovery grants and device key-envelope rotation intents for future
+  production pairing/recovery flows. Live sign-in, live Cloudflare/AWS credential provisioning,
+  deployment hardening, Electron UI, automatic conflict resolution, and conflict UI remain later
+  Phase 1 work.
 
 ## Local MVP Surface
 
@@ -39,7 +43,7 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>`
 - `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>`
 - `devbox changes list --db <DB_PATH> [--project <PROJECT_ID>]`
-- `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]`
+- `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]`
 - `devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET>`
 - `devbox metadata credential-lease check --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox metadata credential-lease rotate --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
@@ -47,6 +51,9 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN>`
 - `devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>`
 - `devbox auth revoke-session --db <DB_PATH> <SESSION_ID>`
+- `devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF>`
+- `devbox devices recovery revoke --db <DB_PATH> <GRANT_ID>`
+- `devbox devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>`
 
 Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
@@ -56,8 +63,9 @@ Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
 For import/materialize, the hosted metadata account scope is either passed explicitly with
 `--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
-local/mock trust bootstrap. Production-shaped account/session proof primitives exist, but live
-provider login and production hosted auth enforcement remain deferred.
+local/mock trust bootstrap. Production-shaped account/session proof primitives and session-auth
+hosted metadata request handling exist, but live provider login, production deployment hardening,
+and UI onboarding remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

@@ -77,9 +77,14 @@ Current Phase 1 foundation status:
 - production-shaped account ownership proof and account session primitives model external provider
   subject, verified email/domain, token-hash sessions, expiration, revocation, and safe no-network
   dev persistence without live OAuth
+- hosted metadata handlers preserve explicit mock-dev header auth for tests/dev and add
+  production-shaped account-session bearer auth resolved through the hosted session store, scoping
+  devices, projects, snapshots, cursors, and managed leases to the authenticated account boundary
 - hosted metadata managed object credential lease primitives model account/session/project-scoped
   R2/S3/MinIO-compatible provider references, capabilities, expiration, revocation, and rotation
   generation without storing or printing raw object credentials
+- local pairing primitives now include recovery grant references, grant revocation, device rotation
+  intents, and key-envelope rotation generation for future production recovery UX
 - local/mock second-device materialization can publish/import an encrypted snapshot bundle through a
   local filesystem remote and apply it safely with the existing restore engine
 - local high-confidence secret detection blocks detected files before blob-cache writes and local
@@ -92,8 +97,8 @@ Current Phase 1 foundation status:
 - local/mock publish/import/materialize can opt into in-process hosted metadata for manifest
   discovery and server-side cursor compare-and-set
 - live OAuth/login integration, live Cloudflare/AWS object credential provisioning, production
-  pairing UX, explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron
-  UI, and production deployment hardening remain later Phase 1 work
+  pairing/recovery UX, explicit secret allow policy, automatic merge/apply resolution, conflict UI,
+  Electron UI, and production deployment hardening remain later Phase 1 work
 
 ## Content Addressing
 

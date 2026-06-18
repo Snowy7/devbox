@@ -9,7 +9,7 @@ hosted SaaS backend yet.
 handlers for:
 
 - health checks
-- mock-dev device registration/upsert
+- mock-dev and account-session-authenticated device registration/upsert
 - project registration/upsert
 - project-scoped published snapshot manifest metadata
 - project-scoped snapshot metadata lookup by snapshot id
@@ -63,11 +63,11 @@ cursor. Clients therefore cannot blindly overwrite a newer device/project cursor
 This is the hosted counterpart to the local sync preflight foundation: server-side cursor state is
 now shaped for arbitration, while automatic conflict merge/apply resolution remains deferred.
 
-## Mock-Dev Auth Boundary
+## Auth Boundary
 
 Production OAuth is intentionally not implemented in this slice.
 
-Handlers require explicit local-only mock headers:
+Handlers support explicit local-only mock headers for tests and development:
 
 ```text
 x-devbox-mock-account-id
@@ -78,10 +78,17 @@ Those headers are named as mock/dev credentials and are suitable only for local 
 flows. They are not account ownership proof, not a billing identity, and not safe for production
 deployment.
 
-A later production-shaped account boundary now adds store primitives for external provider
-subject/email/domain proof, account sessions, session token hashes, expiration, revocation, and
-session-token-to-account resolution. The current HTTP handlers still use mock-dev headers until live
-OAuth/login and production hosted auth enforcement are wired.
+Handlers also support production-shaped account-session auth:
+
+```text
+Authorization: Bearer <session-token>
+```
+
+The service hashes the presented bearer token transiently, resolves it through the hosted account
+session store, refuses missing, expired, or revoked sessions, and uses the authenticated account id
+for device, project, snapshot, cursor, and managed lease scoping. Mock-dev mode still rejects
+header/body identity mismatches so tests and local sync flows stay explicit. Session-auth mode does
+not trust caller-supplied account ids in request bodies.
 
 The service rejects obvious secret-bearing request material and its public CLI check prints a
 sanitized endpoint, not raw input, keys, or object credentials.
@@ -92,8 +99,8 @@ precondition errors rather than raw SQLite messages.
 
 ## CLI Boundary
 
-`devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers]` validates the local metadata
-service configuration without making a network request.
+`devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]` validates
+the local metadata service configuration without making a network request.
 
 The local/mock publish, import, and materialize flows can now opt into an in-process mock-dev SQLite
 metadata store. That wiring registers published snapshot metadata, discovers manifest object keys by
@@ -119,7 +126,7 @@ Remaining Phase 1 work includes:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
 - live managed R2/S3 credential provisioning and rotation against provider APIs
-- production pairing UX, recovery, and rotation
+- production pairing UX and live recovery/rotation flows
 - automatic conflict merge/apply resolution and user-facing conflict UI
 - Electron tray/status integration
 - production deployment hardening, observability, and abuse protection

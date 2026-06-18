@@ -60,7 +60,7 @@ Rust backend
             <tr><td><code>apps/desktop</code></td><td>Electron + React + TypeScript desktop app.</td></tr>
             <tr><td><code>crates/devbox-daemon</code></td><td>Long-running local daemon.</td></tr>
             <tr><td><code>crates/devbox-cli</code></td><td>Command-line interface using clap.</td></tr>
-            <tr><td><code>crates/devbox-metadata</code></td><td>Hosted metadata API foundation with mock-dev auth, SQLite dev/test storage, published manifest discovery, and compare-and-set cursors.</td></tr>
+            <tr><td><code>crates/devbox-metadata</code></td><td>Hosted metadata API foundation with explicit mock-dev auth, account-session auth, SQLite dev/test storage, published manifest discovery, and compare-and-set cursors.</td></tr>
             <tr><td><code>crates/devbox-core</code></td><td>Shared snapshot, policy, manifest, and storage types.</td></tr>
             <tr><td><code>crates/devbox-git</code></td><td>Git detection, verification, and adapter logic.</td></tr>
             <tr><td><code>services/api</code></td><td>Rust backend API, likely axum.</td></tr>
@@ -107,17 +107,19 @@ Rust backend
         <ul class="checklist">
           <li>Local identity and key material support encrypted object sync foundations.</li>
           <li>S3-compatible encrypted blob transport can target R2, AWS S3, or MinIO without printing or storing raw credentials.</li>
-          <li>The hosted metadata API foundation models server-side accounts, devices, projects, published snapshot manifests, and compare-and-set cursors behind a mock-dev auth boundary.</li>
+          <li>The hosted metadata API foundation models server-side accounts, devices, projects, published snapshot manifests, and compare-and-set cursors behind explicit mock-dev and account-session auth boundaries.</li>
           <li>Publish/import/materialize can opt into in-process mock-dev hosted metadata for manifest lookup and server-side cursor compare-and-set.</li>
           <li>A local identity is not cloud authentication or account ownership proof.</li>
           <li>The local/mock auth foundation models account session state, device approval, key envelopes, revocation, and device/project cursors in SQLite.</li>
           <li>The production-shaped auth boundary models external provider subject, verified email/domain, account id, session id, token hash, expiration, and revocation without live OAuth.</li>
+          <li>Hosted metadata request handlers resolve bearer session tokens through the hosted session store and scope device/project/snapshot/cursor operations to the authenticated account.</li>
           <li>Hosted metadata now models managed object credential leases with authenticated account/session lookup, optional project scope, R2/S3/MinIO-compatible provider references, capabilities, expiration, revocation, and rotation generation.</li>
+          <li>Production-shaped pairing recovery and rotation primitives model recovery grant references, device rotation intents, revocation, and key-envelope rotation generation without live recovery UX.</li>
           <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a second SQLite/cache context, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
           <li>Local conflict records compare and persist divergent snapshot rows without source bytes.</li>
           <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>
-          <li>Live OAuth/login integration, production hosted metadata auth enforcement, recovery, live Cloudflare/AWS object credential provisioning, explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and deployment hardening remain deferred.</li>
+          <li>Live OAuth/login integration, live recovery UX, live Cloudflare/AWS object credential provisioning, explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and deployment hardening remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
         </ul>
       </section>

@@ -54,15 +54,29 @@ The local store supports:
 - resolving a presented session token into an authenticated account/session context
 - resolving active managed object credential leases inside the authenticated account/session scope
 
-Existing hosted metadata HTTP handlers still require the local-only mock-dev headers:
+Hosted metadata HTTP handlers now support two explicit modes. Local tests/dev can still use the
+local-only mock-dev headers:
 
 ```text
 x-devbox-mock-account-id
 x-devbox-mock-device-id
 ```
 
-Those headers remain available for tests and local development. Future production handlers can use
-the new account-session resolver instead of trusting mock headers.
+Those headers remain available for tests and local development. The account-session resolver is the
+production-shaped path beyond mock headers.
+
+Production-shaped session mode accepts:
+
+```text
+Authorization: Bearer <session-token>
+```
+
+The service hashes the presented token transiently, resolves it through the hosted account session
+store, rejects expired or revoked sessions, and scopes devices, projects, snapshots, cursors, and
+managed object credential leases to the authenticated account id. In this mode handlers do not trust
+account ids supplied in JSON request bodies. Public HTTP errors are sanitized and do not reflect raw
+session tokens, token hashes, provider material, object credentials, SQLite internals, or key
+material.
 
 ## CLI Smoke Surface
 
@@ -87,7 +101,7 @@ This is not production sign-in UI. Remaining Phase 1 work still includes:
 
 - live OAuth/OIDC provider integration
 - hosted login/callback handling
-- production pairing UX, recovery, and rotation
+- production pairing UX and live recovery/rotation flows
 - live managed object-storage credential provisioning and rotation against Cloudflare/AWS APIs
 - production deployment hardening and abuse protection
 - Electron onboarding/status UI

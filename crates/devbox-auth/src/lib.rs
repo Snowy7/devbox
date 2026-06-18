@@ -45,6 +45,20 @@ pub enum AuthError {
     DeviceAlreadyRevoked {
         device_id: String,
     },
+    InvalidRecoveryGrant {
+        field: &'static str,
+        reason: &'static str,
+    },
+    RecoveryGrantExpired {
+        grant_id: String,
+    },
+    RecoveryGrantRevoked {
+        grant_id: String,
+    },
+    RotationIntentNotPending {
+        intent_id: String,
+        status: String,
+    },
     Crypto,
 }
 
@@ -88,6 +102,22 @@ impl fmt::Display for AuthError {
             Self::DeviceAlreadyRevoked { device_id } => {
                 write!(f, "device is already revoked: {device_id}")
             }
+            Self::InvalidRecoveryGrant { field, reason } => {
+                write!(
+                    f,
+                    "{field} is not a valid recovery/rotation field: {reason}"
+                )
+            }
+            Self::RecoveryGrantExpired { grant_id } => {
+                write!(f, "recovery grant expired: {grant_id}")
+            }
+            Self::RecoveryGrantRevoked { grant_id } => {
+                write!(f, "recovery grant revoked: {grant_id}")
+            }
+            Self::RotationIntentNotPending { intent_id, status } => write!(
+                f,
+                "device rotation intent {intent_id} is not pending; current status is {status}"
+            ),
             Self::Crypto => f.write_str("auth crypto operation failed"),
         }
     }
@@ -301,6 +331,7 @@ pub struct KeyEnvelope {
     pub key_ref: String,
     pub ciphertext_hex: String,
     pub created_at: String,
+    pub rotation_generation: u64,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -337,6 +368,64 @@ pub struct DeviceProjectCursor {
     pub project_id: String,
     pub cursor_value: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecoveryGrant {
+    pub id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub grant_ref: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at_unix: i64,
+    pub consumed_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub audit_label: String,
+}
+
+impl fmt::Debug for RecoveryGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecoveryGrant")
+            .field("id", &self.id)
+            .field("account_id", &self.account_id)
+            .field("device_id", &self.device_id)
+            .field("grant_ref", &self.grant_ref)
+            .field("status", &self.status)
+            .field("created_at", &self.created_at)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("consumed_at", &self.consumed_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("audit_label", &self.audit_label)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRotationIntent {
+    pub id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub requested_by_session_id: Option<String>,
+    pub status: String,
+    pub reason: String,
+    pub created_at: String,
+    pub expires_at_unix: i64,
+    pub completed_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub key_envelope_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceRotationIntentInput<'a> {
+    pub account_id: &'a str,
+    pub device_id: &'a str,
+    pub requested_by_session_id: Option<&'a str>,
+    pub reason: &'a str,
+    pub created_at: &'a str,
+    pub now_unix: i64,
+    pub ttl_seconds: i64,
+    pub current_generation: u64,
 }
 
 pub fn now_unix_seconds() -> i64 {
@@ -657,6 +746,7 @@ pub fn create_key_envelope(
         key_ref: "account-sync-key-v1".to_string(),
         ciphertext_hex: hex_encode(&envelope),
         created_at: now.to_string(),
+        rotation_generation: 0,
     })
 }
 
@@ -700,6 +790,149 @@ pub fn revoke_trusted_device(device: &DeviceTrustRecord) -> AuthResult<()> {
     Ok(())
 }
 
+pub fn create_recovery_grant(
+    account_id: &str,
+    device_id: &str,
+    grant_ref: &str,
+    audit_label: &str,
+    now: &str,
+    now_unix: i64,
+    ttl_seconds: i64,
+) -> AuthResult<RecoveryGrant> {
+    let account_id = recovery_public_identifier(account_id, "account id")?;
+    let device_id = recovery_public_identifier(device_id, "device id")?;
+    let grant_ref = recovery_reference(grant_ref, "recovery grant reference")?;
+    let audit_label = recovery_public_identifier(audit_label, "audit label")?;
+    if now.trim().is_empty() {
+        return Err(AuthError::InvalidRecoveryGrant {
+            field: "created at",
+            reason: "value must not be empty",
+        });
+    }
+    if ttl_seconds <= 0 {
+        return Err(AuthError::InvalidRecoveryGrant {
+            field: "ttl",
+            reason: "ttl must be positive",
+        });
+    }
+
+    Ok(RecoveryGrant {
+        id: random_prefixed_id("recovery")?,
+        account_id,
+        device_id,
+        grant_ref,
+        status: "pending".to_string(),
+        created_at: now.to_string(),
+        expires_at_unix: now_unix + ttl_seconds,
+        consumed_at: None,
+        revoked_at: None,
+        audit_label,
+    })
+}
+
+pub fn consume_recovery_grant(
+    grant: &RecoveryGrant,
+    now: &str,
+    now_unix: i64,
+) -> AuthResult<RecoveryGrant> {
+    ensure_recovery_grant_active(grant, now_unix)?;
+    let mut consumed = grant.clone();
+    consumed.status = "consumed".to_string();
+    consumed.consumed_at = Some(now.to_string());
+    Ok(consumed)
+}
+
+pub fn revoke_recovery_grant(grant: &RecoveryGrant, now: &str) -> AuthResult<RecoveryGrant> {
+    let mut revoked = grant.clone();
+    if revoked.revoked_at.is_none() {
+        revoked.status = "revoked".to_string();
+        revoked.revoked_at = Some(now.to_string());
+    }
+    Ok(revoked)
+}
+
+pub fn create_device_rotation_intent(
+    input: DeviceRotationIntentInput<'_>,
+) -> AuthResult<DeviceRotationIntent> {
+    let account_id = recovery_public_identifier(input.account_id, "account id")?;
+    let device_id = recovery_public_identifier(input.device_id, "device id")?;
+    let requested_by_session_id = input
+        .requested_by_session_id
+        .map(|value| recovery_public_identifier(value, "requested by session id"))
+        .transpose()?;
+    let reason = recovery_public_identifier(input.reason, "reason")?;
+    if input.created_at.trim().is_empty() {
+        return Err(AuthError::InvalidRecoveryGrant {
+            field: "created at",
+            reason: "value must not be empty",
+        });
+    }
+    if input.ttl_seconds <= 0 {
+        return Err(AuthError::InvalidRecoveryGrant {
+            field: "ttl",
+            reason: "ttl must be positive",
+        });
+    }
+
+    Ok(DeviceRotationIntent {
+        id: random_prefixed_id("rotation")?,
+        account_id,
+        device_id,
+        requested_by_session_id,
+        status: "pending".to_string(),
+        reason,
+        created_at: input.created_at.to_string(),
+        expires_at_unix: input.now_unix + input.ttl_seconds,
+        completed_at: None,
+        revoked_at: None,
+        key_envelope_generation: input.current_generation,
+    })
+}
+
+pub fn complete_device_rotation_intent(
+    intent: &DeviceRotationIntent,
+    completed_at: &str,
+    next_generation: u64,
+) -> AuthResult<DeviceRotationIntent> {
+    if intent.status != "pending" {
+        return Err(AuthError::RotationIntentNotPending {
+            intent_id: intent.id.clone(),
+            status: intent.status.clone(),
+        });
+    }
+    let mut completed = intent.clone();
+    completed.status = "completed".to_string();
+    completed.completed_at = Some(completed_at.to_string());
+    completed.key_envelope_generation = next_generation;
+    Ok(completed)
+}
+
+pub fn revoke_device_rotation_intent(
+    intent: &DeviceRotationIntent,
+    revoked_at: &str,
+) -> AuthResult<DeviceRotationIntent> {
+    let mut revoked = intent.clone();
+    if revoked.revoked_at.is_none() && revoked.status == "pending" {
+        revoked.status = "revoked".to_string();
+        revoked.revoked_at = Some(revoked_at.to_string());
+    }
+    Ok(revoked)
+}
+
+fn ensure_recovery_grant_active(grant: &RecoveryGrant, now_unix: i64) -> AuthResult<()> {
+    if grant.status == "revoked" || grant.revoked_at.is_some() {
+        return Err(AuthError::RecoveryGrantRevoked {
+            grant_id: grant.id.clone(),
+        });
+    }
+    if grant.expires_at_unix <= now_unix {
+        return Err(AuthError::RecoveryGrantExpired {
+            grant_id: grant.id.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn hash_secret_hex(secret_hex: &str) -> String {
     blake3::hash(secret_hex.as_bytes()).to_hex().to_string()
 }
@@ -719,6 +952,27 @@ fn public_identifier(value: &str, field: &'static str) -> AuthResult<String> {
         });
     }
     Ok(trimmed.to_string())
+}
+
+fn recovery_public_identifier(value: &str, field: &'static str) -> AuthResult<String> {
+    public_identifier(value, field).map_err(|_| AuthError::InvalidRecoveryGrant {
+        field,
+        reason: "value must be public metadata and must not contain secret-looking material",
+    })
+}
+
+fn recovery_reference(value: &str, field: &'static str) -> AuthResult<String> {
+    let trimmed = recovery_public_identifier(value, field)?;
+    if !(trimmed.starts_with("recovery-ref:")
+        || trimmed.starts_with("grant-ref:")
+        || trimmed.starts_with("mock-recovery-ref:"))
+    {
+        return Err(AuthError::InvalidRecoveryGrant {
+            field,
+            reason: "reference must be a redacted recovery/grant reference",
+        });
+    }
+    Ok(trimmed)
 }
 
 fn optional_public_identifier(
@@ -1031,5 +1285,91 @@ mod tests {
         assert!(formatted_identity.contains("<redacted>"));
         assert!(formatted_token.contains("<redacted>"));
         assert!(formatted_device.contains("<redacted>"));
+    }
+
+    #[test]
+    fn recovery_grant_uses_redacted_references_and_idempotent_revocation() {
+        let raw_secret = "recovery-secret-should-not-persist";
+        let rejected = create_recovery_grant(
+            "account-test",
+            "device-local",
+            raw_secret,
+            "laptop recovery",
+            "2026-06-18T10:00:00Z",
+            100,
+            600,
+        )
+        .expect_err("raw recovery material is rejected");
+        assert!(!rejected.to_string().contains(raw_secret));
+
+        let grant = create_recovery_grant(
+            "account-test",
+            "device-local",
+            "recovery-ref:grant-alpha",
+            "laptop recovery",
+            "2026-06-18T10:00:00Z",
+            100,
+            600,
+        )
+        .expect("grant creates");
+        assert_eq!(grant.status, "pending");
+        assert_eq!(grant.expires_at_unix, 700);
+
+        let consumed =
+            consume_recovery_grant(&grant, "2026-06-18T10:01:00Z", 101).expect("grant consumes");
+        assert_eq!(consumed.status, "consumed");
+
+        let expired = consume_recovery_grant(&grant, "2026-06-18T10:20:00Z", 700)
+            .expect_err("expired grant is rejected");
+        assert!(matches!(expired, AuthError::RecoveryGrantExpired { .. }));
+
+        let revoked = revoke_recovery_grant(&grant, "2026-06-18T10:02:00Z").expect("grant revokes");
+        let revoked_again =
+            revoke_recovery_grant(&revoked, "2026-06-18T10:03:00Z").expect("revocation repeats");
+        assert_eq!(revoked_again.revoked_at, revoked.revoked_at);
+        assert!(format!("{revoked_again:?}").contains("recovery-ref:grant-alpha"));
+    }
+
+    #[test]
+    fn device_rotation_intent_records_key_envelope_generation() {
+        let intent = create_device_rotation_intent(DeviceRotationIntentInput {
+            account_id: "account-test",
+            device_id: "device-local",
+            requested_by_session_id: Some("session-alpha"),
+            reason: "recovery rotation",
+            created_at: "2026-06-18T10:00:00Z",
+            now_unix: 100,
+            ttl_seconds: 600,
+            current_generation: 2,
+        })
+        .expect("intent creates");
+        assert_eq!(intent.status, "pending");
+        assert_eq!(intent.key_envelope_generation, 2);
+
+        let completed = complete_device_rotation_intent(&intent, "2026-06-18T10:01:00Z", 3)
+            .expect("intent completes");
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.key_envelope_generation, 3);
+
+        let repeated = complete_device_rotation_intent(&completed, "2026-06-18T10:02:00Z", 4)
+            .expect_err("completed intent cannot complete again");
+        assert!(matches!(
+            repeated,
+            AuthError::RotationIntentNotPending { .. }
+        ));
+
+        let raw_reason = "device-key-secret";
+        let rejected = create_device_rotation_intent(DeviceRotationIntentInput {
+            account_id: "account-test",
+            device_id: "device-local",
+            requested_by_session_id: None,
+            reason: raw_reason,
+            created_at: "2026-06-18T10:00:00Z",
+            now_unix: 100,
+            ttl_seconds: 600,
+            current_generation: 0,
+        })
+        .expect_err("secret-looking reason is rejected");
+        assert!(!rejected.to_string().contains(raw_reason));
     }
 }
