@@ -56,6 +56,9 @@ Completed foundations:
   manifests, and server-side device/project cursors with compare-and-set updates
 - local/mock auth session, pairing invitation, approved-device trust, key envelope, revocation, and
   cursor primitives
+- production-shaped account ownership proof and account session primitives with provider
+  subject/email/domain proof, token-hash sessions, expiration, revocation, and no-network CLI/dev
+  persistence
 - local/mock second-device materialization through an encrypted local filesystem remote, including
   publish/import, deferred materialize cursor commit, and safe restore-engine apply
 - local high-confidence secret detection and block-by-default policy before snapshot blobs become
@@ -68,7 +71,7 @@ Completed foundations:
 
 Remaining auth and pairing work:
 
-- production sign-in and account ownership proof
+- live OAuth/OIDC sign-in and hosted account ownership proof verification
 - production pairing UX, recovery, and rotation flows
 - managed cloud object credentials, provisioning, and rotation
 - production hosted metadata service integration beyond the in-process mock-dev test boundary

@@ -12,8 +12,22 @@ const TOKEN_PREFIX: &str = "devbox-pair-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
+    InvalidOwnershipProof {
+        field: &'static str,
+        reason: &'static str,
+    },
     InvalidHex {
         field: &'static str,
+    },
+    InvalidSessionToken,
+    AccountSessionExpired {
+        session_id: String,
+    },
+    AccountSessionRevoked {
+        session_id: String,
+    },
+    AccountSessionTokenMismatch {
+        session_id: String,
     },
     MalformedInvitation,
     InvitationSecretMismatch,
@@ -37,7 +51,23 @@ pub enum AuthError {
 impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidOwnershipProof { field, reason } => {
+                write!(
+                    f,
+                    "{field} is not a valid account ownership proof field: {reason}"
+                )
+            }
             Self::InvalidHex { field } => write!(f, "{field} must be 64 hex characters"),
+            Self::InvalidSessionToken => f.write_str("session token must not be empty"),
+            Self::AccountSessionExpired { session_id } => {
+                write!(f, "account session expired: {session_id}")
+            }
+            Self::AccountSessionRevoked { session_id } => {
+                write!(f, "account session revoked: {session_id}")
+            }
+            Self::AccountSessionTokenMismatch { session_id } => {
+                write!(f, "account session token hash mismatch: {session_id}")
+            }
             Self::MalformedInvitation => f.write_str("pairing invitation is malformed"),
             Self::InvitationSecretMismatch => {
                 f.write_str("pairing invitation secret does not match stored invitation")
@@ -94,6 +124,73 @@ pub struct AuthSession {
     pub session_state: String,
     pub proof_issued_at: String,
     pub last_refreshed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountOwnershipProof {
+    pub account_id: String,
+    pub provider_kind: String,
+    pub provider_issuer: String,
+    pub provider_subject: String,
+    pub verified_email: Option<String>,
+    pub verified_domain: Option<String>,
+    pub proof_state: String,
+    pub proof_issued_at: String,
+    pub proof_expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountOwnershipProofInput<'a> {
+    pub account_id: &'a str,
+    pub provider_kind: &'a str,
+    pub provider_issuer: &'a str,
+    pub provider_subject: &'a str,
+    pub verified_email: Option<&'a str>,
+    pub verified_domain: Option<&'a str>,
+    pub proof_issued_at: &'a str,
+    pub proof_expires_at_unix: i64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountSession {
+    pub session_id: String,
+    pub account_id: String,
+    pub provider_kind: String,
+    pub provider_issuer: String,
+    pub provider_subject: String,
+    pub session_token_hash_hex: String,
+    pub session_state: String,
+    pub created_at: String,
+    pub expires_at_unix: i64,
+    pub revoked_at: Option<String>,
+    pub last_seen_at: String,
+}
+
+impl fmt::Debug for AccountSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AccountSession")
+            .field("session_id", &self.session_id)
+            .field("account_id", &self.account_id)
+            .field("provider_kind", &self.provider_kind)
+            .field("provider_issuer", &self.provider_issuer)
+            .field("provider_subject", &self.provider_subject)
+            .field("session_token_hash_hex", &"<redacted>")
+            .field("session_state", &self.session_state)
+            .field("created_at", &self.created_at)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("revoked_at", &self.revoked_at)
+            .field("last_seen_at", &self.last_seen_at)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedAccountSession {
+    pub account_id: String,
+    pub session_id: String,
+    pub provider_kind: String,
+    pub provider_issuer: String,
+    pub provider_subject: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +355,184 @@ pub fn mock_login(identity: &LocalIdentityView, now: &str) -> AuthSession {
         proof_issued_at: now.to_string(),
         last_refreshed_at: now.to_string(),
     }
+}
+
+pub fn create_account_ownership_proof(
+    input: AccountOwnershipProofInput<'_>,
+) -> AuthResult<AccountOwnershipProof> {
+    let account_id = public_identifier(input.account_id, "account id")?;
+    let provider_kind = public_identifier(input.provider_kind, "provider kind")?;
+    let provider_issuer = public_identifier(input.provider_issuer, "provider issuer")?;
+    let provider_subject = public_identifier(input.provider_subject, "provider subject")?;
+    let verified_email = optional_public_identifier(input.verified_email, "verified email")?;
+    let verified_domain = optional_public_identifier(input.verified_domain, "verified domain")?;
+    if verified_email.is_none() && verified_domain.is_none() {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "verified email/domain",
+            reason: "at least one verified email or domain is required",
+        });
+    }
+    if input.proof_issued_at.trim().is_empty() {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "proof issued at",
+            reason: "value must not be empty",
+        });
+    }
+    if input.proof_expires_at_unix <= 0 {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "proof expires at",
+            reason: "expiration must be a positive unix timestamp",
+        });
+    }
+
+    Ok(AccountOwnershipProof {
+        account_id,
+        provider_kind,
+        provider_issuer,
+        provider_subject,
+        verified_email,
+        verified_domain,
+        proof_state: "verified".to_string(),
+        proof_issued_at: input.proof_issued_at.to_string(),
+        proof_expires_at_unix: input.proof_expires_at_unix,
+    })
+}
+
+pub fn validate_account_ownership_proof(
+    proof: &AccountOwnershipProof,
+    now_unix: i64,
+) -> AuthResult<()> {
+    public_identifier(&proof.account_id, "account id")?;
+    public_identifier(&proof.provider_kind, "provider kind")?;
+    public_identifier(&proof.provider_issuer, "provider issuer")?;
+    public_identifier(&proof.provider_subject, "provider subject")?;
+    optional_public_identifier(proof.verified_email.as_deref(), "verified email")?;
+    optional_public_identifier(proof.verified_domain.as_deref(), "verified domain")?;
+    if proof.proof_state != "verified" {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "proof state",
+            reason: "only verified ownership proofs are accepted",
+        });
+    }
+    if proof.verified_email.is_none() && proof.verified_domain.is_none() {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "verified email/domain",
+            reason: "at least one verified email or domain is required",
+        });
+    }
+    if proof.proof_expires_at_unix <= now_unix {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "proof expires at",
+            reason: "ownership proof is expired",
+        });
+    }
+    Ok(())
+}
+
+pub fn create_account_session(
+    proof: &AccountOwnershipProof,
+    raw_session_token: &str,
+    created_at: &str,
+    now_unix: i64,
+    ttl_seconds: i64,
+) -> AuthResult<AccountSession> {
+    validate_account_ownership_proof(proof, now_unix)?;
+    if raw_session_token.trim().is_empty() {
+        return Err(AuthError::InvalidSessionToken);
+    }
+    if created_at.trim().is_empty() {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "session created at",
+            reason: "value must not be empty",
+        });
+    }
+    if ttl_seconds <= 0 {
+        return Err(AuthError::InvalidOwnershipProof {
+            field: "session ttl",
+            reason: "ttl must be positive",
+        });
+    }
+
+    Ok(AccountSession {
+        session_id: random_prefixed_id("session")?,
+        account_id: proof.account_id.clone(),
+        provider_kind: proof.provider_kind.clone(),
+        provider_issuer: proof.provider_issuer.clone(),
+        provider_subject: proof.provider_subject.clone(),
+        session_token_hash_hex: hash_session_token_hex(raw_session_token),
+        session_state: "active".to_string(),
+        created_at: created_at.to_string(),
+        expires_at_unix: now_unix + ttl_seconds,
+        revoked_at: None,
+        last_seen_at: created_at.to_string(),
+    })
+}
+
+pub fn validate_account_session(
+    session: &AccountSession,
+    raw_session_token: &str,
+    now_unix: i64,
+) -> AuthResult<AuthenticatedAccountSession> {
+    if raw_session_token.trim().is_empty() {
+        return Err(AuthError::InvalidSessionToken);
+    }
+    validate_account_session_hash(
+        session,
+        &hash_session_token_hex(raw_session_token),
+        now_unix,
+    )
+}
+
+pub fn validate_account_session_hash(
+    session: &AccountSession,
+    session_token_hash_hex: &str,
+    now_unix: i64,
+) -> AuthResult<AuthenticatedAccountSession> {
+    if session.session_state == "revoked" || session.revoked_at.is_some() {
+        return Err(AuthError::AccountSessionRevoked {
+            session_id: session.session_id.clone(),
+        });
+    }
+    if session.expires_at_unix <= now_unix {
+        return Err(AuthError::AccountSessionExpired {
+            session_id: session.session_id.clone(),
+        });
+    }
+    if session.session_token_hash_hex != session_token_hash_hex {
+        return Err(AuthError::AccountSessionTokenMismatch {
+            session_id: session.session_id.clone(),
+        });
+    }
+
+    Ok(AuthenticatedAccountSession {
+        account_id: session.account_id.clone(),
+        session_id: session.session_id.clone(),
+        provider_kind: session.provider_kind.clone(),
+        provider_issuer: session.provider_issuer.clone(),
+        provider_subject: session.provider_subject.clone(),
+    })
+}
+
+pub fn revoke_account_session(
+    session: &AccountSession,
+    revoked_at: &str,
+) -> AuthResult<AccountSession> {
+    if session.session_state == "revoked" || session.revoked_at.is_some() {
+        return Err(AuthError::AccountSessionRevoked {
+            session_id: session.session_id.clone(),
+        });
+    }
+    let mut revoked = session.clone();
+    revoked.session_state = "revoked".to_string();
+    revoked.revoked_at = Some(revoked_at.to_string());
+    revoked.last_seen_at = revoked_at.to_string();
+    Ok(revoked)
+}
+
+pub fn hash_session_token_hex(raw_session_token: &str) -> String {
+    blake3::hash(raw_session_token.as_bytes())
+        .to_hex()
+        .to_string()
 }
 
 pub fn create_pairing_invitation(
@@ -429,6 +704,47 @@ fn hash_secret_hex(secret_hex: &str) -> String {
     blake3::hash(secret_hex.as_bytes()).to_hex().to_string()
 }
 
+fn public_identifier(value: &str, field: &'static str) -> AuthResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value must not be empty",
+        });
+    }
+    if contains_secret_marker(trimmed) {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value must not contain secret-looking material",
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+fn optional_public_identifier(
+    value: Option<&str>,
+    field: &'static str,
+) -> AuthResult<Option<String>> {
+    value
+        .map(|value| public_identifier(value, field))
+        .transpose()
+}
+
+fn contains_secret_marker(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    [
+        "client_secret",
+        "refresh_token",
+        "access_token",
+        "bearer ",
+        "private_key",
+        "credential",
+        "secret",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
 fn random_prefixed_id(prefix: &str) -> AuthResult<String> {
     let mut bytes = [0_u8; 16];
     getrandom::getrandom(&mut bytes).map_err(|_| AuthError::Crypto)?;
@@ -492,6 +808,118 @@ mod tests {
             sync_key_hex: "1111111111111111111111111111111111111111111111111111111111111111"
                 .to_string(),
         }
+    }
+
+    fn ownership_proof() -> AccountOwnershipProof {
+        create_account_ownership_proof(AccountOwnershipProofInput {
+            account_id: "account-test",
+            provider_kind: "oidc-dev",
+            provider_issuer: "https://issuer.devbox.local",
+            provider_subject: "provider-subject-123",
+            verified_email: Some("user@example.com"),
+            verified_domain: Some("example.com"),
+            proof_issued_at: "2026-06-18T10:00:00Z",
+            proof_expires_at_unix: 1_000,
+        })
+        .expect("ownership proof validates")
+    }
+
+    #[test]
+    fn ownership_proof_requires_verified_account_material_without_secret_markers() {
+        let missing_verified_material =
+            create_account_ownership_proof(AccountOwnershipProofInput {
+                account_id: "account-test",
+                provider_kind: "oidc-dev",
+                provider_issuer: "https://issuer.devbox.local",
+                provider_subject: "provider-subject-123",
+                verified_email: None,
+                verified_domain: None,
+                proof_issued_at: "2026-06-18T10:00:00Z",
+                proof_expires_at_unix: 1_000,
+            })
+            .expect_err("verified email or domain is required");
+        assert!(matches!(
+            missing_verified_material,
+            AuthError::InvalidOwnershipProof {
+                field: "verified email/domain",
+                ..
+            }
+        ));
+
+        let secret_like_subject = "provider-secret-should-not-persist";
+        let secret = create_account_ownership_proof(AccountOwnershipProofInput {
+            account_id: "account-test",
+            provider_kind: "oidc-dev",
+            provider_issuer: "https://issuer.devbox.local",
+            provider_subject: secret_like_subject,
+            verified_email: Some("user@example.com"),
+            verified_domain: None,
+            proof_issued_at: "2026-06-18T10:00:00Z",
+            proof_expires_at_unix: 1_000,
+        })
+        .expect_err("secret-looking provider subject is rejected");
+
+        assert!(!secret.to_string().contains(secret_like_subject));
+        assert!(secret
+            .to_string()
+            .contains("value must not contain secret-looking material"));
+    }
+
+    #[test]
+    fn account_session_hashes_token_and_validates_expiry_and_revocation() {
+        let raw_token = "raw-dev-session-token";
+        let proof = ownership_proof();
+        let session = create_account_session(&proof, raw_token, "2026-06-18T10:01:00Z", 101, 600)
+            .expect("session creates");
+
+        assert!(session.session_id.starts_with("session-"));
+        assert_eq!(session.session_token_hash_hex.len(), 64);
+        assert_ne!(session.session_token_hash_hex, raw_token);
+        assert_eq!(
+            validate_account_session(&session, raw_token, 102)
+                .expect("session validates")
+                .account_id,
+            proof.account_id
+        );
+
+        let wrong_token =
+            validate_account_session(&session, "wrong-token", 102).expect_err("wrong token fails");
+        assert!(matches!(
+            wrong_token,
+            AuthError::AccountSessionTokenMismatch { .. }
+        ));
+
+        let expired = validate_account_session(&session, raw_token, session.expires_at_unix)
+            .expect_err("expired session fails");
+        assert!(matches!(expired, AuthError::AccountSessionExpired { .. }));
+
+        let revoked =
+            revoke_account_session(&session, "2026-06-18T10:02:00Z").expect("session revokes");
+        let revoked_check =
+            validate_account_session(&revoked, raw_token, 102).expect_err("revoked session fails");
+        assert!(matches!(
+            revoked_check,
+            AuthError::AccountSessionRevoked { .. }
+        ));
+    }
+
+    #[test]
+    fn account_session_debug_redacts_token_hash() {
+        let raw_token = "raw-dev-session-token";
+        let session = create_account_session(
+            &ownership_proof(),
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+
+        let formatted = format!("{session:?}");
+
+        assert!(!formatted.contains(raw_token));
+        assert!(!formatted.contains(&session.session_token_hash_hex));
+        assert!(formatted.contains("<redacted>"));
     }
 
     #[test]

@@ -5,8 +5,9 @@ mod blob_cache;
 pub use blob_cache::{BlobCache, BlobCacheError, BlobCacheResult, BlobRef};
 
 use devbox_auth::{
-    revoke_trusted_device, AuthSession, DeviceProjectCursor, DeviceTrustRecord, KeyEnvelope,
-    PairingApproval, PairingInvitation,
+    hash_session_token_hex, revoke_trusted_device, AccountOwnershipProof, AccountSession,
+    AuthSession, DeviceProjectCursor, DeviceTrustRecord, KeyEnvelope, PairingApproval,
+    PairingInvitation,
 };
 use devbox_conflict::{ConflictSummary, PathComparisonState};
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision, ProjectId};
@@ -14,7 +15,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -27,6 +28,8 @@ const SUMMARY_TABLES: &[&str] = &[
     "local_accounts",
     "local_devices",
     "auth_sessions",
+    "account_ownership_proofs",
+    "account_sessions",
     "pairing_invitations",
     "trusted_devices",
     "key_envelopes",
@@ -168,6 +171,11 @@ impl Store {
         if version < 7 {
             self.conn
                 .execute_batch(MIGRATION_7_CONFLICT_DIVERGENT_SNAPSHOTS)?;
+        }
+
+        if version < 8 {
+            self.conn
+                .execute_batch(MIGRATION_8_PRODUCTION_ACCOUNT_AUTH_BOUNDARY)?;
         }
 
         Ok(())
@@ -504,6 +512,209 @@ impl Store {
                         last_refreshed_at: row.get(5)?,
                     })
                 },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn upsert_account_ownership_proof(&self, proof: &AccountOwnershipProof) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO account_ownership_proofs (
+                account_id,
+                provider_kind,
+                provider_issuer,
+                provider_subject,
+                verified_email,
+                verified_domain,
+                proof_state,
+                proof_issued_at,
+                proof_expires_at_unix,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?8, ?8)
+            ON CONFLICT(account_id) DO UPDATE SET
+                provider_kind = excluded.provider_kind,
+                provider_issuer = excluded.provider_issuer,
+                provider_subject = excluded.provider_subject,
+                verified_email = excluded.verified_email,
+                verified_domain = excluded.verified_domain,
+                proof_state = excluded.proof_state,
+                proof_issued_at = excluded.proof_issued_at,
+                proof_expires_at_unix = excluded.proof_expires_at_unix,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                proof.account_id,
+                proof.provider_kind,
+                proof.provider_issuer,
+                proof.provider_subject,
+                proof.verified_email,
+                proof.verified_domain,
+                proof.proof_state,
+                proof.proof_issued_at,
+                proof.proof_expires_at_unix,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn account_ownership_proof(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Option<AccountOwnershipProof>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    verified_email,
+                    verified_domain,
+                    proof_state,
+                    proof_issued_at,
+                    proof_expires_at_unix
+                FROM account_ownership_proofs
+                WHERE account_id = ?1
+                "#,
+                params![account_id],
+                account_ownership_proof_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn account_ownership_proof_by_provider(
+        &self,
+        provider_kind: &str,
+        provider_issuer: &str,
+        provider_subject: &str,
+    ) -> StoreResult<Option<AccountOwnershipProof>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    verified_email,
+                    verified_domain,
+                    proof_state,
+                    proof_issued_at,
+                    proof_expires_at_unix
+                FROM account_ownership_proofs
+                WHERE provider_kind = ?1
+                    AND provider_issuer = ?2
+                    AND provider_subject = ?3
+                "#,
+                params![provider_kind, provider_issuer, provider_subject],
+                account_ownership_proof_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn upsert_account_session(&self, session: &AccountSession) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO account_sessions (
+                session_id,
+                account_id,
+                provider_kind,
+                provider_issuer,
+                provider_subject,
+                session_token_hash_hex,
+                session_state,
+                created_at,
+                expires_at_unix,
+                revoked_at,
+                last_seen_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(session_id) DO UPDATE SET
+                provider_kind = excluded.provider_kind,
+                provider_issuer = excluded.provider_issuer,
+                provider_subject = excluded.provider_subject,
+                session_token_hash_hex = excluded.session_token_hash_hex,
+                session_state = excluded.session_state,
+                expires_at_unix = excluded.expires_at_unix,
+                revoked_at = excluded.revoked_at,
+                last_seen_at = excluded.last_seen_at
+            "#,
+            params![
+                session.session_id,
+                session.account_id,
+                session.provider_kind,
+                session.provider_issuer,
+                session.provider_subject,
+                session.session_token_hash_hex,
+                session.session_state,
+                session.created_at,
+                session.expires_at_unix,
+                session.revoked_at,
+                session.last_seen_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn account_session(&self, session_id: &str) -> StoreResult<Option<AccountSession>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    session_id,
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    session_token_hash_hex,
+                    session_state,
+                    created_at,
+                    expires_at_unix,
+                    revoked_at,
+                    last_seen_at
+                FROM account_sessions
+                WHERE session_id = ?1
+                "#,
+                params![session_id],
+                account_session_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn account_session_for_token(
+        &self,
+        raw_session_token: &str,
+    ) -> StoreResult<Option<AccountSession>> {
+        let session_hash = hash_session_token_hex(raw_session_token);
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    session_id,
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    session_token_hash_hex,
+                    session_state,
+                    created_at,
+                    expires_at_unix,
+                    revoked_at,
+                    last_seen_at
+                FROM account_sessions
+                WHERE session_token_hash_hex = ?1
+                "#,
+                params![session_hash],
+                account_session_from_row,
             )
             .optional()
             .map_err(StoreError::from)
@@ -1994,6 +2205,38 @@ pub fn path_to_store_string(path: &Path) -> String {
     }
 }
 
+fn account_ownership_proof_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AccountOwnershipProof> {
+    Ok(AccountOwnershipProof {
+        account_id: row.get(0)?,
+        provider_kind: row.get(1)?,
+        provider_issuer: row.get(2)?,
+        provider_subject: row.get(3)?,
+        verified_email: row.get(4)?,
+        verified_domain: row.get(5)?,
+        proof_state: row.get(6)?,
+        proof_issued_at: row.get(7)?,
+        proof_expires_at_unix: row.get(8)?,
+    })
+}
+
+fn account_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSession> {
+    Ok(AccountSession {
+        session_id: row.get(0)?,
+        account_id: row.get(1)?,
+        provider_kind: row.get(2)?,
+        provider_issuer: row.get(3)?,
+        provider_subject: row.get(4)?,
+        session_token_hash_hex: row.get(5)?,
+        session_state: row.get(6)?,
+        created_at: row.get(7)?,
+        expires_at_unix: row.get(8)?,
+        revoked_at: row.get(9)?,
+        last_seen_at: row.get(10)?,
+    })
+}
+
 fn conflict_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRecord> {
     let status: String = row.get(5)?;
     Ok(ConflictRecord {
@@ -2584,6 +2827,59 @@ PRAGMA user_version = 7;
 COMMIT;
 "#;
 
+const MIGRATION_8_PRODUCTION_ACCOUNT_AUTH_BOUNDARY: &str = r#"
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS account_ownership_proofs (
+    account_id TEXT PRIMARY KEY REFERENCES local_accounts(id) ON DELETE CASCADE,
+    provider_kind TEXT NOT NULL,
+    provider_issuer TEXT NOT NULL,
+    provider_subject TEXT NOT NULL,
+    verified_email TEXT,
+    verified_domain TEXT,
+    proof_state TEXT NOT NULL CHECK (proof_state = 'verified'),
+    proof_issued_at TEXT NOT NULL,
+    proof_expires_at_unix INTEGER NOT NULL CHECK (proof_expires_at_unix > 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (verified_email IS NOT NULL OR verified_domain IS NOT NULL),
+    UNIQUE (account_id, provider_kind, provider_issuer, provider_subject),
+    UNIQUE (provider_kind, provider_issuer, provider_subject)
+);
+
+CREATE TABLE IF NOT EXISTS account_sessions (
+    session_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    provider_kind TEXT NOT NULL,
+    provider_issuer TEXT NOT NULL,
+    provider_subject TEXT NOT NULL,
+    session_token_hash_hex TEXT NOT NULL CHECK (length(session_token_hash_hex) = 64),
+    session_state TEXT NOT NULL CHECK (session_state IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    expires_at_unix INTEGER NOT NULL CHECK (expires_at_unix > 0),
+    revoked_at TEXT,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE (session_token_hash_hex),
+    FOREIGN KEY (account_id, provider_kind, provider_issuer, provider_subject)
+        REFERENCES account_ownership_proofs(account_id, provider_kind, provider_issuer, provider_subject)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_ownership_proofs_provider_subject
+    ON account_ownership_proofs(provider_kind, provider_issuer, provider_subject);
+CREATE INDEX IF NOT EXISTS idx_account_sessions_account_state
+    ON account_sessions(account_id, session_state, expires_at_unix);
+CREATE INDEX IF NOT EXISTS idx_account_sessions_hash
+    ON account_sessions(session_token_hash_hex);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (8, 'production_account_auth_boundary');
+
+PRAGMA user_version = 8;
+
+COMMIT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2757,6 +3053,153 @@ mod tests {
         assert_eq!(loaded.last_refreshed_at, "2026-06-18T10:01:00Z");
         let summary = store.schema_summary().expect("summary reads");
         assert_eq!(count(&summary, "auth_sessions"), 1);
+    }
+
+    #[test]
+    fn production_account_proof_and_session_round_trip_without_raw_token_persistence() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("devbox.sqlite3");
+        let raw_token = "raw-dev-session-token-should-not-persist";
+        let provider_subject = "oidc-subject-123";
+        let session_id;
+        let account_id;
+
+        {
+            let mut store = Store::open_file(&db_path).expect("store opens");
+            store.apply_migrations().expect("migrations apply");
+            let identity = store
+                .ensure_local_identity(&EnsureLocalIdentityOptions {
+                    device_name: Some("Current machine"),
+                })
+                .expect("identity initializes");
+            account_id = identity.account_id.clone();
+            let proof = devbox_auth::create_account_ownership_proof(
+                devbox_auth::AccountOwnershipProofInput {
+                    account_id: &identity.account_id,
+                    provider_kind: "oidc-dev",
+                    provider_issuer: "https://issuer.devbox.local",
+                    provider_subject,
+                    verified_email: Some("user@example.com"),
+                    verified_domain: Some("example.com"),
+                    proof_issued_at: "2026-06-18T10:00:00Z",
+                    proof_expires_at_unix: 1_000,
+                },
+            )
+            .expect("proof creates");
+            store
+                .upsert_account_ownership_proof(&proof)
+                .expect("proof persists");
+            let session = devbox_auth::create_account_session(
+                &proof,
+                raw_token,
+                "2026-06-18T10:01:00Z",
+                101,
+                600,
+            )
+            .expect("session creates");
+            session_id = session.session_id.clone();
+            store
+                .upsert_account_session(&session)
+                .expect("session persists");
+
+            let loaded_proof = store
+                .account_ownership_proof(&identity.account_id)
+                .expect("proof reads")
+                .expect("proof exists");
+            assert_eq!(
+                loaded_proof.verified_email.as_deref(),
+                Some("user@example.com")
+            );
+            let provider_lookup = store
+                .account_ownership_proof_by_provider(
+                    "oidc-dev",
+                    "https://issuer.devbox.local",
+                    provider_subject,
+                )
+                .expect("provider lookup reads")
+                .expect("provider lookup exists");
+            assert_eq!(provider_lookup.account_id, identity.account_id);
+
+            let loaded_session = store
+                .account_session_for_token(raw_token)
+                .expect("session lookup by token hash reads")
+                .expect("session exists");
+            assert_eq!(loaded_session.session_id, session.session_id);
+            assert_eq!(loaded_session.session_token_hash_hex.len(), 64);
+            assert!(!loaded_session.session_token_hash_hex.contains(raw_token));
+            devbox_auth::validate_account_session(&loaded_session, raw_token, 102)
+                .expect("session validates");
+            let summary = store.schema_summary().expect("summary reads");
+            assert_eq!(count(&summary, "account_ownership_proofs"), 1);
+            assert_eq!(count(&summary, "account_sessions"), 1);
+        }
+
+        let reopened = Store::open_file(&db_path).expect("store reopens");
+        reopened.apply_migrations().expect("migrations apply");
+        assert_eq!(
+            reopened
+                .account_session(&session_id)
+                .expect("session reads")
+                .expect("session exists")
+                .account_id,
+            account_id
+        );
+        let persisted_bytes = std::fs::read(&db_path).expect("db bytes read");
+        let persisted_text = String::from_utf8_lossy(&persisted_bytes);
+        assert!(!persisted_text.contains(raw_token));
+    }
+
+    #[test]
+    fn production_account_session_revocation_persists() {
+        let mut store = migrated_store();
+        let identity = store
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Current machine"),
+            })
+            .expect("identity initializes");
+        let raw_token = "raw-dev-session-token";
+        let proof =
+            devbox_auth::create_account_ownership_proof(devbox_auth::AccountOwnershipProofInput {
+                account_id: &identity.account_id,
+                provider_kind: "oidc-dev",
+                provider_issuer: "https://issuer.devbox.local",
+                provider_subject: "oidc-subject-123",
+                verified_email: Some("user@example.com"),
+                verified_domain: None,
+                proof_issued_at: "2026-06-18T10:00:00Z",
+                proof_expires_at_unix: 1_000,
+            })
+            .expect("proof creates");
+        store
+            .upsert_account_ownership_proof(&proof)
+            .expect("proof persists");
+        let session = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            600,
+        )
+        .expect("session creates");
+        store
+            .upsert_account_session(&session)
+            .expect("session persists");
+        let revoked = devbox_auth::revoke_account_session(&session, "2026-06-18T10:02:00Z")
+            .expect("session revokes");
+        store
+            .upsert_account_session(&revoked)
+            .expect("revoked session persists");
+
+        let loaded = store
+            .account_session(&session.session_id)
+            .expect("session reads")
+            .expect("session exists");
+        assert_eq!(loaded.session_state, "revoked");
+        assert_eq!(loaded.revoked_at.as_deref(), Some("2026-06-18T10:02:00Z"));
+        assert!(matches!(
+            devbox_auth::validate_account_session(&loaded, raw_token, 102),
+            Err(devbox_auth::AuthError::AccountSessionRevoked { .. })
+        ));
     }
 
     #[test]

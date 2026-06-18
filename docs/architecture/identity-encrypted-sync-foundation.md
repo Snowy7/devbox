@@ -26,8 +26,9 @@ The auth and pairing foundation slice adds local/mock primitives for:
 - revocation markers
 - local device/project cursors
 
-Production sign-in, durable hosted account ownership proof, server-side device/project cursors,
-backend metadata, recovery, and second-device materialization remain later Phase 1 work.
+Production-shaped account/session proof primitives and server-side device/project cursors were added
+in later foundations. Live sign-in, hosted OAuth/OIDC verification, recovery, and production
+second-device materialization UX remain later Phase 1 work.
 
 ## Local Identity Model
 
@@ -83,5 +84,6 @@ encrypted object to the remote provider. Download reads the encrypted remote obj
 verifies the expected BLAKE3 blob id, and writes the plaintext back into a local blob cache.
 
 Download targets the blob cache, not a project directory. Second-device project materialization,
-now has a local/mock foundation in `devbox-materialize`; production key exchange, hosted metadata,
-managed cloud credential provisioning, conflict UI, and UI restore flows remain later Phase 1 work.
+now has a local/mock foundation in `devbox-materialize`; production key exchange, live hosted auth
+enforcement, managed cloud credential provisioning, conflict UI, and UI restore flows remain later
+Phase 1 work.

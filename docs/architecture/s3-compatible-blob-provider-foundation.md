@@ -11,8 +11,9 @@ This is object transport only.
 It does not add production sign-in, managed R2 credential provisioning, production pairing UX,
 Electron UI, or conflict resolution. Clients still need a trusted local identity and key material
 before encrypted objects can be published or read. A hosted metadata API foundation now models
-metadata discovery and server-side compare-and-set cursors, but this object provider is not wired to
-that service yet.
+metadata discovery and server-side compare-and-set cursors, and a production-shaped account/session
+boundary now models token-hash account sessions without live OAuth. This object provider still does
+not provision or rotate managed cloud credentials.
 
 ## Provider Model
 
@@ -105,7 +106,7 @@ configured local or S3-compatible object provider.
 
 Remaining Phase 1 work includes:
 
-- production sign-in and account ownership proof
+- live OAuth/OIDC sign-in and hosted account ownership proof verification
 - managed R2 credential provisioning and rotation
 - production pairing UX and recovery flows
 - conflict UI and automatic merge/apply resolution

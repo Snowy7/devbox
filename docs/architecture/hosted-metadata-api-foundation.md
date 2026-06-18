@@ -71,6 +71,11 @@ Those headers are named as mock/dev credentials and are suitable only for local 
 flows. They are not account ownership proof, not a billing identity, and not safe for production
 deployment.
 
+A later production-shaped account boundary now adds store primitives for external provider
+subject/email/domain proof, account sessions, session token hashes, expiration, revocation, and
+session-token-to-account resolution. The current HTTP handlers still use mock-dev headers until live
+OAuth/login and production hosted auth enforcement are wired.
+
 The service rejects obvious secret-bearing request material and its public CLI check prints a
 sanitized endpoint, not raw input, keys, or object credentials.
 
@@ -105,7 +110,7 @@ models or cursor compare-and-set contract.
 
 Remaining Phase 1 work includes:
 
-- production sign-in and account ownership proof
+- live OAuth/OIDC sign-in and hosted account ownership proof verification
 - managed R2/S3 credential provisioning and rotation
 - production pairing UX, recovery, and rotation
 - automatic conflict merge/apply resolution and user-facing conflict UI

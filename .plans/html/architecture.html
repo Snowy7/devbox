@@ -111,11 +111,12 @@ Rust backend
           <li>Publish/import/materialize can opt into in-process mock-dev hosted metadata for manifest lookup and server-side cursor compare-and-set.</li>
           <li>A local identity is not cloud authentication or account ownership proof.</li>
           <li>The local/mock auth foundation models account session state, device approval, key envelopes, revocation, and device/project cursors in SQLite.</li>
+          <li>The production-shaped auth boundary models external provider subject, verified email/domain, account id, session id, token hash, expiration, and revocation without live OAuth.</li>
           <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a second SQLite/cache context, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
           <li>Local conflict records compare and persist divergent snapshot rows without source bytes.</li>
           <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>
-          <li>Production sign-in, production hosted metadata integration, recovery, managed object-storage credential provisioning, explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and deployment hardening remain deferred.</li>
+          <li>Live OAuth/login integration, production hosted metadata auth enforcement, recovery, managed object-storage credential provisioning, explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and deployment hardening remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
         </ul>
       </section>

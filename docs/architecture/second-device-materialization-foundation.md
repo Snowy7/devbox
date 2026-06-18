@@ -13,14 +13,16 @@ This slice completes the first local/mock Phase 1 vertical path for second-devic
 
 This is still a local/mock foundation.
 
-It does not implement production account ownership proof, managed R2/S3 credential provisioning,
+It does not implement live OAuth-backed account login, managed R2/S3 credential provisioning,
 production pairing UX, automatic conflict resolution, or Electron UI. The materialization path can
 now opt into an in-process mock-dev hosted metadata store for manifest discovery and server-side
-cursor compare-and-set, but the default remains local/mock only. Local preflight now refuses
-divergent local/mock import/materialize paths and persists local conflict records, but it does not
-resolve or merge them. The manual smoke path can use `--mock-key-source-db` so a receiving local
-context can decrypt a publisher's locally encrypted objects without printing raw key material. That
-flag is a test/dev trust bootstrap, not a production key exchange.
+cursor compare-and-set, but the default remains local/mock only. Production-shaped account/session
+proof primitives exist for future hosted auth, but this materialization path does not enforce them
+yet. Local preflight now refuses divergent local/mock import/materialize paths and persists local
+conflict records, but it does not resolve or merge them. The manual smoke path can use
+`--mock-key-source-db` so a receiving local context can decrypt a publisher's locally encrypted
+objects without printing raw key material. That flag is a test/dev trust bootstrap, not a production
+key exchange.
 
 ## Domain Boundary
 
@@ -118,7 +120,7 @@ stale, the local cursor remains unchanged.
 
 Remaining Phase 1 work includes:
 
-- production account ownership and key exchange
+- live OAuth/OIDC account ownership verification and production key exchange
 - managed R2/S3 credential provisioning, rotation, and hosted object indexing
 - production pairing UX, recovery, and rotation
 - automatic conflict merge/apply resolution and user-facing conflict flows

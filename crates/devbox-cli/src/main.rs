@@ -1,6 +1,8 @@
 use devbox_auth::{
-    approve_pairing_invitation, create_pairing_invitation, mock_login, now_unix_seconds,
-    DeviceProjectCursor, DeviceTrustRecord, LocalIdentityView, PairingInvitationToken,
+    approve_pairing_invitation, create_account_ownership_proof, create_account_session,
+    create_pairing_invitation, mock_login, now_unix_seconds, revoke_account_session,
+    validate_account_session, AccountOwnershipProofInput, DeviceProjectCursor, DeviceTrustRecord,
+    LocalIdentityView, PairingInvitationToken,
 };
 use devbox_conflict::{
     compare_snapshots, path_to_conflict_string, ComparableEntry, ComparableSnapshot,
@@ -280,6 +282,31 @@ struct DbOnlyArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthMockVerifiedBootstrapArgs {
+    db_path: String,
+    provider_kind: String,
+    provider_issuer: String,
+    provider_subject: Option<String>,
+    verified_email: Option<String>,
+    verified_domain: Option<String>,
+    session_token: String,
+    ttl_seconds: i64,
+    proof_ttl_seconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthProofCheckArgs {
+    db_path: String,
+    session_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthRevokeSessionArgs {
+    db_path: String,
+    session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DeviceInviteArgs {
     db_path: String,
     ttl_seconds: i64,
@@ -460,11 +487,52 @@ fn run_auth(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("mock-verified-bootstrap") => {
+            match parse_auth_mock_verified_bootstrap_args(&args[1..]).and_then(|args| {
+                auth_mock_verified_bootstrap(&args).map_err(|error| error.to_string())
+            }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("devbox: {error}");
+                    eprintln!(
+                        "Usage: devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN> [--provider-kind <KIND>] [--provider-issuer <ISSUER>] [--provider-subject <SUBJECT>] [--ttl-seconds <SECONDS>] [--proof-ttl-seconds <SECONDS>]"
+                    );
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("proof-check") => match parse_auth_proof_check_args(&args[1..])
+            .and_then(|args| auth_proof_check(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>");
+                ExitCode::from(1)
+            }
+        },
+        Some("revoke-session") => match parse_auth_revoke_session_args(&args[1..])
+            .and_then(|args| auth_revoke_session(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox auth revoke-session --db <DB_PATH> <SESSION_ID>");
+                ExitCode::from(1)
+            }
+        },
         _ => {
-            eprintln!("devbox: auth requires mock-login or status");
+            eprintln!(
+                "devbox: auth requires mock-login, status, mock-verified-bootstrap, proof-check, or revoke-session"
+            );
             eprintln!("Usage:");
             eprintln!("  devbox auth mock-login --db <DB_PATH>");
             eprintln!("  devbox auth status --db <DB_PATH>");
+            eprintln!(
+                "  devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN> [--provider-kind <KIND>] [--provider-issuer <ISSUER>] [--provider-subject <SUBJECT>] [--ttl-seconds <SECONDS>] [--proof-ttl-seconds <SECONDS>]"
+            );
+            eprintln!("  devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>");
+            eprintln!("  devbox auth revoke-session --db <DB_PATH> <SESSION_ID>");
             ExitCode::from(2)
         }
     }
@@ -722,6 +790,172 @@ fn parse_db_only_args(args: &[String], command: &str) -> Result<DbOnlyArgs, Stri
     Ok(DbOnlyArgs {
         db_path: db_path.clone(),
     })
+}
+
+fn parse_auth_mock_verified_bootstrap_args(
+    args: &[String],
+) -> Result<AuthMockVerifiedBootstrapArgs, String> {
+    let mut db_path = None;
+    let mut provider_kind = "oidc-dev".to_string();
+    let mut provider_issuer = "https://devbox.local/mock-oidc".to_string();
+    let mut provider_subject = None;
+    let mut verified_email = None;
+    let mut verified_domain = None;
+    let mut session_token = None;
+    let mut ttl_seconds = 3_600_i64;
+    let mut proof_ttl_seconds = 86_400_i64;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--provider-kind" => {
+                index += 1;
+                provider_kind = args
+                    .get(index)
+                    .ok_or_else(|| "--provider-kind requires a value".to_string())?
+                    .clone();
+            }
+            "--provider-issuer" => {
+                index += 1;
+                provider_issuer = args
+                    .get(index)
+                    .ok_or_else(|| "--provider-issuer requires a value".to_string())?
+                    .clone();
+            }
+            "--provider-subject" => {
+                index += 1;
+                provider_subject = args.get(index).cloned();
+            }
+            "--verified-email" => {
+                index += 1;
+                verified_email = args.get(index).cloned();
+            }
+            "--verified-domain" => {
+                index += 1;
+                verified_domain = args.get(index).cloned();
+            }
+            "--session-token" => {
+                index += 1;
+                session_token = args.get(index).cloned();
+            }
+            "--ttl-seconds" => {
+                index += 1;
+                ttl_seconds = parse_positive_i64(args.get(index), "--ttl-seconds")?;
+            }
+            "--proof-ttl-seconds" => {
+                index += 1;
+                proof_ttl_seconds = parse_positive_i64(args.get(index), "--proof-ttl-seconds")?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!(
+                    "unknown auth mock-verified-bootstrap option '{value}'"
+                ));
+            }
+            _ => return Err("auth mock-verified-bootstrap accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    if verified_email.is_none() && verified_domain.is_none() {
+        return Err(
+            "auth mock-verified-bootstrap requires --verified-email or --verified-domain"
+                .to_string(),
+        );
+    }
+
+    Ok(AuthMockVerifiedBootstrapArgs {
+        db_path: db_path
+            .ok_or_else(|| "auth mock-verified-bootstrap requires --db <DB_PATH>".to_string())?,
+        provider_kind,
+        provider_issuer,
+        provider_subject,
+        verified_email,
+        verified_domain,
+        session_token: session_token.ok_or_else(|| {
+            "auth mock-verified-bootstrap requires --session-token <TOKEN>".to_string()
+        })?,
+        ttl_seconds,
+        proof_ttl_seconds,
+    })
+}
+
+fn parse_auth_proof_check_args(args: &[String]) -> Result<AuthProofCheckArgs, String> {
+    let mut db_path = None;
+    let mut session_token = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--session-token" => {
+                index += 1;
+                session_token = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown auth proof-check option '{value}'"));
+            }
+            _ => return Err("auth proof-check accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    Ok(AuthProofCheckArgs {
+        db_path: db_path.ok_or_else(|| "auth proof-check requires --db <DB_PATH>".to_string())?,
+        session_token: session_token
+            .ok_or_else(|| "auth proof-check requires --session-token <TOKEN>".to_string())?,
+    })
+}
+
+fn parse_auth_revoke_session_args(args: &[String]) -> Result<AuthRevokeSessionArgs, String> {
+    let mut db_path = None;
+    let mut session_id = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown auth revoke-session option '{value}'"));
+            }
+            value => {
+                if session_id.replace(value.to_string()).is_some() {
+                    return Err("auth revoke-session accepts exactly one session id".to_string());
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(AuthRevokeSessionArgs {
+        db_path: db_path
+            .ok_or_else(|| "auth revoke-session requires --db <DB_PATH>".to_string())?,
+        session_id: session_id
+            .ok_or_else(|| "auth revoke-session requires a session id".to_string())?,
+    })
+}
+
+fn parse_positive_i64(value: Option<&String>, flag: &str) -> Result<i64, String> {
+    let value = value.ok_or_else(|| format!("{flag} requires a positive integer"))?;
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| format!("{flag} requires a positive integer"))?;
+    if parsed <= 0 {
+        return Err(format!("{flag} requires a positive integer"));
+    }
+    Ok(parsed)
 }
 
 fn parse_device_invite_args(args: &[String]) -> Result<DeviceInviteArgs, String> {
@@ -1913,7 +2147,127 @@ fn auth_status(args: &DbOnlyArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!("Provider: none");
         }
     }
-    println!("Production authentication: not configured");
+    let production_proof = store.account_ownership_proof(&identity.account_id)?;
+    println!(
+        "Production-shaped account proof: {}",
+        if production_proof.is_some() {
+            "configured"
+        } else {
+            "missing"
+        }
+    );
+    println!("Production authentication: live OAuth/login UI not configured");
+
+    Ok(())
+}
+
+fn auth_mock_verified_bootstrap(
+    args: &AuthMockVerifiedBootstrapArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let now = store.current_timestamp()?;
+    let now_unix = now_unix_seconds();
+    let provider_subject = args
+        .provider_subject
+        .clone()
+        .unwrap_or_else(|| format!("local-dev:{}", identity.account_id));
+    let proof = create_account_ownership_proof(AccountOwnershipProofInput {
+        account_id: &identity.account_id,
+        provider_kind: &args.provider_kind,
+        provider_issuer: &args.provider_issuer,
+        provider_subject: &provider_subject,
+        verified_email: args.verified_email.as_deref(),
+        verified_domain: args.verified_domain.as_deref(),
+        proof_issued_at: &now,
+        proof_expires_at_unix: now_unix + args.proof_ttl_seconds,
+    })?;
+    store.upsert_account_ownership_proof(&proof)?;
+    let session = create_account_session(
+        &proof,
+        &args.session_token,
+        &now,
+        now_unix,
+        args.ttl_seconds,
+    )?;
+    store.upsert_account_session(&session)?;
+
+    println!("Mock verified account boundary bootstrapped");
+    println!("Account id: {}", proof.account_id);
+    println!("Provider kind: {}", proof.provider_kind);
+    println!("Provider issuer: {}", proof.provider_issuer);
+    println!("Provider subject: {}", proof.provider_subject);
+    println!(
+        "Verified email: {}",
+        proof.verified_email.as_deref().unwrap_or("not configured")
+    );
+    println!(
+        "Verified domain: {}",
+        proof.verified_domain.as_deref().unwrap_or("not configured")
+    );
+    println!("Session id: {}", session.session_id);
+    println!("Session expires at unix: {}", session.expires_at_unix);
+    println!("Session token: not printed");
+    println!("Stored credential material: session token hash only");
+    println!("Production authentication: live OAuth/login UI remains deferred");
+
+    Ok(())
+}
+
+fn auth_proof_check(args: &AuthProofCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let session = store
+        .account_session_for_token(&args.session_token)?
+        .ok_or("account session not found or token hash mismatch")?;
+    let context = validate_account_session(&session, &args.session_token, now_unix_seconds())?;
+    let proof = store.account_ownership_proof(&context.account_id)?;
+
+    println!("Auth proof check: active");
+    println!("Account id: {}", context.account_id);
+    println!("Session id: {}", context.session_id);
+    println!("Provider kind: {}", context.provider_kind);
+    println!("Provider issuer: {}", context.provider_issuer);
+    println!("Provider subject: {}", context.provider_subject);
+    if let Some(proof) = proof {
+        println!(
+            "Verified email: {}",
+            proof.verified_email.as_deref().unwrap_or("not configured")
+        );
+        println!(
+            "Verified domain: {}",
+            proof.verified_domain.as_deref().unwrap_or("not configured")
+        );
+    }
+    println!("Session expires at unix: {}", session.expires_at_unix);
+    println!("Session token: not printed");
+    println!("Production authentication: live OAuth/login UI remains deferred");
+
+    Ok(())
+}
+
+fn auth_revoke_session(args: &AuthRevokeSessionArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let session = store
+        .account_session(&args.session_id)?
+        .ok_or("account session not found")?;
+    let now = store.current_timestamp()?;
+    let revoked = revoke_account_session(&session, &now)?;
+    store.upsert_account_session(&revoked)?;
+
+    println!("Account session revoked");
+    println!("Account id: {}", revoked.account_id);
+    println!("Session id: {}", revoked.session_id);
+    println!("Session state: {}", revoked.session_state);
+    println!(
+        "Revoked at: {}",
+        revoked.revoked_at.as_deref().unwrap_or("not recorded")
+    );
+    println!("Session token: not printed");
 
     Ok(())
 }
@@ -3632,7 +3986,7 @@ fn print_help() {
     println!("Commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
     println!("  init       Initialize local account and current-device identity");
-    println!("  auth       Manage local/mock auth session status");
+    println!("  auth       Manage local/mock auth and dev account/session proof status");
     println!("  devices    List, invite, approve, and revoke local/mock trusted devices");
     println!("  metadata   Validate hosted metadata service config without a network request");
     println!("  sync       Upload/download encrypted blobs and manage local cursors");
@@ -3737,6 +4091,40 @@ mod tests {
             error.to_string(),
             "metadata endpoint must not contain secret-looking material"
         );
+    }
+
+    #[test]
+    fn auth_mock_verified_bootstrap_args_require_verified_contact_and_token() {
+        let missing_contact = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--session-token".to_string(),
+            "raw-token".to_string(),
+        ];
+
+        let error = parse_auth_mock_verified_bootstrap_args(&missing_contact)
+            .expect_err("verified contact is required");
+        assert_eq!(
+            error,
+            "auth mock-verified-bootstrap requires --verified-email or --verified-domain"
+        );
+
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--verified-email".to_string(),
+            "user@example.com".to_string(),
+            "--session-token".to_string(),
+            "raw-token".to_string(),
+            "--ttl-seconds".to_string(),
+            "60".to_string(),
+        ];
+
+        let parsed = parse_auth_mock_verified_bootstrap_args(&args).expect("bootstrap args parse");
+        assert_eq!(parsed.provider_kind, "oidc-dev");
+        assert_eq!(parsed.verified_email.as_deref(), Some("user@example.com"));
+        assert_eq!(parsed.session_token, "raw-token");
+        assert_eq!(parsed.ttl_seconds, 60);
     }
 
     #[test]

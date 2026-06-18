@@ -12,7 +12,7 @@ It does not implement:
 
 - a full DLP classifier
 - team policy administration
-- production cloud authentication
+- live OAuth/OIDC cloud authentication
 - hosted metadata enforcement
 - managed R2/S3 credential provisioning or hosted object indexing
 - encrypted personal/team secret envelopes

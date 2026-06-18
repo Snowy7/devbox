@@ -74,6 +74,9 @@ Current Phase 1 foundation status:
   SQLite for dev/tests
 - local/mock auth session, pairing invitation approval, key envelopes, device revocation, and
   device/project cursor primitives exist in SQLite
+- production-shaped account ownership proof and account session primitives model external provider
+  subject, verified email/domain, token-hash sessions, expiration, revocation, and safe no-network
+  dev persistence without live OAuth
 - local/mock second-device materialization can publish/import an encrypted snapshot bundle through a
   local filesystem remote and apply it safely with the existing restore engine
 - local high-confidence secret detection blocks detected files before blob-cache writes and local
@@ -85,8 +88,8 @@ Current Phase 1 foundation status:
   records without advancing the cursor
 - local/mock publish/import/materialize can opt into in-process hosted metadata for manifest
   discovery and server-side cursor compare-and-set
-- real cloud authentication, managed object-storage credential provisioning, production pairing UX,
-  explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and
+- live OAuth/login integration, managed object-storage credential provisioning, production pairing
+  UX, explicit secret allow policy, automatic merge/apply resolution, conflict UI, Electron UI, and
   production deployment hardening remain later Phase 1 work
 
 ## Content Addressing

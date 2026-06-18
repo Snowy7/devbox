@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum = "0.7"
+devbox-auth = { path = "../devbox-auth" }
 http = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

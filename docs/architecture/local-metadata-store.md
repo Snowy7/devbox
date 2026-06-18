@@ -131,7 +131,7 @@ cursor or downloading receiver file blobs.
 
 This boundary does not implement:
 
-- production cloud authentication, hosted sign-in, account ownership proof, or production pairing UX
+- live OAuth/OIDC authentication, hosted sign-in UI, hosted proof verification, or production pairing UX
 - backend account/device cursors
 - hosted second-device materialization metadata or server-side conflict resolution
 - automatic merge or conflict UI
