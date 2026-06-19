@@ -38,6 +38,7 @@ const REVISIONS_FILE: &str = "revisions.tsv";
 const REVISIONS_DIR: &str = "revisions";
 const CHECKPOINTS_FILE: &str = "checkpoints.tsv";
 const PINS_FILE: &str = "pins.tsv";
+const REMOTES_FILE: &str = "remotes.tsv";
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -118,6 +119,22 @@ impl ObjectCache {
 
     pub fn write_bytes(&self, bytes: impl AsRef<[u8]>) -> StoreResult<ObjectRef> {
         self.write_reader(bytes.as_ref())
+    }
+
+    pub fn import_bytes(
+        &self,
+        expected_id: &ObjectId,
+        bytes: impl AsRef<[u8]>,
+    ) -> StoreResult<ObjectRef> {
+        let object = self.write_bytes(bytes)?;
+        if object.id() != expected_id {
+            return Err(StoreError::ObjectHashMismatch {
+                expected: expected_id.clone(),
+                actual: object.id().clone(),
+            });
+        }
+
+        Ok(object)
     }
 
     pub fn write_file(&self, path: impl AsRef<Path>) -> StoreResult<ObjectRef> {
@@ -373,6 +390,53 @@ pub struct StoredFolderState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreExport {
+    pub shared_folder_id: SharedFolderId,
+    pub display_name: String,
+    pub file_versions: Vec<FileVersion>,
+    pub revisions: Vec<FolderRevision>,
+    pub checkpoints: Vec<Checkpoint>,
+    pub pins: Vec<Pin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteConfig {
+    name: String,
+    kind: String,
+    location: String,
+}
+
+impl RemoteConfig {
+    pub fn new(
+        name: impl Into<String>,
+        kind: impl Into<String>,
+        location: impl Into<String>,
+    ) -> StoreResult<Self> {
+        let name = non_empty_metadata_value("remote name", name.into())?;
+        let kind = non_empty_metadata_value("remote kind", kind.into())?;
+        let location = non_empty_metadata_value("remote location", location.into())?;
+
+        Ok(Self {
+            name,
+            kind,
+            location,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn location(&self) -> &str {
+        &self.location
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedRevisionTarget {
     Revision(FolderRevision),
     Checkpoint {
@@ -411,6 +475,10 @@ pub enum StoreError {
         id: ObjectId,
         path: PathBuf,
     },
+    ObjectHashMismatch {
+        expected: ObjectId,
+        actual: ObjectId,
+    },
     MissingRevisionTarget {
         target: String,
     },
@@ -437,6 +505,9 @@ impl fmt::Display for StoreError {
             ),
             Self::MissingObject { id, path } => {
                 write!(f, "object {id} is missing at {}", path.display())
+            }
+            Self::ObjectHashMismatch { expected, actual } => {
+                write!(f, "object hash mismatch: expected {expected}, got {actual}")
             }
             Self::MissingRevisionTarget { target } => write!(
                 f,
@@ -465,6 +536,7 @@ impl std::error::Error for StoreError {
             Self::Loom(error) => Some(error),
             Self::MissingStore { .. }
             | Self::MissingObject { .. }
+            | Self::ObjectHashMismatch { .. }
             | Self::MissingRevisionTarget { .. }
             | Self::AmbiguousRevisionTarget { .. }
             | Self::CorruptMetadata { .. } => None,
@@ -510,6 +582,37 @@ impl LocalStore {
                 object_cache,
             },
             initialized,
+        })
+    }
+
+    pub fn init_clone(
+        folder: impl AsRef<Path>,
+        shared_folder_id: SharedFolderId,
+        display_name: impl Into<String>,
+    ) -> StoreResult<Self> {
+        let folder = folder.as_ref();
+        if !folder.exists() {
+            create_dir_all(folder)?;
+        }
+        let folder_root = canonical_folder(folder)?;
+        let store_root = folder_root.join(STORE_DIR);
+        create_dir_all(&store_root)?;
+        create_dir_all(store_root.join(METADATA_DIR))?;
+        create_dir_all(store_root.join(METADATA_DIR).join(REVISIONS_DIR))?;
+        let object_cache = ObjectCache::open(&store_root)?;
+        let shared_folder = SharedFolder::new(
+            shared_folder_id,
+            &folder_root,
+            display_name,
+            FolderScope::WholeFolder,
+        )?;
+        write_shared_folder_metadata(&store_root, &shared_folder)?;
+
+        Ok(Self {
+            folder_root,
+            store_root,
+            shared_folder,
+            object_cache,
         })
     }
 
@@ -610,6 +713,95 @@ impl LocalStore {
 
     pub fn pins(&self) -> StoreResult<Vec<Pin>> {
         self.load_pins()
+    }
+
+    pub fn remotes(&self) -> StoreResult<Vec<RemoteConfig>> {
+        self.load_remotes()
+    }
+
+    pub fn remote(&self, name: &str) -> StoreResult<Option<RemoteConfig>> {
+        Ok(self
+            .load_remotes()?
+            .into_iter()
+            .find(|remote| remote.name() == name))
+    }
+
+    pub fn upsert_remote(&self, remote: RemoteConfig) -> StoreResult<()> {
+        let mut remotes = self
+            .load_remotes()?
+            .into_iter()
+            .filter(|existing| existing.name() != remote.name())
+            .collect::<Vec<_>>();
+        remotes.push(remote);
+        remotes.sort_by(|left, right| left.name().cmp(right.name()));
+        self.write_remotes(&remotes)
+    }
+
+    pub fn export_state(&self) -> StoreResult<StoreExport> {
+        Ok(StoreExport {
+            shared_folder_id: self.shared_folder.id().clone(),
+            display_name: self.shared_folder.display_name().to_string(),
+            file_versions: self.file_versions()?,
+            revisions: self.revisions()?,
+            checkpoints: self.checkpoints()?,
+            pins: self.pins()?,
+        })
+    }
+
+    pub fn import_file_versions(&self, file_versions: &[FileVersion]) -> StoreResult<usize> {
+        self.append_file_versions(file_versions)
+    }
+
+    pub fn import_revision(&self, revision: &FolderRevision) -> StoreResult<bool> {
+        if let Some(existing) = self.revision_by_id(revision.id())? {
+            if existing.entries() == revision.entries()
+                && existing.parent_id() == revision.parent_id()
+                && existing.boundary() == revision.boundary()
+                && existing.created_at() == revision.created_at()
+            {
+                return Ok(false);
+            }
+
+            return Err(StoreError::CorruptMetadata {
+                path: self
+                    .metadata_path(REVISIONS_DIR)
+                    .join(revision_entries_file_name(revision.id())),
+                message: format!(
+                    "revision {} already exists with different metadata",
+                    revision.id()
+                ),
+            });
+        }
+
+        self.write_revision(revision)?;
+        self.append_revision_header(revision)?;
+        Ok(true)
+    }
+
+    pub fn import_checkpoint(&self, checkpoint: &Checkpoint) -> StoreResult<bool> {
+        if self
+            .checkpoints()?
+            .iter()
+            .any(|existing| existing.id() == checkpoint.id())
+        {
+            return Ok(false);
+        }
+
+        self.append_checkpoint(checkpoint)?;
+        Ok(true)
+    }
+
+    pub fn import_pin(&self, pin: &Pin) -> StoreResult<bool> {
+        if self
+            .pins()?
+            .iter()
+            .any(|existing| existing.id() == pin.id())
+        {
+            return Ok(false);
+        }
+
+        self.append_pin(pin)?;
+        Ok(true)
     }
 
     pub fn create_checkpoint(
@@ -889,6 +1081,59 @@ impl LocalStore {
         Ok(pins)
     }
 
+    fn load_remotes(&self) -> StoreResult<Vec<RemoteConfig>> {
+        let path = self.metadata_path(REMOTES_FILE);
+        let Some(contents) = read_optional_to_string(&path)? else {
+            return Ok(Vec::new());
+        };
+        let mut remotes = Vec::new();
+
+        for (line_index, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = split_fields(&path, line_index + 1, line, 3)?;
+            remotes.push(RemoteConfig::new(
+                decode_field(&fields[0])?,
+                decode_field(&fields[1])?,
+                decode_field(&fields[2])?,
+            )?);
+        }
+
+        Ok(remotes)
+    }
+
+    fn write_remotes(&self, remotes: &[RemoteConfig]) -> StoreResult<()> {
+        let path = self.metadata_path(REMOTES_FILE);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+        for remote in remotes {
+            file.write_all(
+                format!(
+                    "{}\t{}\t{}\n",
+                    encode_field(remote.name()),
+                    encode_field(remote.kind()),
+                    encode_field(remote.location())
+                )
+                .as_bytes(),
+            )
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        }
+
+        Ok(())
+    }
+
     fn append_checkpoint(&self, checkpoint: &Checkpoint) -> StoreResult<()> {
         let path = self.metadata_path(CHECKPOINTS_FILE);
         let mut file = OpenOptions::new()
@@ -1138,6 +1383,17 @@ fn default_shared_folder(folder_root: &Path) -> StoreResult<SharedFolder> {
         .unwrap_or_else(|| folder_root.display().to_string());
 
     SharedFolder::new(id, folder_root, display_name, FolderScope::WholeFolder).map_err(Into::into)
+}
+
+fn non_empty_metadata_value(kind: &'static str, value: String) -> StoreResult<String> {
+    if value.trim().is_empty() {
+        return Err(StoreError::CorruptMetadata {
+            path: PathBuf::from("<metadata>"),
+            message: format!("{kind} cannot be empty"),
+        });
+    }
+
+    Ok(value)
 }
 
 fn write_shared_folder_metadata(
