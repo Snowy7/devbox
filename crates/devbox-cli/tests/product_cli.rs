@@ -7,12 +7,21 @@ fn help_separates_product_commands_from_alpha_compatibility() {
     let output = run_devbox_with_env([], ["--help"]);
 
     assert_success(&output);
-    let stdout = stdout(&output);
-    assert!(stdout.contains("Product commands:"));
-    assert!(stdout.contains("  login"));
-    assert!(stdout.contains("  share"));
-    assert!(stdout.contains("Alpha compatibility commands:"));
-    assert!(stdout.contains("  snapshot"));
+    let help_stdout = stdout(&output);
+    assert!(help_stdout.contains("Product commands:"));
+    assert!(help_stdout.contains("  login"));
+    assert!(help_stdout.contains("  share"));
+    assert!(help_stdout.contains("Advanced compatibility commands:"));
+    assert!(help_stdout.contains("  snapshot"));
+    assert_product_output_is_clean(&help_stdout);
+
+    for args in [["share", "--help"], ["clone", "--help"]] {
+        let output = run_devbox_with_env([], args);
+        assert_success(&output);
+        let stdout = stdout(&output);
+        assert!(stdout.contains("Devbox keeps folders continuous across machines."));
+        assert_product_output_is_clean(&stdout);
+    }
 }
 
 #[test]
@@ -149,6 +158,28 @@ fn secret_blocking_still_applies_through_product_share() {
 }
 
 #[test]
+fn invalid_session_resume_asks_user_to_login_without_internal_terms() {
+    let fixture = ProductCliFixture::new("expired-session");
+    fixture.write_source("README.md", "safe\n");
+
+    assert_success(&fixture.devbox([
+        "login",
+        "--api",
+        &fixture.api.base_url(),
+        "--device-name",
+        "Desk",
+    ]));
+    assert_success(&fixture.devbox(["share", path_str(&fixture.source), "--no-background-sync"]));
+    fixture.replace_session_token("invalid-session-token");
+
+    let resume = fixture.devbox(["resume", path_str(&fixture.source), "--no-background-sync"]);
+    assert_failure(&resume);
+    let combined = format!("{}\n{}", stdout(&resume), stderr(&resume));
+    assert!(combined.contains("run devbox login again"));
+    assert_product_output_is_clean(&combined);
+}
+
+#[test]
 fn another_account_cannot_clone_a_protected_shared_folder() {
     let dir = tempfile::tempdir().expect("temp dir");
     let api = devbox_api::spawn_local_test_server(dir.path().join("api")).expect("api starts");
@@ -232,6 +263,19 @@ impl ProductCliFixture {
     fn devbox<const N: usize>(&self, args: [&str; N]) -> Output {
         run_devbox_with_env([("DEVBOX_CONFIG_DIR", path_str(&self.config))], args)
     }
+
+    fn replace_session_token(&self, token: &str) {
+        let path = self.config.join("config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("config reads"))
+                .expect("config parses");
+        config["session_token"] = serde_json::Value::String(token.to_string());
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&config).expect("config serializes"),
+        )
+        .expect("config writes");
+    }
 }
 
 fn run_devbox_with_env<const E: usize, const N: usize>(
@@ -277,7 +321,7 @@ fn path_str(path: &Path) -> &str {
 }
 
 fn assert_product_output_is_clean(output: &str) {
-    for hidden_word in ["pack", "cursor", "remote", "devbox://"] {
+    for hidden_word in ["pack", "cursor", "remote", "devbox://", "loom"] {
         assert!(
             !output.to_ascii_lowercase().contains(hidden_word),
             "product output exposed {hidden_word}: {output}"

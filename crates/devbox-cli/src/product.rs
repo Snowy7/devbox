@@ -1,10 +1,10 @@
 use devbox_metadata::{MetadataAuthMode, MetadataServiceConfig};
 use loom_core::{RevisionBoundary, SharedFolderId};
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
-use loom_store::{LocalStore, RemoteConfig};
+use loom_store::{LocalStore, RemoteConfig, StoreError};
 use loom_sync::{
     import_pack, sync_store_to_remote, DevboxHostedRemote, DevboxHostedRemoteConfig, LoomRemote,
-    DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME, DEVBOX_HOSTED_REMOTE_KIND,
+    SyncError, DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME, DEVBOX_HOSTED_REMOTE_KIND,
 };
 use loom_worktree::{
     evaluate_directory_policy, CaptureEngine, CaptureRequest, DirectoryPolicyDecision,
@@ -142,7 +142,7 @@ pub fn run_loom_daemon_entrypoint(args: &[String]) -> ExitCode {
         options.debounce_ms = parsed.debounce_ms;
         options.poll_ms = parsed.poll_ms;
         options.max_cycles = parsed.max_cycles;
-        loom_daemon::run_loop(&options).map_err(|error| error.to_string())
+        loom_daemon::run_loop(&options).map_err(product_daemon_error)
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -170,7 +170,7 @@ pub fn print_product_command_help(command: &str) {
     println!();
     println!("Usage: {usage}");
     println!();
-    println!("Devbox keeps folders continuous across machines and uses Loom under the hood.");
+    println!("Devbox keeps folders continuous across machines.");
 }
 
 fn run_login(args: LoginArgs) -> Result<(), String> {
@@ -209,7 +209,7 @@ fn run_login(args: LoginArgs) -> Result<(), String> {
 fn run_share(args: ShareArgs) -> Result<(), String> {
     let mut config = read_config()?;
     let session = config.session()?;
-    let opened = LocalStore::open_or_init(&args.folder).map_err(|error| error.to_string())?;
+    let opened = LocalStore::open_or_init(&args.folder).map_err(product_store_error)?;
     let store = opened.into_store();
     let folder_id = store.shared_folder().id().as_str().to_string();
     let name = store.shared_folder().display_name().to_string();
@@ -252,11 +252,11 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
     let remote = DevboxHostedRemote::new(remote_config.clone());
     let remote_revision_id = remote
         .get_cursor(DEFAULT_CURSOR_ID)
-        .map_err(|error| error.to_string())?
+        .map_err(product_sync_error)?
         .ok_or_else(|| "that shared folder has not synced yet".to_string())?;
     let pack = remote
         .get_pack(&remote_revision_id)
-        .map_err(|error| error.to_string())?;
+        .map_err(product_sync_error)?;
 
     validate_clone_target_before_mutation(&target)?;
     fs::create_dir_all(&target).map_err(|error| error.to_string())?;
@@ -265,8 +265,9 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
         pack.manifest.shared_folder_id.clone(),
         pack.manifest.display_name.clone(),
     )
-    .map_err(|error| error.to_string())?;
-    import_pack(&store, &pack).map_err(|error| error.to_string())?;
+    .map_err(product_store_error)?;
+    import_pack(&store, &pack)
+        .map_err(|_| "could not prepare shared folder data on this machine".to_string())?;
     let current = capture_worktree(&store, RevisionBoundary::Restore)?;
     ensure_no_blocked_or_deferred(&current, "clone")?;
     if !current.file_versions().is_empty() {
@@ -274,7 +275,7 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
     }
     let revision = store
         .revision_by_id(&remote_revision_id)
-        .map_err(|error| error.to_string())?
+        .map_err(product_store_error)?
         .ok_or_else(|| "shared folder data was incomplete".to_string())?;
     RestoreEngine::new(&store)
         .restore(&revision, &current)
@@ -282,7 +283,7 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
     let restored = capture_worktree(&store, RevisionBoundary::Sync)?;
     store
         .coalesce_folder_revision(RevisionBoundary::Sync, restored.file_versions())
-        .map_err(|error| error.to_string())?;
+        .map_err(product_store_error)?;
     store
         .upsert_remote(
             RemoteConfig::new(
@@ -292,7 +293,7 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(product_store_error)?;
     upsert_managed_folder(&mut config, &store, false)?;
     write_config(&config)?;
 
@@ -323,7 +324,7 @@ fn run_resume(args: ResumeArgs) -> Result<(), String> {
     let session = config.session()?;
     let index = resolve_managed_folder(&config, args.target.as_deref())?;
     let folder = config.shared_folders[index].clone();
-    let store = LocalStore::open(&folder.local_path).map_err(|error| error.to_string())?;
+    let store = LocalStore::open(&folder.local_path).map_err(product_store_error)?;
     configure_hosted_remote(&store, &session)?;
     sync_once(&store, &session)?;
     config.shared_folders[index].paused = false;
@@ -380,7 +381,7 @@ fn sync_once(store: &LocalStore, session: &Session) -> Result<WorktreeCapture, S
     ensure_no_blocked_or_deferred(&capture, "share")?;
     store
         .coalesce_folder_revision(RevisionBoundary::Sync, capture.file_versions())
-        .map_err(|error| error.to_string())?;
+        .map_err(product_store_error)?;
     let remote_config = DevboxHostedRemoteConfig::new(
         &session.api_url,
         store.shared_folder().id().clone(),
@@ -389,7 +390,7 @@ fn sync_once(store: &LocalStore, session: &Session) -> Result<WorktreeCapture, S
     )
     .map_err(|error| error.to_string())?;
     let remote = DevboxHostedRemote::new(remote_config);
-    sync_store_to_remote(store, &remote).map_err(|error| error.to_string())?;
+    sync_store_to_remote(store, &remote).map_err(product_sync_error)?;
     Ok(capture)
 }
 
@@ -410,7 +411,7 @@ fn configure_hosted_remote(store: &LocalStore, session: &Session) -> Result<(), 
             )
             .map_err(|error| error.to_string())?,
         )
-        .map_err(|error| error.to_string())
+        .map_err(product_store_error)
 }
 
 fn capture_worktree(
@@ -449,7 +450,7 @@ fn start_background_sync(store: &LocalStore, enabled: bool) -> Result<(), String
         return Ok(());
     }
     let report = loom_daemon::start_background(&DaemonStartOptions::new(store.folder_root()))
-        .map_err(|error| error.to_string())?;
+        .map_err(product_daemon_error)?;
     if report.already_running {
         println!("Live sync: already running");
     } else {
@@ -460,7 +461,7 @@ fn start_background_sync(store: &LocalStore, enabled: bool) -> Result<(), String
 
 fn stop_background_sync_for_path(path: &Path) -> Result<(), String> {
     if path.join(".loom").is_dir() {
-        loom_daemon::request_stop(path).map_err(|error| error.to_string())?;
+        loom_daemon::request_stop(path).map_err(product_daemon_error)?;
     }
     Ok(())
 }
@@ -970,7 +971,97 @@ fn product_api_error(error: UreqError) -> String {
             "this account or machine cannot access that shared folder".to_string()
         }
         UreqError::Status(status, _) => format!("Devbox API request failed with HTTP {status}"),
-        UreqError::Transport(error) => format!("could not reach Devbox API: {error}"),
+        UreqError::Transport(_) => {
+            "could not reach Devbox; check your connection and try again".to_string()
+        }
+    }
+}
+
+fn product_sync_error(error: SyncError) -> String {
+    match error {
+        SyncError::RemoteAuth(_) => {
+            "Devbox session was rejected; run devbox login again".to_string()
+        }
+        SyncError::RemoteTransport(_) => {
+            "Devbox could not reach the shared-folder service; check your connection and try again"
+                .to_string()
+        }
+        SyncError::CursorConflict { .. } | SyncError::DivergentState { .. } => {
+            "Sync paused because this folder changed in more than one place. Run devbox status before resuming.".to_string()
+        }
+        SyncError::MissingRemotePack(_) | SyncError::MissingRevision(_) | SyncError::Pack(_) => {
+            "Devbox could not read the latest shared folder data; try again".to_string()
+        }
+        SyncError::NoLocalRevision => {
+            "This folder has not been captured yet; run devbox share again".to_string()
+        }
+        SyncError::Store(error) => product_store_error(error),
+        SyncError::Io { .. } | SyncError::Loom(_) => {
+            "Devbox could not update this local folder; check the folder and try again".to_string()
+        }
+        SyncError::InvalidCursor(_) | SyncError::CursorLockBusy { .. } => {
+            "Sync is already busy for this folder; try again in a moment".to_string()
+        }
+        SyncError::RemoteConfig(_) => {
+            "Devbox sync settings for this folder are invalid; run devbox login and resume again"
+                .to_string()
+        }
+    }
+}
+
+fn product_store_error(error: StoreError) -> String {
+    match error {
+        StoreError::MissingStore { .. } => {
+            "This folder is not linked with Devbox yet; run devbox share or devbox clone"
+                .to_string()
+        }
+        StoreError::MissingObject { .. }
+        | StoreError::ObjectHashMismatch { .. }
+        | StoreError::MissingRevisionTarget { .. }
+        | StoreError::AmbiguousRevisionTarget { .. } => {
+            "Devbox could not read the latest shared folder data; try again".to_string()
+        }
+        StoreError::CorruptMetadata { .. } => {
+            "Devbox could not read sync settings for this folder; run devbox resume again"
+                .to_string()
+        }
+        StoreError::Io { .. } | StoreError::Loom(_) => {
+            "Devbox could not update this local folder; check the folder and try again".to_string()
+        }
+    }
+}
+
+fn product_daemon_error(error: loom_daemon::DaemonError) -> String {
+    match error {
+        loom_daemon::DaemonError::Sync(error) => product_sync_error(error),
+        loom_daemon::DaemonError::DivergentState { .. } => {
+            "Sync paused because this folder changed in more than one place. Run devbox status before resuming.".to_string()
+        }
+        loom_daemon::DaemonError::BlockedSource { path, reason } => format!(
+            "Sync paused because {} is blocked by policy: {reason}",
+            display_store_path(&path)
+        ),
+        loom_daemon::DaemonError::DeferredSource { path, reason } => format!(
+            "Sync paused because {} needs attention before it can be shared: {reason}",
+            display_store_path(&path)
+        ),
+        loom_daemon::DaemonError::AlreadyRunning { .. } => {
+            "Sync is already running for this folder".to_string()
+        }
+        loom_daemon::DaemonError::NoRemote | loom_daemon::DaemonError::UnsupportedRemote { .. } => {
+            "Devbox sync settings for this folder are invalid; run devbox resume again".to_string()
+        }
+        loom_daemon::DaemonError::NoLocalRevision => {
+            "This folder has not been captured yet; run devbox share again".to_string()
+        }
+        loom_daemon::DaemonError::Store(error) => product_store_error(error),
+        loom_daemon::DaemonError::Capture(_)
+        | loom_daemon::DaemonError::Io { .. }
+        | loom_daemon::DaemonError::Notify(_)
+        | loom_daemon::DaemonError::Spawn { .. }
+        | loom_daemon::DaemonError::InvalidStatus { .. } => {
+            "Devbox could not update sync for this folder; try again".to_string()
+        }
     }
 }
 

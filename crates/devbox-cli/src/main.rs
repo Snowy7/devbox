@@ -6783,13 +6783,13 @@ fn print_help() {
     println!("  resume     Resume sync for a shared folder");
     println!("  unlink     Remove this machine's link to a shared folder");
     println!();
-    println!("Alpha compatibility commands:");
+    println!("Advanced compatibility commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
     println!("  init       Initialize local account and current-device identity");
     println!("  auth       Manage local/mock auth and dev account/session proof status");
     println!("  devices    List, invite, approve, and revoke local/mock trusted devices");
     println!("  metadata   Validate hosted metadata config and administer alpha invites/leases");
-    println!("  sync       Upload/download encrypted blobs and manage local cursors");
+    println!("  sync       Inspect or repair legacy shared-folder transfer state");
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  changes    Scan, list, and clear the pending local change feed");
     println!("  conflicts  Compare, persist, list, and update divergent snapshot conflicts");
