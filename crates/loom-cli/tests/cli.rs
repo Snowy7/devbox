@@ -202,6 +202,88 @@ fn remote_sync_and_clone_move_folder_state() {
 }
 
 #[test]
+fn background_sync_start_stop_updates_materialized_target() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("README.md"), "before\n").expect("readme writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+    ]));
+
+    let source_start = run_loom_vec(vec![
+        "sync".to_string(),
+        "start".to_string(),
+        source.to_str().expect("UTF-8 path").to_string(),
+        "--debounce-ms".to_string(),
+        "50".to_string(),
+        "--poll-ms".to_string(),
+        "50".to_string(),
+    ]);
+    assert_success(&source_start);
+    let source_pid = value_after(&stdout(&source_start), "Daemon pid: ");
+    let target_start = run_loom_vec(vec![
+        "sync".to_string(),
+        "start".to_string(),
+        target.to_str().expect("UTF-8 path").to_string(),
+        "--debounce-ms".to_string(),
+        "50".to_string(),
+        "--poll-ms".to_string(),
+        "50".to_string(),
+    ]);
+    assert_success(&target_start);
+
+    wait_for_status(&source, "running");
+    wait_for_status(&target, "running");
+
+    let duplicate_source_start = run_loom_vec(vec![
+        "sync".to_string(),
+        "start".to_string(),
+        source.to_str().expect("UTF-8 path").to_string(),
+        "--debounce-ms".to_string(),
+        "50".to_string(),
+        "--poll-ms".to_string(),
+        "50".to_string(),
+    ]);
+    assert_success(&duplicate_source_start);
+    let duplicate_stdout = stdout(&duplicate_source_start);
+    assert!(duplicate_stdout.contains("Background sync: already running"));
+    assert_eq!(value_after(&duplicate_stdout, "Daemon pid: "), source_pid);
+
+    std::fs::write(source.join("README.md"), "after\n").expect("readme edits");
+    wait_for_file_contents(&target.join("README.md"), "after\n");
+
+    let source_status = run_loom(["sync", "status", source.to_str().expect("UTF-8 path")]);
+    assert_success(&source_status);
+    assert!(stdout(&source_status).contains("Daemon state: running"));
+
+    assert_success(&run_loom([
+        "sync",
+        "stop",
+        target.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom([
+        "sync",
+        "stop",
+        source.to_str().expect("UTF-8 path"),
+    ]));
+}
+
+#[test]
 fn sync_refuses_divergent_remote_cursor() {
     let dir = tempfile::tempdir().expect("temp dir");
     let source = dir.path().join("source");
@@ -351,6 +433,13 @@ fn run_loom<const N: usize>(args: [&str; N]) -> Output {
         .expect("loom command runs")
 }
 
+fn run_loom_vec(args: Vec<String>) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(args)
+        .output()
+        .expect("loom command runs")
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -394,4 +483,29 @@ fn count_files(path: &std::path::Path) -> usize {
     }
 
     count
+}
+
+fn wait_for_status(folder: &std::path::Path, expected: &str) {
+    for _ in 0..100 {
+        let status = run_loom(["sync", "status", folder.to_str().expect("UTF-8 path")]);
+        if status.status.success() && stdout(&status).contains(&format!("Daemon state: {expected}"))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("daemon did not reach {expected} for {}", folder.display());
+}
+
+fn wait_for_file_contents(path: &std::path::Path, expected: &str) {
+    for _ in 0..120 {
+        if std::fs::read_to_string(path)
+            .map(|contents| contents == expected)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{} did not become expected contents", path.display());
 }
