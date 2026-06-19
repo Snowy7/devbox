@@ -365,6 +365,7 @@ name = "devbox-cli"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "devbox-api",
  "devbox-auth",
  "devbox-conflict",
  "devbox-core",
@@ -373,6 +374,11 @@ dependencies = [
  "devbox-snapshot",
  "devbox-store",
  "devbox-sync",
+ "loom-core",
+ "loom-daemon",
+ "loom-store",
+ "loom-sync",
+ "loom-worktree",
  "rusqlite",
  "serde",
  "serde_json",

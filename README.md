@@ -40,8 +40,9 @@ The workspace now has first-class Loom and Devbox platform boundaries:
   membership, and hosted discovery.
 - `crates/devbox-api` is the hosted API skeleton for auth, devices, shared folders, Loom remote API
   facade, and object-access routes.
-- `crates/devbox-cli` remains the `devbox` product CLI. It now exposes product-level placeholders
-  such as `login`, `share`, and `clone` while keeping the existing alpha commands available.
+- `crates/devbox-cli` is the `devbox` product CLI. It exposes `login`, `share`, `clone`,
+  `status`, `pause`, `resume`, and `unlink` for shared folders while keeping the existing alpha
+  commands available for compatibility.
 - `loom/` and `devbox/` are the intended top-level homes. Their manifests map the current flat
   workspace crates to the future physical layout.
 
@@ -103,6 +104,26 @@ crates without silently deleting the alpha behavior.
 
 Language note: many current commands still use `project` because the first alpha schema used that
 word for a scoped shared folder. New product language should say shared folder.
+
+The product CLI keeps the normal path centered on folders and machines. For local development,
+run `devbox-api` and point the CLI at it with `--api` or `DEVBOX_API_URL`:
+
+```text
+devbox-api --root .devbox-api --bind 127.0.0.1:3030
+devbox login --api http://127.0.0.1:3030
+devbox share ./source
+devbox clone source ./target
+devbox status
+devbox pause ./target
+devbox resume ./target
+devbox unlink ./target
+```
+
+`devbox share <folder>` registers the shared folder, configures the hidden Loom sync endpoint, syncs
+the folder, and starts live sync. `devbox clone` lists folders available to this account; `devbox
+clone <name> [target]` materializes a shared folder on this machine and starts live sync. Tokens,
+pack names, cursors, remotes, and `devbox://` URLs are not printed in normal product output. Debug
+and engine-level operations remain under `loom`.
 
 The current CLI can create/list/show/restore local snapshots and scan pending local changes:
 

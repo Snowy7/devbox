@@ -46,6 +46,8 @@ use devbox_sync::{
     LocalFilesystemBlobProvider, ObjectKey, RemoteBlobProvider, S3CompatibleBlobProvider,
     S3CompatibleConfig, S3CredentialsSource, S3RedactedConfig, SyncKey,
 };
+mod product;
+
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -60,13 +62,13 @@ fn main() -> ExitCode {
             println!("devbox {VERSION}");
             ExitCode::SUCCESS
         }
-        Some("login") => run_product_placeholder("login", &args[1..]),
-        Some("share") => run_product_placeholder("share", &args[1..]),
-        Some("clone") => run_product_placeholder("clone", &args[1..]),
-        Some("manage") => run_product_placeholder("manage", &args[1..]),
-        Some("pause") => run_product_placeholder("pause", &args[1..]),
-        Some("resume") => run_product_placeholder("resume", &args[1..]),
-        Some("unlink") => run_product_placeholder("unlink", &args[1..]),
+        Some("login") => product::run_command("login", &args[1..]),
+        Some("share") => product::run_command("share", &args[1..]),
+        Some("clone") => product::run_command("clone", &args[1..]),
+        Some("manage") => product::run_command("manage", &args[1..]),
+        Some("pause") => product::run_command("pause", &args[1..]),
+        Some("resume") => product::run_command("resume", &args[1..]),
+        Some("unlink") => product::run_command("unlink", &args[1..]),
         Some("scan") => run_scan(&args[1..]),
         Some("init") => run_init(&args[1..]),
         Some("auth") => run_auth(&args[1..]),
@@ -92,43 +94,6 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
-}
-
-fn run_product_placeholder(command: &'static str, args: &[String]) -> ExitCode {
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        print_product_command_help(command);
-        return ExitCode::SUCCESS;
-    }
-
-    println!("devbox {command}: not implemented yet");
-    println!(
-        "Product boundary: Devbox configures accounts, machines, and shared folders; Loom owns folder state and sync semantics."
-    );
-    println!("Compatibility: existing alpha commands remain available under init/auth/devices/metadata/sync/snapshot/changes/conflicts/secrets.");
-    ExitCode::SUCCESS
-}
-
-fn print_product_command_help(command: &str) {
-    let usage = match command {
-        "login" => "devbox login",
-        "share" => "devbox share <FOLDER>",
-        "clone" => "devbox clone <SHARED_FOLDER>",
-        "manage" => "devbox manage <SHARED_FOLDER>",
-        "pause" => "devbox pause <SHARED_FOLDER>",
-        "resume" => "devbox resume <SHARED_FOLDER>",
-        "unlink" => "devbox unlink <SHARED_FOLDER>",
-        _ => "devbox <COMMAND>",
-    };
-
-    println!("devbox {command}");
-    println!();
-    println!("Usage: {usage}");
-    println!();
-    println!("Status: not implemented yet");
-    println!("Devbox will handle product/account setup here and delegate folder state to Loom.");
 }
 
 fn run_changes(args: &[String]) -> ExitCode {
@@ -1273,6 +1238,7 @@ fn run_metadata(args: &[String]) -> ExitCode {
 
 fn run_sync(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
+        Some("run-loop") => product::run_loom_daemon_entrypoint(&args[1..]),
         Some("publish-snapshot") => match parse_sync_snapshot_args(&args[1..], false)
             .and_then(|args| sync_publish_snapshot(&args).map_err(|error| error.to_string()))
         {
@@ -6705,14 +6671,7 @@ fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::err
 
 fn run_status(args: &[String]) -> ExitCode {
     match args {
-        [] => {
-            println!("devbox status: not implemented yet");
-            println!(
-                "Product boundary: future status will summarize shared folders, machines, and sync health."
-            );
-            println!("Compatibility: pass --db <PATH> to inspect local alpha metadata.");
-            ExitCode::SUCCESS
-        }
+        [] => product::run_status(),
         [flag, path] if flag == "--db" => match status_for_db(path) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

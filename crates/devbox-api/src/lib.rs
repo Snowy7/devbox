@@ -439,6 +439,39 @@ impl LocalDevboxApi {
         })
     }
 
+    pub fn list_shared_folders(&self, auth: &AuthContext) -> ApiResult<Vec<SharedFolderResponse>> {
+        let folders = self.folders()?;
+        let memberships = self.memberships()?;
+        let mut responses = Vec::new();
+
+        for membership in memberships
+            .into_iter()
+            .filter(|membership| membership.account_id == auth.account_id)
+        {
+            let Some(folder) = folders
+                .iter()
+                .find(|folder| folder.folder_id == membership.folder_id)
+            else {
+                continue;
+            };
+            responses.push(SharedFolderResponse {
+                id: SharedFolderId::new(folder.folder_id.clone())
+                    .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+                account_id: AccountId::new(auth.account_id.clone())
+                    .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+                role: role_from_string(&membership.role)?,
+                display_name: folder.display_name.clone(),
+            });
+        }
+
+        responses.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(responses)
+    }
+
     pub fn put_pack(
         &self,
         auth: &AuthContext,
@@ -883,6 +916,15 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
             )?;
             json_response(200, &shared_folder_wire(response))
         }
+        ("GET", ["v1", "shared-folders"]) => {
+            let auth = auth_from_request(api, &request)?;
+            let response = api
+                .list_shared_folders(&auth)?
+                .into_iter()
+                .map(shared_folder_wire)
+                .collect::<Vec<_>>();
+            json_response(200, &response)
+        }
         ("GET", ["v1", "shared-folders", folder_id]) => {
             let auth = auth_from_request(api, &request)?;
             let response = api.shared_folder(&auth, folder_id)?;
@@ -1032,6 +1074,17 @@ fn role_to_string(role: SharedFolderRole) -> String {
         SharedFolderRole::Viewer => "viewer",
     }
     .to_string()
+}
+
+fn role_from_string(value: &str) -> ApiResult<SharedFolderRole> {
+    match value {
+        "owner" => Ok(SharedFolderRole::Owner),
+        "editor" => Ok(SharedFolderRole::Editor),
+        "viewer" => Ok(SharedFolderRole::Viewer),
+        _ => Err(ApiError::BadRequest(
+            "shared folder role is invalid".to_string(),
+        )),
+    }
 }
 
 fn json_response<T: Serialize>(status: u16, body: &T) -> ApiResult<Vec<u8>> {
@@ -1315,8 +1368,13 @@ mod tests {
         let folder = api
             .ensure_shared_folder(&auth, "shared-folder-1", "Code")
             .expect("folder creates");
+        let folders = api
+            .list_shared_folders(&auth)
+            .expect("folders list for account");
 
         assert_eq!(folder.id.as_str(), "shared-folder-1");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].display_name, "Code");
         assert!(api
             .put_pack(&auth, "shared-folder-1", "folder-revision-1", b"pack")
             .expect("pack writes"));
