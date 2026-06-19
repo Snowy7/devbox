@@ -1,12 +1,42 @@
 //! Local Loom persistence boundary.
 //!
-//! This crate will own object storage, file-version metadata, folder revisions,
-//! retention, checkpoints, pins, and cursors. The old `devbox-store` crate is
-//! still compiled for alpha compatibility while these responsibilities migrate.
+//! Loom stores folder history beside the shared folder for this local-engine
+//! milestone. The layout is intentionally small and explicit:
+//!
+//! - `.loom/objects/b3/<prefix>/<prefix>/<object>` stores content-addressed bytes.
+//! - `.loom/metadata/file_versions.tsv` is an append-only file-version catalog.
+//! - `.loom/metadata/revisions.tsv` is an append-only folder-revision index.
+//! - `.loom/metadata/revisions/<revision>.tsv` stores revision entries.
+//!
+//! The old `devbox-store` crate is still compiled for alpha compatibility while
+//! these responsibilities migrate into Loom-owned crates.
 
-use loom_core::{Cursor, FileVersion, FolderRevision, ObjectId};
+use loom_core::{
+    Cursor, FileKind, FileVersion, FileVersionId, FolderEntry, FolderRevision, FolderRevisionId,
+    FolderScope, LoomError, ObjectId, RevisionBoundary, SharedFolder, SharedFolderId,
+};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CRATE_ROLE: &str = "local Loom object and metadata store for shared-folder history";
+pub const STORE_DIR: &str = ".loom";
+
+const HASH_ALGORITHM_DIR: &str = "b3";
+const OBJECTS_DIR: &str = "objects";
+const TEMP_DIR: &str = "tmp";
+const METADATA_DIR: &str = "metadata";
+const SHARED_FOLDER_FILE: &str = "shared_folder.tsv";
+const FILE_VERSIONS_FILE: &str = "file_versions.tsv";
+const REVISIONS_FILE: &str = "revisions.tsv";
+const REVISIONS_DIR: &str = "revisions";
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreBoundary {
@@ -34,15 +64,1113 @@ pub struct StoredObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectRef {
+    id: ObjectId,
+    path: PathBuf,
+    size_bytes: u64,
+}
+
+impl ObjectRef {
+    pub fn id(&self) -> &ObjectId {
+        &self.id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn object_ref(&self) -> String {
+        format!(
+            "{}/{}/{}/{}/{}",
+            OBJECTS_DIR,
+            HASH_ALGORITHM_DIR,
+            &self.id.as_str()[0..2],
+            &self.id.as_str()[2..4],
+            self.id
+        )
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectCache {
+    root: PathBuf,
+}
+
+impl ObjectCache {
+    pub fn open(root: impl AsRef<Path>) -> StoreResult<Self> {
+        let root = root.as_ref().to_path_buf();
+        create_dir_all(root.join(OBJECTS_DIR).join(HASH_ALGORITHM_DIR))?;
+        create_dir_all(root.join(TEMP_DIR))?;
+
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn write_bytes(&self, bytes: impl AsRef<[u8]>) -> StoreResult<ObjectRef> {
+        self.write_reader(bytes.as_ref())
+    }
+
+    pub fn write_file(&self, path: impl AsRef<Path>) -> StoreResult<ObjectRef> {
+        let path = path.as_ref();
+        let file = File::open(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        self.write_reader(BufReader::new(file))
+    }
+
+    pub fn read(&self, id: &ObjectId) -> StoreResult<Vec<u8>> {
+        let path = self.path_for(id);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(bytes),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                Err(StoreError::MissingObject {
+                    id: id.clone(),
+                    path,
+                })
+            }
+            Err(source) => Err(StoreError::Io { path, source }),
+        }
+    }
+
+    pub fn exists(&self, id: &ObjectId) -> bool {
+        self.path_for(id).is_file()
+    }
+
+    pub fn path_for(&self, id: &ObjectId) -> PathBuf {
+        self.root
+            .join(OBJECTS_DIR)
+            .join(HASH_ALGORITHM_DIR)
+            .join(&id.as_str()[0..2])
+            .join(&id.as_str()[2..4])
+            .join(id.as_str())
+    }
+
+    fn write_reader(&self, mut reader: impl Read) -> StoreResult<ObjectRef> {
+        let (mut temp_file, temp_path) = self.create_temp_file()?;
+        let mut hasher = blake3::Hasher::new();
+        let mut size_bytes = 0;
+        let mut buffer = [0; 64 * 1024];
+
+        loop {
+            let bytes_read = match reader.read(&mut buffer) {
+                Ok(bytes_read) => bytes_read,
+                Err(source) => {
+                    cleanup_temp_file(&temp_path);
+                    return Err(StoreError::Io {
+                        path: temp_path,
+                        source,
+                    });
+                }
+            };
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            hasher.update(&buffer[..bytes_read]);
+            size_bytes += bytes_read as u64;
+
+            if let Err(source) = temp_file.write_all(&buffer[..bytes_read]) {
+                cleanup_temp_file(&temp_path);
+                return Err(StoreError::Io {
+                    path: temp_path,
+                    source,
+                });
+            }
+        }
+
+        if let Err(source) = temp_file.flush().and_then(|_| temp_file.sync_all()) {
+            cleanup_temp_file(&temp_path);
+            return Err(StoreError::Io {
+                path: temp_path,
+                source,
+            });
+        }
+
+        drop(temp_file);
+
+        let id = ObjectId::from_blake3_hex(hasher.finalize().to_hex().to_string())
+            .expect("BLAKE3 returns a 64-character hex digest");
+        let final_path = self.path_for(&id);
+        create_dir_all(
+            final_path
+                .parent()
+                .expect("object paths are always nested below cache root"),
+        )?;
+
+        if final_path.exists() {
+            cleanup_temp_file(&temp_path);
+        } else if let Err(source) = fs::rename(&temp_path, &final_path) {
+            if source.kind() == io::ErrorKind::AlreadyExists && final_path.exists() {
+                cleanup_temp_file(&temp_path);
+            } else {
+                cleanup_temp_file(&temp_path);
+                return Err(StoreError::Io {
+                    path: final_path,
+                    source,
+                });
+            }
+        }
+
+        Ok(ObjectRef {
+            id,
+            path: final_path,
+            size_bytes,
+        })
+    }
+
+    fn create_temp_file(&self) -> StoreResult<(File, PathBuf)> {
+        let temp_dir = self.root.join(TEMP_DIR);
+        create_dir_all(&temp_dir)?;
+
+        for _ in 0..100 {
+            let path = temp_dir.join(temp_file_name());
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((file, path)),
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(StoreError::Io { path, source });
+                }
+            }
+        }
+
+        Err(StoreError::CorruptMetadata {
+            path: temp_dir,
+            message: "could not create a unique object cache temp file".to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalStore {
+    folder_root: PathBuf,
+    store_root: PathBuf,
+    shared_folder: SharedFolder,
+    object_cache: ObjectCache,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreOpen {
+    store: LocalStore,
+    initialized: bool,
+}
+
+impl StoreOpen {
+    pub fn store(&self) -> &LocalStore {
+        &self.store
+    }
+
+    pub fn into_store(self) -> LocalStore {
+        self.store
+    }
+
+    pub fn initialized(&self) -> bool {
+        self.initialized
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoalescedRevision {
+    revision: FolderRevision,
+    diff: RevisionDiffSummary,
+    new_file_versions: usize,
+    created: bool,
+}
+
+impl CoalescedRevision {
+    pub fn revision(&self) -> &FolderRevision {
+        &self.revision
+    }
+
+    pub fn diff(&self) -> &RevisionDiffSummary {
+        &self.diff
+    }
+
+    pub fn new_file_versions(&self) -> usize {
+        self.new_file_versions
+    }
+
+    pub fn created(&self) -> bool {
+        self.created
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RevisionDiffSummary {
+    created: usize,
+    modified: usize,
+    deleted: usize,
+    unchanged: usize,
+}
+
+impl RevisionDiffSummary {
+    pub fn created(&self) -> usize {
+        self.created
+    }
+
+    pub fn modified(&self) -> usize {
+        self.modified
+    }
+
+    pub fn deleted(&self) -> usize {
+        self.deleted
+    }
+
+    pub fn unchanged(&self) -> usize {
+        self.unchanged
+    }
+
+    pub fn has_changes(&self) -> bool {
+        self.created > 0 || self.modified > 0 || self.deleted > 0
+    }
+
+    fn compare(base: Option<&[FolderEntry]>, current: &[FolderEntry]) -> Self {
+        let base_entries = base
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| (entry.path().to_path_buf(), entry.file_version_id().clone()))
+            .collect::<BTreeMap<_, _>>();
+        let current_entries = current
+            .iter()
+            .map(|entry| (entry.path().to_path_buf(), entry.file_version_id().clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut summary = Self::default();
+
+        for (path, current_id) in &current_entries {
+            match base_entries.get(path) {
+                Some(base_id) if base_id == current_id => summary.unchanged += 1,
+                Some(_) => summary.modified += 1,
+                None => summary.created += 1,
+            }
+        }
+
+        for path in base_entries.keys() {
+            if !current_entries.contains_key(path) {
+                summary.deleted += 1;
+            }
+        }
+
+        summary
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredFolderState {
     pub revision: FolderRevision,
     pub file_versions: Vec<FileVersion>,
     pub cursors: Vec<Cursor>,
 }
 
+#[derive(Debug)]
+pub enum StoreError {
+    Io { path: PathBuf, source: io::Error },
+    Loom(LoomError),
+    MissingStore { folder: PathBuf },
+    MissingObject { id: ObjectId, path: PathBuf },
+    CorruptMetadata { path: PathBuf, message: String },
+}
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "could not access {}: {source}", path.display()),
+            Self::Loom(error) => write!(f, "{error}"),
+            Self::MissingStore { folder } => write!(
+                f,
+                "{} is not tracked by Loom yet; run 'loom track {}'",
+                folder.display(),
+                folder.display()
+            ),
+            Self::MissingObject { id, path } => {
+                write!(f, "object {id} is missing at {}", path.display())
+            }
+            Self::CorruptMetadata { path, message } => {
+                write!(
+                    f,
+                    "could not read Loom metadata {}: {message}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Loom(error) => Some(error),
+            Self::MissingStore { .. }
+            | Self::MissingObject { .. }
+            | Self::CorruptMetadata { .. } => None,
+        }
+    }
+}
+
+impl From<LoomError> for StoreError {
+    fn from(error: LoomError) -> Self {
+        Self::Loom(error)
+    }
+}
+
+pub type StoreResult<T> = Result<T, StoreError>;
+
+impl LocalStore {
+    pub fn open_or_init(folder: impl AsRef<Path>) -> StoreResult<StoreOpen> {
+        let folder_root = canonical_folder(folder.as_ref())?;
+        let store_root = folder_root.join(STORE_DIR);
+        let initialized = !store_root
+            .join(METADATA_DIR)
+            .join(SHARED_FOLDER_FILE)
+            .is_file();
+
+        create_dir_all(&store_root)?;
+        create_dir_all(store_root.join(METADATA_DIR))?;
+        create_dir_all(store_root.join(METADATA_DIR).join(REVISIONS_DIR))?;
+        let object_cache = ObjectCache::open(&store_root)?;
+
+        let shared_folder = if initialized {
+            let shared_folder = default_shared_folder(&folder_root)?;
+            write_shared_folder_metadata(&store_root, &shared_folder)?;
+            shared_folder
+        } else {
+            read_shared_folder_metadata(&store_root, &folder_root)?
+        };
+
+        Ok(StoreOpen {
+            store: Self {
+                folder_root,
+                store_root,
+                shared_folder,
+                object_cache,
+            },
+            initialized,
+        })
+    }
+
+    pub fn open(folder: impl AsRef<Path>) -> StoreResult<Self> {
+        let folder_root = canonical_folder(folder.as_ref())?;
+        let store_root = folder_root.join(STORE_DIR);
+        let metadata = store_root.join(METADATA_DIR).join(SHARED_FOLDER_FILE);
+        if !metadata.is_file() {
+            return Err(StoreError::MissingStore {
+                folder: folder_root,
+            });
+        }
+
+        let object_cache = ObjectCache::open(&store_root)?;
+        let shared_folder = read_shared_folder_metadata(&store_root, &folder_root)?;
+
+        Ok(Self {
+            folder_root,
+            store_root,
+            shared_folder,
+            object_cache,
+        })
+    }
+
+    pub fn discover_from(start: impl AsRef<Path>) -> StoreResult<Self> {
+        let mut current = if start.as_ref().is_dir() {
+            canonical_folder(start.as_ref())?
+        } else {
+            canonical_folder(start.as_ref().parent().unwrap_or_else(|| Path::new(".")))?
+        };
+
+        loop {
+            if current
+                .join(STORE_DIR)
+                .join(METADATA_DIR)
+                .join(SHARED_FOLDER_FILE)
+                .is_file()
+            {
+                return Self::open(&current);
+            }
+            if !current.pop() {
+                return Err(StoreError::MissingStore {
+                    folder: canonical_folder(start.as_ref())?,
+                });
+            }
+        }
+    }
+
+    pub fn folder_root(&self) -> &Path {
+        &self.folder_root
+    }
+
+    pub fn store_root(&self) -> &Path {
+        &self.store_root
+    }
+
+    pub fn shared_folder(&self) -> &SharedFolder {
+        &self.shared_folder
+    }
+
+    pub fn object_cache(&self) -> &ObjectCache {
+        &self.object_cache
+    }
+
+    pub fn file_versions(&self) -> StoreResult<Vec<FileVersion>> {
+        Ok(self.load_file_versions()?.into_values().collect())
+    }
+
+    pub fn revisions(&self) -> StoreResult<Vec<FolderRevision>> {
+        let headers = self.load_revision_headers()?;
+        headers
+            .into_iter()
+            .map(|header| self.read_revision(&header))
+            .collect()
+    }
+
+    pub fn latest_revision(&self) -> StoreResult<Option<FolderRevision>> {
+        let Some(header) = self.load_revision_headers()?.into_iter().last() else {
+            return Ok(None);
+        };
+
+        self.read_revision(&header).map(Some)
+    }
+
+    pub fn coalesce_folder_revision(
+        &self,
+        boundary: RevisionBoundary,
+        file_versions: &[FileVersion],
+    ) -> StoreResult<CoalescedRevision> {
+        let new_file_versions = self.append_file_versions(file_versions)?;
+        let latest = self.latest_revision()?;
+        let entries = entries_from_file_versions(file_versions)?;
+        let diff = RevisionDiffSummary::compare(
+            latest.as_ref().map(|revision| revision.entries()),
+            &entries,
+        );
+
+        if let Some(latest) = latest {
+            if same_entries(latest.entries(), &entries) {
+                return Ok(CoalescedRevision {
+                    revision: latest,
+                    diff,
+                    new_file_versions,
+                    created: false,
+                });
+            }
+
+            return self.create_revision(
+                Some(latest.id().clone()),
+                boundary,
+                entries,
+                diff,
+                new_file_versions,
+            );
+        }
+
+        self.create_revision(None, boundary, entries, diff, new_file_versions)
+    }
+
+    fn create_revision(
+        &self,
+        parent_id: Option<FolderRevisionId>,
+        boundary: RevisionBoundary,
+        entries: Vec<FolderEntry>,
+        diff: RevisionDiffSummary,
+        new_file_versions: usize,
+    ) -> StoreResult<CoalescedRevision> {
+        let created_at = current_timestamp();
+        let id = folder_revision_id(
+            self.shared_folder.id().as_str(),
+            parent_id.as_ref().map(FolderRevisionId::as_str),
+            boundary,
+            &entries,
+            &created_at,
+        )?;
+        let revision = FolderRevision::new(
+            id,
+            self.shared_folder.id().clone(),
+            parent_id,
+            boundary,
+            entries,
+            created_at,
+        )?;
+
+        self.write_revision(&revision)?;
+        self.append_revision_header(&revision)?;
+
+        Ok(CoalescedRevision {
+            revision,
+            diff,
+            new_file_versions,
+            created: true,
+        })
+    }
+
+    fn append_file_versions(&self, file_versions: &[FileVersion]) -> StoreResult<usize> {
+        let existing = self
+            .load_file_versions()?
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let path = self.metadata_path(FILE_VERSIONS_FILE);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        let mut written = 0;
+
+        for version in file_versions {
+            if existing.contains(version.id()) {
+                continue;
+            }
+            file.write_all(file_version_row(version).as_bytes())
+                .map_err(|source| StoreError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            written += 1;
+        }
+
+        Ok(written)
+    }
+
+    fn load_file_versions(&self) -> StoreResult<BTreeMap<FileVersionId, FileVersion>> {
+        let path = self.metadata_path(FILE_VERSIONS_FILE);
+        let Some(contents) = read_optional_to_string(&path)? else {
+            return Ok(BTreeMap::new());
+        };
+        let mut versions = BTreeMap::new();
+
+        for (line_index, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = split_fields(&path, line_index + 1, line, 6)?;
+            let id = FileVersionId::new(decode_field(&fields[0])?)?;
+            let relative_path = store_string_to_path(&decode_field(&fields[1])?);
+            let kind = file_kind_from_store(&decode_field(&fields[2])?).ok_or_else(|| {
+                StoreError::CorruptMetadata {
+                    path: path.clone(),
+                    message: format!("line {} has unknown file kind", line_index + 1),
+                }
+            })?;
+            let object_id = match decode_field(&fields[3])?.as_str() {
+                "-" => None,
+                value => Some(ObjectId::from_blake3_hex(value.to_string())?),
+            };
+            let size_bytes = match decode_field(&fields[4])?.as_str() {
+                "-" => None,
+                value => Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| StoreError::CorruptMetadata {
+                            path: path.clone(),
+                            message: format!("line {} has invalid size", line_index + 1),
+                        })?,
+                ),
+            };
+            let captured_at = decode_field(&fields[5])?;
+            let version = FileVersion::new(
+                id.clone(),
+                relative_path,
+                kind,
+                object_id,
+                size_bytes,
+                captured_at,
+            )?;
+            versions.insert(id, version);
+        }
+
+        Ok(versions)
+    }
+
+    fn load_revision_headers(&self) -> StoreResult<Vec<RevisionHeader>> {
+        let path = self.metadata_path(REVISIONS_FILE);
+        let Some(contents) = read_optional_to_string(&path)? else {
+            return Ok(Vec::new());
+        };
+        let mut headers = Vec::new();
+
+        for (line_index, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = split_fields(&path, line_index + 1, line, 4)?;
+            let id = FolderRevisionId::new(decode_field(&fields[0])?)?;
+            let parent_id = match decode_field(&fields[1])?.as_str() {
+                "-" => None,
+                value => Some(FolderRevisionId::new(value.to_string())?),
+            };
+            let boundary =
+                revision_boundary_from_store(&decode_field(&fields[2])?).ok_or_else(|| {
+                    StoreError::CorruptMetadata {
+                        path: path.clone(),
+                        message: format!("line {} has unknown revision boundary", line_index + 1),
+                    }
+                })?;
+            let created_at = decode_field(&fields[3])?;
+            headers.push(RevisionHeader {
+                id,
+                parent_id,
+                boundary,
+                created_at,
+            });
+        }
+
+        Ok(headers)
+    }
+
+    fn read_revision(&self, header: &RevisionHeader) -> StoreResult<FolderRevision> {
+        let path = self
+            .metadata_path(REVISIONS_DIR)
+            .join(revision_entries_file_name(&header.id));
+        let contents = fs::read_to_string(&path).map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let mut entries = Vec::new();
+
+        for (line_index, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = split_fields(&path, line_index + 1, line, 2)?;
+            let relative_path = store_string_to_path(&decode_field(&fields[0])?);
+            let file_version_id = FileVersionId::new(decode_field(&fields[1])?)?;
+            entries.push(FolderEntry::new(relative_path, file_version_id)?);
+        }
+
+        FolderRevision::new(
+            header.id.clone(),
+            self.shared_folder.id().clone(),
+            header.parent_id.clone(),
+            header.boundary,
+            entries,
+            header.created_at.clone(),
+        )
+        .map_err(StoreError::from)
+    }
+
+    fn write_revision(&self, revision: &FolderRevision) -> StoreResult<()> {
+        let path = self
+            .metadata_path(REVISIONS_DIR)
+            .join(revision_entries_file_name(revision.id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+        for entry in revision.entries() {
+            file.write_all(
+                format!(
+                    "{}\t{}\n",
+                    encode_field(&path_to_store_string(entry.path())),
+                    encode_field(entry.file_version_id().as_str())
+                )
+                .as_bytes(),
+            )
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn append_revision_header(&self, revision: &FolderRevision) -> StoreResult<()> {
+        let path = self.metadata_path(REVISIONS_FILE);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+        file.write_all(
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                encode_field(revision.id().as_str()),
+                encode_field(
+                    revision
+                        .parent_id()
+                        .map(FolderRevisionId::as_str)
+                        .unwrap_or("-")
+                ),
+                encode_field(revision_boundary_to_store(revision.boundary())),
+                encode_field(revision.created_at()),
+            )
+            .as_bytes(),
+        )
+        .map_err(|source| StoreError::Io { path, source })
+    }
+
+    fn metadata_path(&self, name: &str) -> PathBuf {
+        self.store_root.join(METADATA_DIR).join(name)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RevisionHeader {
+    id: FolderRevisionId,
+    parent_id: Option<FolderRevisionId>,
+    boundary: RevisionBoundary,
+    created_at: String,
+}
+
+fn default_shared_folder(folder_root: &Path) -> StoreResult<SharedFolder> {
+    let root_key = path_to_store_string(folder_root);
+    let digest = blake3::hash(root_key.as_bytes()).to_hex().to_string();
+    let id = SharedFolderId::new(format!("shared-folder-b3-{digest}"))?;
+    let display_name = folder_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| folder_root.display().to_string());
+
+    SharedFolder::new(id, folder_root, display_name, FolderScope::WholeFolder).map_err(Into::into)
+}
+
+fn write_shared_folder_metadata(
+    store_root: &Path,
+    shared_folder: &SharedFolder,
+) -> StoreResult<()> {
+    let path = store_root.join(METADATA_DIR).join(SHARED_FOLDER_FILE);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
+
+    file.write_all(
+        format!(
+            "version\t1\nid\t{}\ndisplay_name\t{}\n",
+            encode_field(shared_folder.id().as_str()),
+            encode_field(shared_folder.display_name()),
+        )
+        .as_bytes(),
+    )
+    .map_err(|source| StoreError::Io { path, source })
+}
+
+fn read_shared_folder_metadata(store_root: &Path, folder_root: &Path) -> StoreResult<SharedFolder> {
+    let path = store_root.join(METADATA_DIR).join(SHARED_FOLDER_FILE);
+    let contents = fs::read_to_string(&path).map_err(|source| StoreError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let mut id = None;
+    let mut display_name = None;
+
+    for (line_index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = split_fields(&path, line_index + 1, line, 2)?;
+        let key = decode_field(&fields[0])?;
+        let value = decode_field(&fields[1])?;
+        match key.as_str() {
+            "id" => id = Some(SharedFolderId::new(value)?),
+            "display_name" => display_name = Some(value),
+            "version" => {}
+            _ => {}
+        }
+    }
+
+    let id = id.ok_or_else(|| StoreError::CorruptMetadata {
+        path: path.clone(),
+        message: "missing shared folder id".to_string(),
+    })?;
+    let display_name = display_name.ok_or_else(|| StoreError::CorruptMetadata {
+        path,
+        message: "missing shared folder display name".to_string(),
+    })?;
+
+    SharedFolder::new(id, folder_root, display_name, FolderScope::WholeFolder).map_err(Into::into)
+}
+
+fn entries_from_file_versions(file_versions: &[FileVersion]) -> StoreResult<Vec<FolderEntry>> {
+    let mut entries = file_versions
+        .iter()
+        .map(|version| FolderEntry::new(version.path().to_path_buf(), version.id().clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by(|left, right| {
+        path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
+    });
+    Ok(entries)
+}
+
+fn same_entries(left: &[FolderEntry], right: &[FolderEntry]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.path() == right.path() && left.file_version_id() == right.file_version_id()
+        })
+}
+
+fn folder_revision_id(
+    shared_folder_id: &str,
+    parent_id: Option<&str>,
+    boundary: RevisionBoundary,
+    entries: &[FolderEntry],
+    created_at: &str,
+) -> StoreResult<FolderRevisionId> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"loom-folder-revision-v1\n");
+    hasher.update(shared_folder_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(parent_id.unwrap_or("-").as_bytes());
+    hasher.update(b"\n");
+    hasher.update(revision_boundary_to_store(boundary).as_bytes());
+    hasher.update(b"\n");
+    hasher.update(created_at.as_bytes());
+    for entry in entries {
+        hasher.update(b"\n");
+        hasher.update(path_to_store_string(entry.path()).as_bytes());
+        hasher.update(b"\t");
+        hasher.update(entry.file_version_id().as_str().as_bytes());
+    }
+
+    FolderRevisionId::new(format!("folder-revision-b3-{}", hasher.finalize().to_hex()))
+        .map_err(Into::into)
+}
+
+fn file_version_row(version: &FileVersion) -> String {
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\n",
+        encode_field(version.id().as_str()),
+        encode_field(&path_to_store_string(version.path())),
+        encode_field(file_kind_to_store(version.kind())),
+        encode_field(version.object_id().map(ObjectId::as_str).unwrap_or("-")),
+        encode_field(
+            &version
+                .size_bytes()
+                .map(|size| size.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        encode_field(version.captured_at()),
+    )
+}
+
+fn file_kind_to_store(kind: &FileKind) -> &'static str {
+    match kind {
+        FileKind::File => "file",
+        FileKind::Directory => "directory",
+        FileKind::Symlink => "symlink",
+        FileKind::Unsupported => "unsupported",
+    }
+}
+
+fn file_kind_from_store(value: &str) -> Option<FileKind> {
+    match value {
+        "file" => Some(FileKind::File),
+        "directory" => Some(FileKind::Directory),
+        "symlink" => Some(FileKind::Symlink),
+        "unsupported" => Some(FileKind::Unsupported),
+        _ => None,
+    }
+}
+
+pub fn revision_boundary_to_store(boundary: RevisionBoundary) -> &'static str {
+    match boundary {
+        RevisionBoundary::DebounceWindow => "debounce-window",
+        RevisionBoundary::LoomCommand => "loom-command",
+        RevisionBoundary::Sync => "sync",
+        RevisionBoundary::Restore => "restore",
+        RevisionBoundary::SandboxMerge => "sandbox-merge",
+        RevisionBoundary::Checkpoint => "checkpoint",
+    }
+}
+
+fn revision_boundary_from_store(value: &str) -> Option<RevisionBoundary> {
+    match value {
+        "debounce-window" => Some(RevisionBoundary::DebounceWindow),
+        "loom-command" => Some(RevisionBoundary::LoomCommand),
+        "sync" => Some(RevisionBoundary::Sync),
+        "restore" => Some(RevisionBoundary::Restore),
+        "sandbox-merge" => Some(RevisionBoundary::SandboxMerge),
+        "checkpoint" => Some(RevisionBoundary::Checkpoint),
+        _ => None,
+    }
+}
+
+pub fn path_to_store_string(path: &Path) -> String {
+    let parts = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::CurDir => Some(".".to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn store_string_to_path(value: &str) -> PathBuf {
+    if value == "." {
+        return PathBuf::new();
+    }
+
+    value.split('/').collect()
+}
+
+fn split_fields(
+    path: &Path,
+    line_number: usize,
+    line: &str,
+    expected: usize,
+) -> StoreResult<Vec<String>> {
+    let fields = line
+        .split('\t')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if fields.len() != expected {
+        return Err(StoreError::CorruptMetadata {
+            path: path.to_path_buf(),
+            message: format!(
+                "line {line_number} has {} fields, expected {expected}",
+                fields.len()
+            ),
+        });
+    }
+
+    Ok(fields)
+}
+
+fn encode_field(value: &str) -> String {
+    let mut encoded = String::new();
+    for character in value.chars() {
+        match character {
+            '%' => encoded.push_str("%25"),
+            '\t' => encoded.push_str("%09"),
+            '\n' => encoded.push_str("%0A"),
+            '\r' => encoded.push_str("%0D"),
+            _ => encoded.push(character),
+        }
+    }
+    encoded
+}
+
+fn decode_field(value: &str) -> StoreResult<String> {
+    let mut decoded = String::new();
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(StoreError::CorruptMetadata {
+                    path: PathBuf::from("<field>"),
+                    message: "truncated percent escape".to_string(),
+                });
+            }
+            let hex = &value[index + 1..index + 3];
+            let byte = u8::from_str_radix(hex, 16).map_err(|_| StoreError::CorruptMetadata {
+                path: PathBuf::from("<field>"),
+                message: "invalid percent escape".to_string(),
+            })?;
+            decoded.push(byte as char);
+            index += 3;
+        } else {
+            let character = value[index..]
+                .chars()
+                .next()
+                .expect("index is inside the string");
+            decoded.push(character);
+            index += character.len_utf8();
+        }
+    }
+    Ok(decoded)
+}
+
+fn read_optional_to_string(path: &Path) -> StoreResult<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn create_dir_all(path: impl AsRef<Path>) -> StoreResult<()> {
+    let path = path.as_ref();
+    fs::create_dir_all(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn canonical_folder(folder: &Path) -> StoreResult<PathBuf> {
+    if !folder.exists() {
+        return Err(StoreError::Io {
+            path: folder.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::NotFound, "folder does not exist"),
+        });
+    }
+    if !folder.is_dir() {
+        return Err(StoreError::Io {
+            path: folder.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "path is not a folder"),
+        });
+    }
+
+    fs::canonicalize(folder).map_err(|source| StoreError::Io {
+        path: folder.to_path_buf(),
+        source,
+    })
+}
+
+fn current_timestamp() -> String {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+
+    format!("unix:{}", duration.as_secs())
+}
+
+fn revision_entries_file_name(id: &FolderRevisionId) -> String {
+    format!("{}.tsv", id.as_str())
+}
+
+fn temp_file_name() -> String {
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+
+    format!("object-{}-{nanos}-{counter}.tmp", process::id())
+}
+
+fn cleanup_temp_file(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn store_boundary_names_loom_owned_state() {
@@ -53,5 +1181,94 @@ mod tests {
         assert!(boundary.stores_folder_revisions);
         assert!(boundary.stores_cursors);
         assert!(CRATE_ROLE.contains("Loom"));
+    }
+
+    #[test]
+    fn object_cache_writes_bytes_by_content_identity() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = ObjectCache::open(dir.path()).expect("cache opens");
+        let content = b"hello from Loom objects";
+
+        let object = cache.write_bytes(content).expect("object writes");
+        let duplicate = cache.write_bytes(content).expect("duplicate object writes");
+
+        assert_eq!(object.id(), duplicate.id());
+        assert_eq!(object.size_bytes(), content.len() as u64);
+        assert!(object.object_ref().starts_with("objects/b3/"));
+        assert_eq!(cache.read(object.id()).expect("object reads"), content);
+        assert_eq!(count_files(&dir.path().join(OBJECTS_DIR)), 1);
+    }
+
+    #[test]
+    fn local_store_initializes_metadata_and_reopens() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("shared");
+        fs::create_dir_all(&folder).expect("folder creates");
+
+        let opened = LocalStore::open_or_init(&folder).expect("store initializes");
+        assert!(opened.initialized());
+        assert!(opened.store().store_root().join(METADATA_DIR).is_dir());
+
+        let reopened = LocalStore::open_or_init(&folder).expect("store reopens");
+        assert!(!reopened.initialized());
+        assert_eq!(
+            opened.store().shared_folder().id(),
+            reopened.store().shared_folder().id()
+        );
+    }
+
+    #[test]
+    fn coalesces_file_versions_into_folder_revisions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("shared");
+        fs::create_dir_all(&folder).expect("folder creates");
+        let store = LocalStore::open_or_init(&folder)
+            .expect("store initializes")
+            .into_store();
+        let object = store
+            .object_cache()
+            .write_bytes(b"readme")
+            .expect("object writes");
+        let version = FileVersion::new(
+            FileVersionId::new("file-version-1").expect("file version id"),
+            "README.md",
+            FileKind::File,
+            Some(object.id().clone()),
+            Some(object.size_bytes()),
+            "unix:1",
+        )
+        .expect("file version creates");
+
+        let first = store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, &[version.clone()])
+            .expect("revision creates");
+        let second = store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, &[version])
+            .expect("unchanged revision reuses latest");
+
+        assert!(first.created());
+        assert_eq!(first.diff().created(), 1);
+        assert!(!second.created());
+        assert_eq!(store.revisions().expect("revisions list").len(), 1);
+        assert_eq!(store.file_versions().expect("versions list").len(), 1);
+    }
+
+    fn count_files(path: &Path) -> usize {
+        let mut count = 0;
+        let mut stack = vec![path.to_path_buf()];
+
+        while let Some(path) = stack.pop() {
+            for entry in fs::read_dir(path).expect("directory reads") {
+                let entry = entry.expect("directory entry reads");
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    stack.push(entry_path);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+
+        count
     }
 }
