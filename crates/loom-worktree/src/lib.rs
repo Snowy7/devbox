@@ -104,6 +104,23 @@ pub struct RestoreEngine<'a> {
     store: &'a LocalStore,
 }
 
+#[derive(Debug, Clone)]
+struct RestorePlan {
+    removed: Vec<FileVersion>,
+    materialized: Vec<PlannedMaterialization>,
+}
+
+#[derive(Debug, Clone)]
+enum PlannedMaterialization {
+    Directory {
+        version: FileVersion,
+    },
+    File {
+        version: FileVersion,
+        bytes: Vec<u8>,
+    },
+}
+
 impl<'a> RestoreEngine<'a> {
     pub fn new(store: &'a LocalStore) -> Self {
         Self { store }
@@ -143,24 +160,25 @@ impl<'a> RestoreEngine<'a> {
             .collect::<BTreeMap<_, _>>();
 
         validate_restore_entries(revision)?;
-
         let mut removed = current
             .file_versions()
             .iter()
             .filter(|version| !target_paths.contains(version.path()))
+            .cloned()
             .collect::<Vec<_>>();
         removed.sort_by(|left, right| {
             path_to_store_string(right.path()).cmp(&path_to_store_string(left.path()))
         });
-
-        for version in removed {
-            remove_current_entry(current.root(), version)?;
-        }
+        let removed_paths = removed
+            .iter()
+            .map(|version| version.path().to_path_buf())
+            .collect::<BTreeSet<_>>();
 
         let mut entries = revision.entries().to_vec();
         entries.sort_by(|left, right| {
             path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
         });
+        let mut materialized = Vec::new();
 
         for entry in entries {
             let version = file_versions.get(entry.file_version_id()).ok_or_else(|| {
@@ -178,7 +196,29 @@ impl<'a> RestoreEngine<'a> {
                     ),
                 });
             }
-            materialize_file_version(self.store, current.root(), version)?;
+            materialized.push(preflight_materialization(
+                self.store,
+                current.root(),
+                version,
+                &removed_paths,
+            )?);
+        }
+
+        for version in &removed {
+            preflight_remove_current_entry(current.root(), version, &removed_paths)?;
+        }
+
+        let plan = RestorePlan {
+            removed,
+            materialized,
+        };
+
+        for version in &plan.removed {
+            remove_current_entry(current.root(), version)?;
+        }
+
+        for materialization in &plan.materialized {
+            materialize_planned_entry(current.root(), materialization)?;
         }
 
         Ok(RestoreReport {
@@ -474,16 +514,64 @@ fn validate_restore_entries(revision: &FolderRevision) -> CaptureResult<()> {
     Ok(())
 }
 
-fn materialize_file_version(
+fn preflight_materialization(
     store: &LocalStore,
     root: &Path,
     version: &FileVersion,
-) -> CaptureResult<()> {
+    removed_paths: &BTreeSet<PathBuf>,
+) -> CaptureResult<PlannedMaterialization> {
     let target =
         validate_materialized_relative_path(version.path()).map(|_| root.join(version.path()))?;
 
     match version.kind() {
         FileKind::Directory => {
+            if let Ok(metadata) = fs::symlink_metadata(&target) {
+                if metadata.file_type().is_symlink() {
+                    return Err(CaptureError::UnsafeRestore {
+                        path: version.path().to_path_buf(),
+                        reason: "refusing to replace a symlink".to_string(),
+                    });
+                }
+            }
+
+            Ok(PlannedMaterialization::Directory {
+                version: version.clone(),
+            })
+        }
+        FileKind::File => {
+            let object_id = version
+                .object_id()
+                .ok_or_else(|| CaptureError::UnsafeRestore {
+                    path: version.path().to_path_buf(),
+                    reason: "file version has no content object".to_string(),
+                })?;
+            let bytes = store
+                .object_cache()
+                .read(object_id)
+                .map_err(CaptureError::Store)?;
+
+            preflight_file_target(version.path(), &target, removed_paths)?;
+
+            Ok(PlannedMaterialization::File {
+                version: version.clone(),
+                bytes,
+            })
+        }
+        FileKind::Symlink | FileKind::Unsupported => Err(CaptureError::UnsafeRestore {
+            path: version.path().to_path_buf(),
+            reason: "only regular files and directories can be restored safely".to_string(),
+        }),
+    }
+}
+
+fn materialize_planned_entry(
+    root: &Path,
+    materialization: &PlannedMaterialization,
+) -> CaptureResult<()> {
+    match materialization {
+        PlannedMaterialization::Directory { version } => {
+            let target = validate_materialized_relative_path(version.path())
+                .map(|_| root.join(version.path()))?;
             if let Ok(metadata) = fs::symlink_metadata(&target) {
                 if metadata.file_type().is_symlink() {
                     return Err(CaptureError::UnsafeRestore {
@@ -504,26 +592,36 @@ fn materialize_file_version(
                 source,
             })
         }
-        FileKind::File => {
-            let object_id = version
-                .object_id()
-                .ok_or_else(|| CaptureError::UnsafeRestore {
-                    path: version.path().to_path_buf(),
-                    reason: "file version has no content object".to_string(),
-                })?;
-            let bytes = store
-                .object_cache()
-                .read(object_id)
-                .map_err(CaptureError::Store)?;
+        PlannedMaterialization::File { version, bytes } => {
+            let target = validate_materialized_relative_path(version.path())
+                .map(|_| root.join(version.path()))?;
             prepare_file_target(version.path(), &target)?;
             fs::write(&target, bytes).map_err(|source| CaptureError::Io {
                 path: target,
                 source,
             })
         }
-        FileKind::Symlink | FileKind::Unsupported => Err(CaptureError::UnsafeRestore {
-            path: version.path().to_path_buf(),
-            reason: "only regular files and directories can be restored safely".to_string(),
+    }
+}
+
+fn preflight_file_target(
+    relative_path: &Path,
+    target: &Path,
+    removed_paths: &BTreeSet<PathBuf>,
+) -> CaptureResult<()> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to overwrite a symlink".to_string(),
+        }),
+        Ok(metadata) if metadata.is_dir() => {
+            ensure_directory_clear_after_planned_removals(relative_path, target, removed_paths)
+        }
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CaptureError::Io {
+            path: target.to_path_buf(),
+            source,
         }),
     }
 }
@@ -547,6 +645,35 @@ fn prepare_file_target(relative_path: &Path, target: &Path) -> CaptureResult<()>
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(CaptureError::Io {
             path: target.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn preflight_remove_current_entry(
+    root: &Path,
+    version: &FileVersion,
+    removed_paths: &BTreeSet<PathBuf>,
+) -> CaptureResult<()> {
+    let target =
+        validate_materialized_relative_path(version.path()).map(|_| root.join(version.path()))?;
+
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CaptureError::UnsafeRestore {
+            path: version.path().to_path_buf(),
+            reason: "refusing to remove a symlink".to_string(),
+        }),
+        Ok(metadata) if metadata.is_dir() => {
+            ensure_directory_clear_after_planned_removals(version.path(), &target, removed_paths)
+        }
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(CaptureError::UnsafeRestore {
+            path: version.path().to_path_buf(),
+            reason: "unsupported filesystem entry".to_string(),
+        }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CaptureError::Io {
+            path: target,
             source,
         }),
     }
@@ -579,6 +706,33 @@ fn remove_current_entry(root: &Path, version: &FileVersion) -> CaptureResult<()>
             source,
         }),
     }
+}
+
+fn ensure_directory_clear_after_planned_removals(
+    relative_path: &Path,
+    target: &Path,
+    removed_paths: &BTreeSet<PathBuf>,
+) -> CaptureResult<()> {
+    for entry in fs::read_dir(target).map_err(|source| CaptureError::Io {
+        path: target.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| CaptureError::Io {
+            path: target.to_path_buf(),
+            source,
+        })?;
+        let child_relative_path = relative_path.join(entry.file_name());
+        if !removed_paths.contains(&child_relative_path) {
+            return Err(CaptureError::UnsafeRestore {
+                path: child_relative_path,
+                reason:
+                    "refusing to remove or replace a directory containing unplanned local entries"
+                        .to_string(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_materialized_relative_path(relative_path: &Path) -> CaptureResult<()> {
@@ -1226,6 +1380,43 @@ mod tests {
             fixture.read("node_modules/pkg/index.js"),
             "module.exports = true;\n"
         );
+    }
+
+    #[test]
+    fn restore_missing_target_object_leaves_worktree_unchanged() {
+        let fixture = TestFolder::new();
+        fixture.write("README.md", "before\n");
+        let first_capture = fixture.capture();
+        let readme_object_id = first_capture
+            .file_versions()
+            .iter()
+            .find(|version| version.path() == Path::new("README.md"))
+            .and_then(FileVersion::object_id)
+            .cloned()
+            .expect("readme has an object");
+        let first_revision = fixture
+            .store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, first_capture.file_versions())
+            .expect("revision creates")
+            .revision()
+            .clone();
+
+        fs::remove_file(fixture.store.object_cache().path_for(&readme_object_id))
+            .expect("checkpoint object removes");
+        fixture.write("README.md", "after\n");
+        fixture.write("new.txt", "temporary\n");
+        let current = fixture.capture();
+
+        let error = RestoreEngine::new(&fixture.store)
+            .restore(&first_revision, &current)
+            .expect_err("restore refuses missing object before mutation");
+
+        assert!(matches!(
+            error,
+            CaptureError::Store(StoreError::MissingObject { .. })
+        ));
+        assert_eq!(fixture.read("README.md"), "after\n");
+        assert_eq!(fixture.read("new.txt"), "temporary\n");
     }
 
     #[test]
