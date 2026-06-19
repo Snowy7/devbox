@@ -232,6 +232,72 @@ fn sync_refuses_divergent_remote_cursor() {
 }
 
 #[test]
+fn clone_refusal_leaves_existing_loom_target_unchanged() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::create_dir_all(&target).expect("target creates");
+    std::fs::write(source.join("README.md"), "remote source\n").expect("source readme writes");
+    std::fs::write(target.join("local.txt"), "local target\n").expect("target local writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    let sync = run_loom(["sync", source.to_str().expect("UTF-8 path")]);
+    assert_success(&sync);
+    let remote_revision = value_after(&stdout(&sync), "Synced revision: ");
+
+    assert_success(&run_loom(["track", target.to_str().expect("UTF-8 path")]));
+    let metadata_dir = target.join(".loom").join("metadata");
+    let shared_folder_before =
+        std::fs::read_to_string(metadata_dir.join("shared_folder.tsv")).expect("shared reads");
+    let file_versions_before =
+        std::fs::read_to_string(metadata_dir.join("file_versions.tsv")).expect("files read");
+    let revisions_before =
+        std::fs::read_to_string(metadata_dir.join("revisions.tsv")).expect("revisions read");
+    let object_count_before = count_files(&target.join(".loom").join("objects"));
+
+    let clone = run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!clone.status.success());
+    assert!(stderr(&clone).contains("already contains a Loom store"));
+    assert_eq!(
+        std::fs::read_to_string(metadata_dir.join("shared_folder.tsv")).expect("shared rereads"),
+        shared_folder_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(metadata_dir.join("file_versions.tsv")).expect("files reread"),
+        file_versions_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(metadata_dir.join("revisions.tsv")).expect("revisions reread"),
+        revisions_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join("local.txt")).expect("local reads"),
+        "local target\n"
+    );
+    assert_eq!(
+        count_files(&target.join(".loom").join("objects")),
+        object_count_before
+    );
+    assert!(!std::fs::read_to_string(metadata_dir.join("revisions.tsv"))
+        .expect("revisions reread")
+        .contains(&remote_revision));
+}
+
+#[test]
 fn restore_refuses_secret_blocked_working_files() {
     let dir = tempfile::tempdir().expect("temp dir");
     let fixture = dir.path().join("fixture");
@@ -309,4 +375,23 @@ fn value_after(output: &str, prefix: &str) -> String {
         .expect("prefixed line exists")
         .trim()
         .to_string()
+}
+
+fn count_files(path: &std::path::Path) -> usize {
+    let mut count = 0;
+    let mut stack = vec![path.to_path_buf()];
+
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(path).expect("directory reads") {
+            let entry = entry.expect("directory entry reads");
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+
+    count
 }

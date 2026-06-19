@@ -8,8 +8,8 @@ use loom_sync::{
     LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
-    diff_revision_to_capture, CaptureEngine, CaptureRequest, RestoreEngine, WorktreeCapture,
-    WorktreeDiff,
+    diff_revision_to_capture, evaluate_directory_policy, CaptureEngine, CaptureRequest,
+    DirectoryPolicyDecision, RestoreEngine, WorktreeCapture, WorktreeDiff,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -418,12 +418,7 @@ fn run_clone(args: &[String]) -> Result<(), String> {
         .get_pack(&remote_revision_id)
         .map_err(|error| error.to_string())?;
 
-    if target.exists() && !target.is_dir() {
-        return Err(format!(
-            "clone target is not a folder: {}",
-            target.display()
-        ));
-    }
+    validate_clone_target_before_mutation(&target)?;
     fs::create_dir_all(&target).map_err(|error| error.to_string())?;
     let store = LocalStore::init_clone(
         &target,
@@ -469,6 +464,65 @@ fn run_clone(args: &[String]) -> Result<(), String> {
         report.diff().created().len()
     );
     Ok(())
+}
+
+fn validate_clone_target_before_mutation(target: &Path) -> Result<(), String> {
+    if !target.exists() {
+        return Ok(());
+    }
+    if !target.is_dir() {
+        return Err(format!(
+            "clone target is not a folder: {}",
+            target.display()
+        ));
+    }
+    if target.join(".loom").exists() {
+        return Err(
+            "clone refused because the target already contains a Loom store; choose an untracked folder"
+                .to_string(),
+        );
+    }
+    if let Some(source_path) = first_clone_source_entry(target, target)? {
+        return Err(format!(
+            "clone refused because the target already contains source files; choose an empty folder: {}",
+            path_to_store_string(&source_path)
+        ));
+    }
+
+    Ok(())
+}
+
+fn first_clone_source_entry(root: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("could not inspect clone target {}: {error}", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("could not inspect clone target {}: {error}", path.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let entry_path = entry.path();
+        let relative_path = entry_path
+            .strip_prefix(root)
+            .map_err(|error| error.to_string())?
+            .to_path_buf();
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
+            format!(
+                "could not inspect clone target entry {}: {error}",
+                entry_path.display()
+            )
+        })?;
+
+        if metadata.is_dir() {
+            match evaluate_directory_policy(&relative_path) {
+                DirectoryPolicyDecision::Ignore { .. } => continue,
+                DirectoryPolicyDecision::Include => return Ok(Some(relative_path)),
+            }
+        }
+
+        return Ok(Some(relative_path));
+    }
+
+    Ok(None)
 }
 
 fn capture_and_coalesce(

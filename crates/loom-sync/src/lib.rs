@@ -8,8 +8,8 @@ use loom_pack::{LoomPack, PackCompression, PackError, PackManifest, PackObject};
 use loom_store::{LocalStore, StoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub const LOCAL_FILESYSTEM_REMOTE_KIND: &str = "local-fs";
@@ -69,6 +69,17 @@ pub struct LocalFilesystemRemote {
     root: PathBuf,
 }
 
+#[derive(Debug)]
+struct CursorLock {
+    path: PathBuf,
+}
+
+impl Drop for CursorLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 impl LocalFilesystemRemote {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -119,6 +130,43 @@ impl LocalFilesystemRemote {
 
         Ok(self.cursors_dir().join(format!("{cursor_id}.txt")))
     }
+
+    fn cursor_lock_path(&self, cursor_id: &str) -> SyncResult<PathBuf> {
+        if cursor_id.trim().is_empty()
+            || cursor_id.contains('/')
+            || cursor_id.contains('\\')
+            || cursor_id.contains("..")
+        {
+            return Err(SyncError::InvalidCursor(cursor_id.to_string()));
+        }
+
+        Ok(self.cursors_dir().join(format!("{cursor_id}.lock")))
+    }
+
+    fn acquire_cursor_lock(&self, cursor_id: &str) -> SyncResult<CursorLock> {
+        let path = self.cursor_lock_path(cursor_id)?;
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(source) =
+                    file.write_all(format!("pid={}\n", std::process::id()).as_bytes())
+                {
+                    let _ = fs::remove_file(&path);
+                    return Err(SyncError::Io {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+                Ok(CursorLock { path })
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                Err(SyncError::CursorLockBusy {
+                    cursor_id: cursor_id.to_string(),
+                    path,
+                })
+            }
+            Err(source) => Err(SyncError::Io { path, source }),
+        }
+    }
 }
 
 impl LoomRemote for LocalFilesystemRemote {
@@ -144,6 +192,7 @@ impl LoomRemote for LocalFilesystemRemote {
         next: &FolderRevisionId,
     ) -> SyncResult<()> {
         self.ensure_layout()?;
+        let _lock = self.acquire_cursor_lock(cursor_id)?;
         let current = self.get_cursor(cursor_id)?;
         if current.as_ref() != expected {
             return Err(SyncError::CursorConflict {
@@ -331,6 +380,10 @@ pub enum SyncError {
     NoLocalRevision,
     MissingRevision(FolderRevisionId),
     InvalidCursor(String),
+    CursorLockBusy {
+        cursor_id: String,
+        path: PathBuf,
+    },
     CursorConflict {
         cursor_id: String,
         expected: Option<FolderRevisionId>,
@@ -359,6 +412,11 @@ impl fmt::Display for SyncError {
             Self::InvalidCursor(cursor_id) => {
                 write!(f, "invalid cursor id '{cursor_id}'")
             }
+            Self::CursorLockBusy { cursor_id, path } => write!(
+                f,
+                "cursor {cursor_id} compare-and-set is already in progress at {}",
+                path.display()
+            ),
             Self::CursorConflict {
                 cursor_id,
                 expected,
@@ -392,6 +450,7 @@ impl std::error::Error for SyncError {
             Self::NoLocalRevision
             | Self::MissingRevision(_)
             | Self::InvalidCursor(_)
+            | Self::CursorLockBusy { .. }
             | Self::CursorConflict { .. }
             | Self::DivergentState { .. } => None,
         }
@@ -529,5 +588,62 @@ mod tests {
                 local_revision_id
             } if remote_revision_id == other_revision && local_revision_id == *local_revision.id()
         ));
+    }
+
+    #[test]
+    fn cursor_compare_and_set_refuses_when_lock_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let remote = LocalFilesystemRemote::new(dir.path().join("remote"));
+        remote.ensure_layout().expect("layout creates");
+        let lock_path = remote
+            .cursor_lock_path(DEFAULT_CURSOR_ID)
+            .expect("lock path creates");
+        fs::write(&lock_path, "held by test\n").expect("lock writes");
+        let next = FolderRevisionId::new("folder-revision-b3-next").expect("revision id");
+
+        let error = remote
+            .compare_and_set_cursor(DEFAULT_CURSOR_ID, None, &next)
+            .expect_err("locked cursor refuses compare-and-set");
+
+        assert!(matches!(error, SyncError::CursorLockBusy { .. }));
+        assert_eq!(
+            remote
+                .get_cursor(DEFAULT_CURSOR_ID)
+                .expect("cursor remains readable"),
+            None
+        );
+        assert!(lock_path.exists());
+    }
+
+    #[test]
+    fn cursor_compare_and_set_rechecks_current_value() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let remote = LocalFilesystemRemote::new(dir.path().join("remote"));
+        let first = FolderRevisionId::new("folder-revision-b3-first").expect("revision id");
+        let second = FolderRevisionId::new("folder-revision-b3-second").expect("revision id");
+        remote
+            .compare_and_set_cursor(DEFAULT_CURSOR_ID, None, &first)
+            .expect("first cursor writes");
+
+        let error = remote
+            .compare_and_set_cursor(DEFAULT_CURSOR_ID, None, &second)
+            .expect_err("stale expectation refuses");
+
+        assert!(matches!(
+            error,
+            SyncError::CursorConflict {
+                expected,
+                actual,
+                attempted,
+                ..
+            } if expected.is_none() && actual == Some(first.clone()) && attempted == second
+        ));
+        assert_eq!(
+            remote
+                .get_cursor(DEFAULT_CURSOR_ID)
+                .expect("cursor reads")
+                .as_ref(),
+            Some(&first)
+        );
     }
 }
