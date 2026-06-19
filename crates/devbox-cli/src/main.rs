@@ -60,6 +60,13 @@ fn main() -> ExitCode {
             println!("devbox {VERSION}");
             ExitCode::SUCCESS
         }
+        Some("login") => run_product_placeholder("login", &args[1..]),
+        Some("share") => run_product_placeholder("share", &args[1..]),
+        Some("clone") => run_product_placeholder("clone", &args[1..]),
+        Some("manage") => run_product_placeholder("manage", &args[1..]),
+        Some("pause") => run_product_placeholder("pause", &args[1..]),
+        Some("resume") => run_product_placeholder("resume", &args[1..]),
+        Some("unlink") => run_product_placeholder("unlink", &args[1..]),
         Some("scan") => run_scan(&args[1..]),
         Some("init") => run_init(&args[1..]),
         Some("auth") => run_auth(&args[1..]),
@@ -85,6 +92,43 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn run_product_placeholder(command: &'static str, args: &[String]) -> ExitCode {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_product_command_help(command);
+        return ExitCode::SUCCESS;
+    }
+
+    println!("devbox {command}: not implemented yet");
+    println!(
+        "Product boundary: Devbox configures accounts, machines, and shared folders; Loom owns folder state and sync semantics."
+    );
+    println!("Compatibility: existing alpha commands remain available under init/auth/devices/metadata/sync/snapshot/changes/conflicts/secrets.");
+    ExitCode::SUCCESS
+}
+
+fn print_product_command_help(command: &str) {
+    let usage = match command {
+        "login" => "devbox login",
+        "share" => "devbox share <FOLDER>",
+        "clone" => "devbox clone <SHARED_FOLDER>",
+        "manage" => "devbox manage <SHARED_FOLDER>",
+        "pause" => "devbox pause <SHARED_FOLDER>",
+        "resume" => "devbox resume <SHARED_FOLDER>",
+        "unlink" => "devbox unlink <SHARED_FOLDER>",
+        _ => "devbox <COMMAND>",
+    };
+
+    println!("devbox {command}");
+    println!();
+    println!("Usage: {usage}");
+    println!();
+    println!("Status: not implemented yet");
+    println!("Devbox will handle product/account setup here and delegate folder state to Loom.");
 }
 
 fn run_changes(args: &[String]) -> ExitCode {
@@ -6662,7 +6706,11 @@ fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::err
 fn run_status(args: &[String]) -> ExitCode {
     match args {
         [] => {
-            println!("devbox: status placeholder; pass --db <PATH> to inspect local metadata");
+            println!("devbox status: not implemented yet");
+            println!(
+                "Product boundary: future status will summarize shared folders, machines, and sync health."
+            );
+            println!("Compatibility: pass --db <PATH> to inspect local alpha metadata.");
             ExitCode::SUCCESS
         }
         [flag, path] if flag == "--db" => match status_for_db(path) {
@@ -6766,7 +6814,17 @@ fn print_help() {
     println!();
     println!("Usage: devbox <COMMAND>");
     println!();
-    println!("Commands:");
+    println!("Product commands:");
+    println!("  login      Authenticate this machine with Devbox");
+    println!("  share      Share a folder through Devbox hosted services");
+    println!("  clone      Materialize a shared folder on this machine");
+    println!("  manage     Manage a shared folder");
+    println!("  status     Show shared-folder and machine sync status");
+    println!("  pause      Pause sync for a shared folder");
+    println!("  resume     Resume sync for a shared folder");
+    println!("  unlink     Remove this machine's link to a shared folder");
+    println!();
+    println!("Alpha compatibility commands:");
     println!("  scan       Classify a local directory and explain default policy exclusions");
     println!("  init       Initialize local account and current-device identity");
     println!("  auth       Manage local/mock auth and dev account/session proof status");
@@ -6777,7 +6835,8 @@ fn print_help() {
     println!("  changes    Scan, list, and clear the pending local change feed");
     println!("  conflicts  Compare, persist, list, and update divergent snapshot conflicts");
     println!("  secrets    Manage explicit local secret policy records");
-    println!("  status     Placeholder status, or inspect local metadata with --db <PATH>");
+    println!("  status --db <PATH>");
+    println!("             Inspect local alpha metadata");
     println!("  restore    Placeholder for snapshot restore");
     println!("  explain    Placeholder for policy and sync explanations");
     println!();

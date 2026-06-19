@@ -1,0 +1,8 @@
+# Architecture Docs
+
+Start with [Full-Scale Project Shape](full-scale-project-shape.md) for the Loom/Devbox split.
+
+Most other pages in this directory are legacy alpha architecture records. They are kept because the
+old alpha code still compiles and remains useful for smoke tests, but their `project` and `snapshot`
+language is compatibility-era terminology. New architecture work should use shared folder, object,
+file version, folder revision, checkpoint, pin, cursor, sandbox, and overlay.

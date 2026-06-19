@@ -1,5 +1,8 @@
 # MVP Technical Foundation
 
+> Legacy alpha note: this page records the pre-Loom alpha implementation and may use `project` or `snapshot` for compatibility-era concepts. New work should say shared folder, file version, folder revision, checkpoint, pin, and cursor.
+
+
 Historical terminology note: this architecture slice uses `project` as an early implementation term
 for a scoped shared folder. New product language should say shared folder. Loom is the codename for
 the deeper source-control primitive underneath Devbox; `devbox-git` is compatibility support for

@@ -1,0 +1,32 @@
+[area]
+name = "devbox"
+status = "intended-home"
+description = "Hosted product platform for Loom-powered shared folders."
+
+[[crate]]
+name = "devbox-cli"
+current_path = "../crates/devbox-cli"
+intended_path = "crates/devbox-cli"
+owns = ["product CLI", "login", "share", "clone", "machine management"]
+
+[[crate]]
+name = "devbox-api"
+current_path = "../crates/devbox-api"
+intended_path = "crates/devbox-api"
+owns = ["hosted API boundary", "auth routes", "device routes", "shared-folder routes", "Loom remote API facade"]
+
+[[crate]]
+name = "devbox-platform"
+current_path = "../crates/devbox-platform"
+intended_path = "crates/devbox-platform"
+owns = ["accounts", "machines", "shared-folder membership", "hosted discovery"]
+
+[[legacy_crate]]
+name = "devbox-auth"
+current_path = "../crates/devbox-auth"
+compatibility_note = "Alpha account/session/device trust implementation; migrate platform pieces into Devbox crates without breaking tests."
+
+[[legacy_crate]]
+name = "devbox-metadata"
+current_path = "../crates/devbox-metadata"
+compatibility_note = "Alpha hosted metadata implementation; future work should split platform API from Loom remote behavior."

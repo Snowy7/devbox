@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/devbox-auth",
+    "crates/devbox-api",
     "crates/devbox-cli",
     "crates/devbox-conflict",
     "crates/devbox-core",
@@ -8,9 +9,18 @@ members = [
     "crates/devbox-git",
     "crates/devbox-materialize",
     "crates/devbox-metadata",
+    "crates/devbox-platform",
     "crates/devbox-snapshot",
     "crates/devbox-store",
     "crates/devbox-sync",
+    "crates/loom-cli",
+    "crates/loom-core",
+    "crates/loom-daemon",
+    "crates/loom-git",
+    "crates/loom-pack",
+    "crates/loom-store",
+    "crates/loom-sync",
+    "crates/loom-worktree",
 ]
 resolver = "2"
 

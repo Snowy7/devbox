@@ -23,6 +23,32 @@ This repository currently contains the product foundation and MVP planning artif
 - [.product](.product/README.md) - product strategy, market sizing, KPIs, architecture, roadmap, and sources.
 - [.plans](.plans/README.md) - MVP execution plan with static HTML pages for phases, architecture, and validation.
 - [docs/alpha-cli-distribution.md](docs/alpha-cli-distribution.md) - GitHub Release packaging, R2/shared-bucket setup, and two-device alpha smoke testing.
+- [docs/devbox-and-loom.md](docs/devbox-and-loom.md) - the product/engine split and the vocabulary to use in new work.
+
+## Current Code Shape
+
+The workspace now has first-class Loom and Devbox platform boundaries:
+
+- `crates/loom-core` owns canonical Loom vocabulary: objects, file versions, folder revisions,
+  checkpoints, pins, cursors, shared folders, and folder scopes.
+- `crates/loom-cli` provides the `loom` binary and the MVP command shape: `track`, `status`,
+  `history`, `checkpoint`, `restore`, `sync`, and `clone`.
+- `crates/loom-store`, `crates/loom-worktree`, `crates/loom-pack`, `crates/loom-sync`,
+  `crates/loom-daemon`, and `crates/loom-git` are compileable skeleton boundaries for follow-up
+  engine work.
+- `crates/devbox-platform` is the hosted/product boundary for accounts, machines, shared-folder
+  membership, and hosted discovery.
+- `crates/devbox-api` is the hosted API skeleton for auth, devices, shared folders, Loom remote API
+  facade, and object-access routes.
+- `crates/devbox-cli` remains the `devbox` product CLI. It now exposes product-level placeholders
+  such as `login`, `share`, and `clone` while keeping the existing alpha commands available.
+- `loom/` and `devbox/` are the intended top-level homes. Their manifests map the current flat
+  workspace crates to the future physical layout.
+
+The older `devbox-*` alpha crates still compile and intentionally keep their historical
+`project`/`snapshot` naming where changing it would create churn. Legacy alpha architecture docs
+are marked as compatibility-era notes. Future PRs should migrate engine responsibilities into Loom
+crates without silently deleting the alpha behavior.
 
 ## Current Stack Direction
 

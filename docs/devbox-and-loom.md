@@ -87,3 +87,31 @@ Use these words in new product docs:
 - **Loom** for the internal source-control primitive.
 
 Use **project** only when referring to existing code/API/schema terms that have not been renamed yet.
+
+## Current Rust Workspace
+
+The PR 1 skeleton creates top-level `loom/` and `devbox/` areas, but keeps the repository's existing
+flat `crates/` workspace while the alpha packaging and tests still depend on it. The area manifests
+map the current crate locations to their intended homes:
+
+```text
+loom/manifest.toml      Loom area ownership map
+devbox/manifest.toml    Devbox area ownership map
+crates/loom-core       canonical Loom vocabulary and pure domain types
+crates/loom-store      future object and metadata store boundary
+crates/loom-worktree   future shared-folder scan/materialize/restore boundary
+crates/loom-pack       future pack/export/import boundary
+crates/loom-sync       future remote protocol and reconciliation boundary
+crates/loom-daemon     future background capture/sync process
+crates/loom-cli        `loom` command surface
+crates/loom-git        Git compatibility analyzer boundary
+crates/devbox-platform hosted product/platform boundary
+crates/devbox-api      hosted API boundary for PR6
+crates/devbox-cli      Devbox product CLI plus alpha compatibility commands
+```
+
+This is intentionally a compileable foundation rather than a full engine move. The old alpha crates
+continue to compile so the existing local snapshot, sync, metadata, and desktop smoke paths remain
+available while Loom becomes the place where folder-state decisions move over time. Old alpha docs
+and commands that still say `project` or `snapshot` are compatibility surfaces, not the model for new
+work.

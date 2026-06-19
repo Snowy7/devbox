@@ -15,6 +15,28 @@ Devbox decides who owns it, where it is hosted, and who can access it.
 
 ## Repository Shape
 
+PR 1 starts with these crates in the current flat Rust workspace:
+
+```text
+loom/
+devbox/
+crates/loom-core
+crates/loom-store
+crates/loom-worktree
+crates/loom-pack
+crates/loom-sync
+crates/loom-daemon
+crates/loom-cli
+crates/loom-git
+crates/devbox-api
+crates/devbox-platform
+```
+
+The top-level `loom/` and `devbox/` areas contain manifests that make them the intended homes while
+the current flat workspace keeps alpha builds stable. That gives follow-up PRs a real compileable
+boundary before any deeper directory reshuffle. The longer-term target may still split Loom and
+Devbox into separate top-level folders:
+
 ```text
 devbox/
   loom/
@@ -32,8 +54,8 @@ devbox/
     crates/
       devbox-auth/
       devbox-platform/
-      devbox-remote/
       devbox-api/
+      devbox-remote/
       devbox-cli/
 
   apps/
@@ -224,4 +246,3 @@ Web app later: TypeScript + React
 Docs: Markdown/MDX
 Infra: Docker/YAML/scripts
 ```
-

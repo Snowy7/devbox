@@ -1,5 +1,8 @@
 # Snapshot Manifest Foundation
 
+> Legacy alpha note: this page records the pre-Loom alpha implementation and may use `project` or `snapshot` for compatibility-era concepts. New work should say shared folder, file version, folder revision, checkpoint, pin, and cursor.
+
+
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder and `snapshot` for the current implementation term for immutable folder state. New
 product language should say shared folder and Loom checkpoint/revision language when discussing the

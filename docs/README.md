@@ -21,3 +21,8 @@ Start with [Devbox And Loom](devbox-and-loom.md) before reading older architectu
 
 For the intended full-scale repository and language split, read
 [Full-Scale Project Shape](architecture/full-scale-project-shape.md).
+
+The top-level [Loom area](../loom/README.md) and [Devbox area](../devbox/README.md) are now present.
+Their manifests map today's flat workspace crates to the intended future homes. Most older
+architecture pages are legacy alpha records and are marked with a compatibility note when they still
+use implementation terms such as `project` or `snapshot`.

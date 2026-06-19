@@ -1,5 +1,8 @@
 # Developer Folder Scanner and Policy Foundation
 
+> Legacy alpha note: this page records the pre-Loom alpha implementation and may use `project` or `snapshot` for compatibility-era concepts. New work should say shared folder, file version, folder revision, checkpoint, pin, and cursor.
+
+
 Historical terminology note: this architecture slice uses `project` for detected developer folders.
 New product language should say shared folder or detected folder. Devbox is not built around
 projects; it analyzes whatever folder the user shares. Loom is the codename for the deeper
