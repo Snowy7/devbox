@@ -829,6 +829,11 @@ pub trait MetadataStore {
         project_id: &str,
         snapshot_id: &str,
     ) -> MetadataResult<Option<PublishedSnapshotRecord>>;
+    fn latest_snapshot(
+        &self,
+        account_id: &str,
+        project_id: &str,
+    ) -> MetadataResult<Option<PublishedSnapshotRecord>>;
     fn cursor(
         &self,
         account_id: &str,
@@ -1265,6 +1270,23 @@ impl MetadataStore for InMemoryMetadataStore {
                 project_id.to_string(),
                 snapshot_id.to_string(),
             ))
+            .cloned())
+    }
+
+    fn latest_snapshot(
+        &self,
+        account_id: &str,
+        project_id: &str,
+    ) -> MetadataResult<Option<PublishedSnapshotRecord>> {
+        Ok(self
+            .snapshots
+            .values()
+            .filter(|record| record.account_id == account_id && record.project_id == project_id)
+            .max_by(|left, right| {
+                left.published_at
+                    .cmp(&right.published_at)
+                    .then_with(|| left.snapshot_id.cmp(&right.snapshot_id))
+            })
             .cloned())
     }
 
@@ -2222,6 +2244,37 @@ impl MetadataStore for SqliteMetadataStore {
             .map_err(MetadataError::from)
     }
 
+    fn latest_snapshot(
+        &self,
+        account_id: &str,
+        project_id: &str,
+    ) -> MetadataResult<Option<PublishedSnapshotRecord>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT
+                    account_id,
+                    project_id,
+                    snapshot_id,
+                    parent_snapshot_id,
+                    manifest_object_key,
+                    manifest_hash,
+                    manifest_entry_count,
+                    total_size_bytes,
+                    published_by_device_id,
+                    published_at
+                FROM metadata_snapshots
+                WHERE account_id = ?1 AND project_id = ?2
+                ORDER BY published_at DESC, snapshot_id DESC
+                LIMIT 1
+                "#,
+                params![account_id, project_id],
+                snapshot_from_row,
+            )
+            .optional()
+            .map_err(MetadataError::from)
+    }
+
     fn cursor(
         &self,
         account_id: &str,
@@ -2486,6 +2539,10 @@ where
             put(publish_snapshot::<S>),
         )
         .route(
+            "/v1/projects/:project_id/snapshots/latest",
+            get(get_latest_snapshot::<S>),
+        )
+        .route(
             "/v1/projects/:project_id/snapshots/:snapshot_id",
             get(get_snapshot::<S>),
         )
@@ -2747,6 +2804,28 @@ where
         .ok_or_else(|| MetadataError::NotFound {
             entity: "snapshot",
             id: snapshot_id,
+        })?;
+    Ok(Json(record))
+}
+
+async fn get_latest_snapshot<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> MetadataResult<Json<PublishedSnapshotRecord>>
+where
+    S: MetadataStore,
+{
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
+    let record = store
+        .latest_snapshot(context.account_id(), &project_id)?
+        .ok_or_else(|| MetadataError::NotFound {
+            entity: "snapshot",
+            id: "latest".to_string(),
         })?;
     Ok(Json(record))
 }
@@ -4265,6 +4344,43 @@ mod tests {
             second.manifest_object_key,
             "manifests/other/snapshot-a.json.enc"
         );
+    }
+
+    #[tokio::test]
+    async fn latest_snapshot_route_returns_newest_project_record() {
+        let mut store = seeded_store();
+        store
+            .publish_snapshot(PublishSnapshotRequest {
+                snapshot_id: "snapshot-old".to_string(),
+                manifest_object_key: "manifests/snapshot-old.json.enc".to_string(),
+                published_at: "2026-06-18T10:01:00Z".to_string(),
+                ..publish_request()
+            })
+            .expect("old snapshot publishes");
+        store
+            .publish_snapshot(PublishSnapshotRequest {
+                snapshot_id: "snapshot-new".to_string(),
+                manifest_object_key: "manifests/snapshot-new.json.enc".to_string(),
+                published_at: "2026-06-18T10:02:00Z".to_string(),
+                ..publish_request()
+            })
+            .expect("new snapshot publishes");
+        let app = app(store);
+
+        let response = app
+            .oneshot(json_request::<()>(
+                Method::GET,
+                "/v1/projects/project-devbox/snapshots/latest",
+                &(),
+                true,
+            ))
+            .await
+            .expect("latest response returns");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("snapshot-new"));
+        assert!(!body.contains("snapshot-old.json.enc"));
     }
 
     #[test]

@@ -9,8 +9,9 @@ local change feed.
 recursively, debounces filesystem event bursts, and runs the same scan orchestration used by
 `devbox changes scan`. The daemon writes only local SQLite metadata and local BLAKE3 cache blobs.
 
-It does not upload objects, download objects, encrypt, compress, pack files, pair devices, resolve
-conflicts, manage teams, replace Git, or drive the Electron UI.
+`devbox-daemon sync` is now the separate live-sync automation layer. `watch` itself still does not
+upload objects, download objects, encrypt, compress, pack files, pair devices, resolve conflicts,
+manage teams, replace Git, or drive the Electron UI.
 
 ## Event to Scan Flow
 
@@ -50,6 +51,7 @@ instead of appending duplicates.
 
 ## Deferred Work
 
-Cloud sync remains deferred: no R2/S3 object backend, encryption, compression, packfiles, garbage
-collection, device cursors, materialization, or conflict handling is part of this local watcher
-foundation.
+Cloud sync remains outside `watch`: R2/S3 object transport, hosted metadata discovery, device
+cursors, materialization, and conflict handling live in the newer `devbox-daemon sync` foundation
+and the lower-level sync/materialize crates. Garbage collection, background retries, and Electron
+IPC remain deferred.

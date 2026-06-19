@@ -75,17 +75,23 @@ session tokens, object credentials, provider API tokens, fingerprints, or hashes
 `object-access resolve` calls the hosted API with `Authorization: Bearer <session-token>` loaded
 from `DEVBOX_SESSION_TOKEN` by default. It prints the authorized shared-bucket prefix and states that
 client object credentials are not returned. Direct S3-compatible CLI flags remain suitable only for
-trusted operator smoke tests with locally supplied env credentials; external testers should use the
-server-mediated object path as it is wired into sync transport.
+trusted operator smoke tests with locally supplied env credentials.
+
+`devbox-daemon sync --remote-kind s3` now consumes the same object-access grant as a live alpha
+preflight. The daemon refuses shared-bucket live sync unless the hosted API/lease/session-token-env
+are configured and the returned grant matches the requested bucket, region, account/project scope,
+and prefix. The grant still does not return client credentials; the direct S3 provider loads only
+environment variable names for the current transport.
 
 ## Sync Integration Boundary
 
 The existing local filesystem and S3-compatible object providers remain unchanged. S3-compatible
-remotes can still be configured with environment variable names. The new grant model gives future
-sync commands a safe hosted authorization boundary for one shared bucket: authenticate the account
-session, resolve the project prefix, then use a server-mediated object proxy or signed URL path for
-encrypted object bytes. It intentionally does not pretend that Cloudflare R2 can mint arbitrary
-per-prefix end-user temporary credentials for us.
+remotes can still be configured with environment variable names. The grant model now gives live
+daemon sync a safe hosted authorization boundary for one shared bucket: authenticate the account
+session, resolve the project prefix, verify the requested S3 prefix, then use the current trusted
+operator S3 provider for encrypted object bytes. The future hosted object proxy or signed URL path
+will remove client-side object credentials from external tester machines. This intentionally does
+not pretend that Cloudflare R2 can mint arbitrary per-prefix end-user temporary credentials for us.
 
 ## Deferred
 

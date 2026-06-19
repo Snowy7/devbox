@@ -36,6 +36,7 @@
   -> local daemon API
 Rust daemon
   -> watcher + scanner
+  -> live sync scan/publish/pull loop
   -> policy engine
   -> snapshot engine
   -> SQLite metadata
@@ -58,7 +59,7 @@ Rust backend
           </thead>
           <tbody>
             <tr><td><code>apps/desktop</code></td><td>Electron + React + TypeScript desktop app.</td></tr>
-            <tr><td><code>crates/devbox-daemon</code></td><td>Long-running local daemon.</td></tr>
+            <tr><td><code>crates/devbox-daemon</code></td><td>Long-running local daemon for watch, debounce, live snapshot publish, latest-remote pull, and safe materialization orchestration.</td></tr>
             <tr><td><code>crates/devbox-cli</code></td><td>Command-line interface using clap.</td></tr>
             <tr><td><code>crates/devbox-metadata</code></td><td>Hosted metadata API foundation with explicit mock-dev auth, account-session auth, SQLite dev/test storage, published manifest discovery, and compare-and-set cursors.</td></tr>
             <tr><td><code>crates/devbox-core</code></td><td>Shared snapshot, policy, manifest, and storage types.</td></tr>
@@ -109,6 +110,7 @@ Rust backend
           <li>S3-compatible encrypted blob transport can target R2, AWS S3, or MinIO without printing or storing raw credentials.</li>
           <li>The hosted metadata API foundation models server-side accounts, devices, projects, published snapshot manifests, and compare-and-set cursors behind explicit mock-dev and account-session auth boundaries.</li>
           <li>Publish/import/materialize can opt into in-process mock-dev hosted metadata for manifest lookup and server-side cursor compare-and-set.</li>
+          <li>The daemon live sync loop reuses snapshot, metadata, encrypted remote, and materialize foundations to publish current work and pull latest remote state with deterministic test controls.</li>
           <li>A local identity is not cloud authentication or account ownership proof.</li>
           <li>The local/mock auth foundation models account session state, device approval, key envelopes, revocation, and device/project cursors in SQLite.</li>
           <li>The production-shaped auth boundary models external provider subject, verified email/domain, account id, session id, token hash, expiration, and revocation without OAuth.</li>

@@ -35,7 +35,10 @@ This repository currently contains the product foundation and MVP planning artif
   Hosted object-access resolution now returns account-session-authorized, project-scoped shared
   bucket prefixes such as `accounts/<account-id>/projects/<project-id>` through a server-mediated
   broker boundary, and fails closed unless the metadata server has server-managed object credentials
-  configured. Local
+  configured. The local daemon now has a live sync loop that can scan/debounce a project, persist an
+  idempotent live snapshot, publish encrypted objects, register hosted mock-dev metadata, discover
+  the latest published remote snapshot, and import or materialize it with cursor/conflict preflight.
+  Local
   pairing now includes receiver-generated join/complete handoff, so a paired laptop can install its
   own local account key envelope and materialize without opening the publisher DB or sharing its
   local device key with the source. It also
@@ -79,12 +82,15 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply`
 - `devbox secrets policy add --db <DB_PATH> --project <PROJECT_ID> --path <REL_PATH> --action block|template|envelope [--envelope-ref <REF>]`
 - `devbox secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]`
+- `devbox-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT> [--once]`
+- `devbox-daemon sync --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> [--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>] [--push|--pull|--two-way] <PROJECT_ROOT> [--once]`
 
 Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
 - `devbox sync publish-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>`
 - `devbox sync import-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --metadata-account <ACCOUNT_ID>`
 - `devbox sync materialize ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --metadata-account <ACCOUNT_ID>`
+- `devbox-daemon sync --pull --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-account <ACCOUNT_ID> --metadata-project <PROJECT_ID> --to <TARGET_DIR> --apply ...`
 
 For import/materialize, the hosted metadata account scope is either passed explicitly with
 `--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
@@ -93,8 +99,10 @@ legacy local/mock trust bootstrap. New paired receiver flows should run `devices
 its own local key state and does not need `--mock-key-source-db`. Invite-based hosted alpha login,
 session-auth hosted metadata request handling, and server-mediated object-access prefix grants now
 exist. The grant is the authorization boundary for a shared bucket; raw R2/S3 credentials are still
-not returned to tester clients. OAuth, object proxy/signed URL transfer, production deployment
-hardening, and UI onboarding remain deferred.
+not returned to tester clients. Live daemon sync with `--remote-kind s3` requires an object-access
+API/lease preflight and an explicit `--s3-prefix` matching the grant, while direct manual
+`devbox sync` S3 commands remain a trusted-operator smoke path. OAuth, object proxy/signed URL
+transfer, production deployment hardening, and UI onboarding remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

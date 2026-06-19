@@ -1,0 +1,104 @@
+# Live Sync Daemon Foundation
+
+This Phase 1 slice moves Devbox from manual publish/import commands toward "things are always
+synced" while keeping the alpha boundary conservative.
+
+## Scope
+
+`devbox-daemon sync` watches or scans a project root and runs a bounded live sync cycle:
+
+1. scan the local tree with the shared local change-feed scanner
+2. refuse unsafe cache/database paths and pending pairing identities
+3. persist the current snapshot with reason `live-sync`
+4. publish encrypted blobs and the encrypted manifest bundle
+5. optionally register hosted mock-dev metadata
+6. optionally discover the latest remote snapshot from hosted metadata
+7. import or materialize the remote snapshot with existing cursor/conflict preflight
+
+The deterministic alpha smoke path is:
+
+```text
+devbox-daemon sync \
+  --db <DB_PATH> \
+  --cache <CACHE_ROOT> \
+  --remote <REMOTE_DIR> \
+  --metadata-mode mock-dev-sqlite \
+  --metadata-db <METADATA_DB> \
+  --push \
+  --once \
+  <PROJECT_ROOT>
+```
+
+Receivers can discover the latest published snapshot for the remote project:
+
+```text
+devbox-daemon sync \
+  --db <RECEIVER_DB> \
+  --cache <RECEIVER_CACHE> \
+  --remote <REMOTE_DIR> \
+  --metadata-mode mock-dev-sqlite \
+  --metadata-db <METADATA_DB> \
+  --metadata-account <ACCOUNT_ID> \
+  --metadata-project <PROJECT_ID> \
+  --pull \
+  --to <TARGET_DIR> \
+  --apply \
+  --once \
+  <TARGET_DIR>
+```
+
+Without `--once`, the daemon uses the same recursive filesystem notifications, debounce planner,
+idle timeout, and bounded loop controls as `watch`. Filesystem events remain hints; each cycle
+reconciles by scanning the tree.
+
+## Safety
+
+Live sync fails closed when:
+
+- the local SQLite database or blob cache is inside the watched project
+- the local identity is missing or still pending pairing completion
+- snapshot construction finds secret-blocked entries
+- pull sees local pending changes before import/materialization
+- hosted latest-snapshot discovery is requested without mock-dev metadata configuration
+- cursor preflight detects divergent local and incoming snapshots
+- S3 live sync is missing object-access API/lease configuration or a grant-matching prefix
+
+Successful live publish clears pending local changes for the published project, because the current
+snapshot has become the remote candidate. Manual `devbox sync publish-snapshot` remains unchanged.
+
+## Hosted Metadata Discovery
+
+`devbox-metadata` now supports latest published snapshot lookup by `(account_id, project_id)`,
+including:
+
+```text
+GET /v1/projects/:project_id/snapshots/latest
+```
+
+The daemon uses the SQLite mock-dev store directly in local tests. A hosted client can use the HTTP
+route later without changing the discovery contract.
+
+## Shared Bucket Boundary
+
+For `--remote-kind s3`, live sync requires:
+
+- `--s3-prefix accounts/<account-id>/projects/<project-id>`
+- `--object-access-api <URL>`
+- `--object-access-lease <LEASE_ID>`
+- `--object-access-session-token-env <ENV>` (defaults to `DEVBOX_SESSION_TOKEN`)
+
+The daemon resolves the account-session object-access grant before opening the S3 provider and
+verifies the grant bucket, region, project, account when supplied, and prefix. The grant does not
+return raw object credentials. The current direct S3 provider still loads trusted-operator
+credentials from environment variable names; the hosted object proxy or signed URL transport remains
+future work.
+
+## Deferred
+
+This is an alpha automation foundation, not full Dropbox semantics. Deferred work remains:
+
+- background retry queues, durable leases, and resumable transfer state
+- hosted object proxy or signed URL transfer
+- automatic merge/apply resolution for non-empty divergent worktrees
+- Electron tray controls and daemon IPC
+- production OAuth/OIDC onboarding and provider-backed credential provisioning
