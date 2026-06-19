@@ -30,7 +30,7 @@ The current variables are:
 ```bash
 DEVBOX_R2_ENDPOINT=https://example-account-id.r2.cloudflarestorage.com
 DEVBOX_R2_BUCKET=devbox-alpha
-DEVBOX_R2_PREFIX=accounts/<account-id>/projects/<project-id>
+DEVBOX_R2_PREFIX=accounts/account-example/projects/project-example
 DEVBOX_R2_ACCESS_KEY_ID=replace-me
 DEVBOX_R2_SECRET_ACCESS_KEY=replace-me
 DEVBOX_METADATA_API=http://127.0.0.1:8787

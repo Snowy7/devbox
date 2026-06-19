@@ -2978,6 +2978,8 @@ pub fn managed_object_access_grant_for_account_session<S: MetadataStore>(
     broker_config: &ManagedObjectAccessBrokerConfig,
     now_unix: i64,
 ) -> MetadataResult<ManagedObjectAccessGrant> {
+    let required_capabilities =
+        normalize_object_access_required_capabilities(required_capabilities)?;
     if !broker_config.is_enabled() {
         return Err(MetadataError::InvalidRequest(
             "managed object access broker is not configured with server-managed object credentials"
@@ -3015,7 +3017,7 @@ pub fn managed_object_access_grant_for_account_session<S: MetadataStore>(
         }
     }
     ensure_lease_active(&record, now_unix)?;
-    ensure_required_capabilities(&record, required_capabilities)?;
+    ensure_required_capabilities(&record, &required_capabilities)?;
 
     let prefix = project_scoped_object_prefix(&session.account_id, &project_id)?;
     if let Some(lease_prefix) = record.prefix.as_deref() {
@@ -3401,6 +3403,20 @@ fn ensure_required_capabilities(
         }
     }
     Ok(())
+}
+
+fn normalize_object_access_required_capabilities(
+    required: &[ManagedObjectCapability],
+) -> MetadataResult<Vec<ManagedObjectCapability>> {
+    if required.is_empty() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object access request requires at least one capability".to_string(),
+        ));
+    }
+    let mut required = required.to_vec();
+    required.sort();
+    required.dedup();
+    Ok(required)
 }
 
 fn normalize_capabilities(
@@ -5260,6 +5276,23 @@ mod tests {
         assert!(body.contains("\"prefix\":\"accounts/account-alpha/projects/project-devbox\""));
         assert!(body.contains("\"credential_delivery\":\"server-mediated-broker\""));
         assert!(!body.contains("DEVBOX_R2_SECRET_ACCESS_KEY"));
+
+        let empty_capabilities = router
+            .clone()
+            .oneshot(session_json_request(
+                Method::POST,
+                "/v1/projects/project-devbox/object-access/lease-alpha",
+                &ManagedObjectAccessRequest {
+                    required_capabilities: vec![],
+                },
+                raw_token,
+            ))
+            .await
+            .expect("empty-capability response returns");
+        assert_eq!(empty_capabilities.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(empty_capabilities).await;
+        assert!(body.contains("managed object access request requires at least one capability"));
+        assert!(!body.contains(raw_token));
 
         let mut disabled_store = InMemoryMetadataStore::default();
         seed_verified_account_session_and_project(&mut disabled_store);
