@@ -17,6 +17,8 @@ handlers for:
 - server-side cursor compare-and-set updates
 - account/session/project-scoped managed object credential lease records for future hosted
   R2/S3/MinIO-compatible credential provisioning
+- account-session-only object-access grant resolution for one shared object bucket with
+  per-account/project prefixes
 
 The service can run locally with SQLite and has an in-memory store for fast unit tests. That keeps
 normal CI free of Docker, Postgres, cloud credentials, and network services while preserving a clear
@@ -47,6 +49,18 @@ Managed object credential lease records store redacted provider references, endp
 shape, optional project scope, capabilities, expiration, revocation, and rotation generation only.
 They do not store raw access keys, secret keys, session tokens, provider API tokens, OAuth tokens, or
 raw credential hashes.
+
+Hosted object-access grants are resolved at:
+
+```text
+POST /v1/projects/:project_id/object-access/:lease_id
+```
+
+The request carries required capabilities. The response carries endpoint/bucket/region shape, the
+canonical prefix `accounts/<account-id>/projects/<project-id>`, capabilities, expiration, rotation
+generation, redacted credential reference, and `credential_delivery=server-mediated-broker`. It does
+not return object credentials. The handler refuses mock-dev headers, wildcard project scope,
+mismatched lease prefixes, expired/revoked leases, and missing broker configuration.
 
 ## Cursor Safety
 
@@ -90,6 +104,9 @@ for device, project, snapshot, cursor, and managed lease scoping. Mock-dev mode 
 header/body identity mismatches so tests and local sync flows stay explicit. Session-auth mode does
 not trust caller-supplied account ids in request bodies.
 
+Managed object access grants are stricter: they require account-session bearer auth even when the
+server is running with mock-dev headers enabled for local development.
+
 The hosted alpha API can mint those sessions through one-time invite login:
 
 ```text
@@ -119,6 +136,10 @@ the local metadata service configuration without making a network request.
 a one-time invite in the hosted metadata SQLite DB. `devbox auth hosted-login --api <URL> --email
 <EMAIL> --invite-code-env <ENV>` exchanges it for a bearer session token.
 
+`devbox metadata object-access resolve --api <URL> --session-token-env DEVBOX_SESSION_TOKEN
+--project <PROJECT_ID> --lease <LEASE_ID>` calls the hosted grant endpoint and prints only redacted
+object-access metadata plus the authorized shared-bucket prefix.
+
 The local/mock publish, import, and materialize flows can now opt into an in-process mock-dev SQLite
 metadata store. That wiring registers published snapshot metadata, discovers manifest object keys by
 project/snapshot id, and advances device/project cursors with hosted compare-and-set semantics while
@@ -133,15 +154,17 @@ The SQLite schema is deliberately small and maps one-to-one to future Postgres t
 - `metadata_projects`
 - `metadata_snapshots`
 - `metadata_device_project_cursors`
+- `metadata_managed_object_credential_leases`
 
 Moving to Postgres should replace the `MetadataStore` implementation, not the project-scoped API
-models or cursor compare-and-set contract.
+models, cursor compare-and-set contract, or object-access grant contract.
 
 ## Deferred
 
 Remaining Phase 1 work includes:
 
 - OAuth/OIDC sign-in and hosted provider proof verification beyond one-time alpha invites
+- hosted object proxy or signed URL transport for encrypted object bytes
 - live managed R2/S3 credential provisioning and rotation against provider APIs
 - production pairing UX and live recovery/rotation flows
 - automatic conflict merge/apply resolution and user-facing conflict UI
