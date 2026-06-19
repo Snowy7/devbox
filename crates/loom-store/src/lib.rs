@@ -12,8 +12,9 @@
 //! these responsibilities migrate into Loom-owned crates.
 
 use loom_core::{
-    Cursor, FileKind, FileVersion, FileVersionId, FolderEntry, FolderRevision, FolderRevisionId,
-    FolderScope, LoomError, ObjectId, RevisionBoundary, SharedFolder, SharedFolderId,
+    Checkpoint, CheckpointId, Cursor, FileKind, FileVersion, FileVersionId, FolderEntry,
+    FolderRevision, FolderRevisionId, FolderScope, LoomError, ObjectId, Pin, PinId,
+    RevisionBoundary, SharedFolder, SharedFolderId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -35,6 +36,8 @@ const SHARED_FOLDER_FILE: &str = "shared_folder.tsv";
 const FILE_VERSIONS_FILE: &str = "file_versions.tsv";
 const REVISIONS_FILE: &str = "revisions.tsv";
 const REVISIONS_DIR: &str = "revisions";
+const CHECKPOINTS_FILE: &str = "checkpoints.tsv";
+const PINS_FILE: &str = "pins.tsv";
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -369,13 +372,56 @@ pub struct StoredFolderState {
     pub cursors: Vec<Cursor>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedRevisionTarget {
+    Revision(FolderRevision),
+    Checkpoint {
+        checkpoint: Checkpoint,
+        revision: FolderRevision,
+    },
+}
+
+impl ResolvedRevisionTarget {
+    pub fn revision(&self) -> &FolderRevision {
+        match self {
+            Self::Revision(revision) => revision,
+            Self::Checkpoint { revision, .. } => revision,
+        }
+    }
+
+    pub fn checkpoint(&self) -> Option<&Checkpoint> {
+        match self {
+            Self::Revision(_) => None,
+            Self::Checkpoint { checkpoint, .. } => Some(checkpoint),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum StoreError {
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     Loom(LoomError),
-    MissingStore { folder: PathBuf },
-    MissingObject { id: ObjectId, path: PathBuf },
-    CorruptMetadata { path: PathBuf, message: String },
+    MissingStore {
+        folder: PathBuf,
+    },
+    MissingObject {
+        id: ObjectId,
+        path: PathBuf,
+    },
+    MissingRevisionTarget {
+        target: String,
+    },
+    AmbiguousRevisionTarget {
+        target: String,
+        candidates: Vec<String>,
+    },
+    CorruptMetadata {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -392,6 +438,15 @@ impl fmt::Display for StoreError {
             Self::MissingObject { id, path } => {
                 write!(f, "object {id} is missing at {}", path.display())
             }
+            Self::MissingRevisionTarget { target } => write!(
+                f,
+                "revision or checkpoint '{target}' does not match local Loom history"
+            ),
+            Self::AmbiguousRevisionTarget { target, candidates } => write!(
+                f,
+                "revision or checkpoint '{target}' is ambiguous: {}",
+                candidates.join(", ")
+            ),
             Self::CorruptMetadata { path, message } => {
                 write!(
                     f,
@@ -410,6 +465,8 @@ impl std::error::Error for StoreError {
             Self::Loom(error) => Some(error),
             Self::MissingStore { .. }
             | Self::MissingObject { .. }
+            | Self::MissingRevisionTarget { .. }
+            | Self::AmbiguousRevisionTarget { .. }
             | Self::CorruptMetadata { .. } => None,
         }
     }
@@ -529,12 +586,140 @@ impl LocalStore {
             .collect()
     }
 
+    pub fn revision_by_id(&self, id: &FolderRevisionId) -> StoreResult<Option<FolderRevision>> {
+        for header in self.load_revision_headers()? {
+            if &header.id == id {
+                return self.read_revision(&header).map(Some);
+            }
+        }
+
+        Ok(None)
+    }
+
     pub fn latest_revision(&self) -> StoreResult<Option<FolderRevision>> {
         let Some(header) = self.load_revision_headers()?.into_iter().last() else {
             return Ok(None);
         };
 
         self.read_revision(&header).map(Some)
+    }
+
+    pub fn checkpoints(&self) -> StoreResult<Vec<Checkpoint>> {
+        self.load_checkpoints()
+    }
+
+    pub fn pins(&self) -> StoreResult<Vec<Pin>> {
+        self.load_pins()
+    }
+
+    pub fn create_checkpoint(
+        &self,
+        revision: &FolderRevision,
+        message: impl Into<String>,
+    ) -> StoreResult<Checkpoint> {
+        let message = message.into();
+        let created_at = current_timestamp();
+        let checkpoint = Checkpoint::new(
+            checkpoint_id(revision.id().as_str(), &message, &created_at)?,
+            revision.id().clone(),
+            message,
+            created_at.clone(),
+        )?;
+
+        self.append_checkpoint(&checkpoint)?;
+        self.pin_revision(
+            revision.id(),
+            format!("checkpoint {}", checkpoint.id().as_str()),
+        )?;
+
+        Ok(checkpoint)
+    }
+
+    pub fn pin_revision(
+        &self,
+        revision_id: &FolderRevisionId,
+        reason: impl Into<String>,
+    ) -> StoreResult<Pin> {
+        let reason = reason.into();
+        let created_at = current_timestamp();
+        let pin = Pin::new(
+            pin_id(revision_id.as_str(), &reason, &created_at)?,
+            revision_id.clone(),
+            reason,
+            created_at,
+        )?;
+
+        self.append_pin(&pin)?;
+        Ok(pin)
+    }
+
+    pub fn resolve_revision_target(&self, target: &str) -> StoreResult<ResolvedRevisionTarget> {
+        let target = target.trim();
+        let revisions = self.revisions()?;
+        let checkpoints = self.checkpoints()?;
+        let mut matches = Vec::new();
+
+        for revision in &revisions {
+            if revision.id().as_str() == target {
+                return Ok(ResolvedRevisionTarget::Revision(revision.clone()));
+            }
+        }
+
+        for checkpoint in &checkpoints {
+            if checkpoint.id().as_str() == target {
+                return self.resolved_checkpoint(checkpoint.clone());
+            }
+        }
+
+        let message_matches = checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.message() == target)
+            .cloned()
+            .collect::<Vec<_>>();
+        match message_matches.len() {
+            0 => {}
+            1 => return self.resolved_checkpoint(message_matches[0].clone()),
+            _ => {
+                return Err(StoreError::AmbiguousRevisionTarget {
+                    target: target.to_string(),
+                    candidates: message_matches
+                        .iter()
+                        .map(|checkpoint| checkpoint.id().to_string())
+                        .collect(),
+                });
+            }
+        }
+
+        for revision in revisions {
+            if revision.id().as_str().starts_with(target) {
+                matches.push(ResolvedRevisionTarget::Revision(revision));
+            }
+        }
+
+        for checkpoint in checkpoints {
+            if checkpoint.id().as_str().starts_with(target) {
+                matches.push(self.resolved_checkpoint(checkpoint)?);
+            }
+        }
+
+        match matches.len() {
+            0 => Err(StoreError::MissingRevisionTarget {
+                target: target.to_string(),
+            }),
+            1 => Ok(matches.remove(0)),
+            _ => Err(StoreError::AmbiguousRevisionTarget {
+                target: target.to_string(),
+                candidates: matches
+                    .iter()
+                    .map(|candidate| match candidate {
+                        ResolvedRevisionTarget::Revision(revision) => revision.id().to_string(),
+                        ResolvedRevisionTarget::Checkpoint { checkpoint, .. } => {
+                            checkpoint.id().to_string()
+                        }
+                    })
+                    .collect(),
+            }),
+        }
     }
 
     pub fn coalesce_folder_revision(
@@ -638,6 +823,118 @@ impl LocalStore {
         }
 
         Ok(written)
+    }
+
+    fn resolved_checkpoint(&self, checkpoint: Checkpoint) -> StoreResult<ResolvedRevisionTarget> {
+        let revision = self
+            .revision_by_id(checkpoint.revision_id())?
+            .ok_or_else(|| StoreError::CorruptMetadata {
+                path: self.metadata_path(CHECKPOINTS_FILE),
+                message: format!(
+                    "checkpoint {} references missing revision {}",
+                    checkpoint.id(),
+                    checkpoint.revision_id()
+                ),
+            })?;
+
+        Ok(ResolvedRevisionTarget::Checkpoint {
+            checkpoint,
+            revision,
+        })
+    }
+
+    fn load_checkpoints(&self) -> StoreResult<Vec<Checkpoint>> {
+        let path = self.metadata_path(CHECKPOINTS_FILE);
+        let Some(contents) = read_optional_to_string(&path)? else {
+            return Ok(Vec::new());
+        };
+        let mut checkpoints = Vec::new();
+
+        for (line_index, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = split_fields(&path, line_index + 1, line, 4)?;
+            checkpoints.push(Checkpoint::new(
+                CheckpointId::new(decode_field(&fields[0])?)?,
+                FolderRevisionId::new(decode_field(&fields[1])?)?,
+                decode_field(&fields[2])?,
+                decode_field(&fields[3])?,
+            )?);
+        }
+
+        Ok(checkpoints)
+    }
+
+    fn load_pins(&self) -> StoreResult<Vec<Pin>> {
+        let path = self.metadata_path(PINS_FILE);
+        let Some(contents) = read_optional_to_string(&path)? else {
+            return Ok(Vec::new());
+        };
+        let mut pins = Vec::new();
+
+        for (line_index, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = split_fields(&path, line_index + 1, line, 4)?;
+            pins.push(Pin::new(
+                PinId::new(decode_field(&fields[0])?)?,
+                FolderRevisionId::new(decode_field(&fields[1])?)?,
+                decode_field(&fields[2])?,
+                decode_field(&fields[3])?,
+            )?);
+        }
+
+        Ok(pins)
+    }
+
+    fn append_checkpoint(&self, checkpoint: &Checkpoint) -> StoreResult<()> {
+        let path = self.metadata_path(CHECKPOINTS_FILE);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+        file.write_all(
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                encode_field(checkpoint.id().as_str()),
+                encode_field(checkpoint.revision_id().as_str()),
+                encode_field(checkpoint.message()),
+                encode_field(checkpoint.created_at()),
+            )
+            .as_bytes(),
+        )
+        .map_err(|source| StoreError::Io { path, source })
+    }
+
+    fn append_pin(&self, pin: &Pin) -> StoreResult<()> {
+        let path = self.metadata_path(PINS_FILE);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+        file.write_all(
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                encode_field(pin.id().as_str()),
+                encode_field(pin.revision_id().as_str()),
+                encode_field(pin.reason()),
+                encode_field(pin.created_at()),
+            )
+            .as_bytes(),
+        )
+        .map_err(|source| StoreError::Io { path, source })
     }
 
     fn load_file_versions(&self) -> StoreResult<BTreeMap<FileVersionId, FileVersion>> {
@@ -950,6 +1247,30 @@ fn folder_revision_id(
         .map_err(Into::into)
 }
 
+fn checkpoint_id(revision_id: &str, message: &str, created_at: &str) -> StoreResult<CheckpointId> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"loom-checkpoint-v1\n");
+    hasher.update(revision_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(message.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(created_at.as_bytes());
+
+    CheckpointId::new(format!("checkpoint-b3-{}", hasher.finalize().to_hex())).map_err(Into::into)
+}
+
+fn pin_id(revision_id: &str, reason: &str, created_at: &str) -> StoreResult<PinId> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"loom-pin-v1\n");
+    hasher.update(revision_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(reason.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(created_at.as_bytes());
+
+    PinId::new(format!("pin-b3-{}", hasher.finalize().to_hex())).map_err(Into::into)
+}
+
 fn file_version_row(version: &FileVersion) -> String {
     format!(
         "{}\t{}\t{}\t{}\t{}\t{}\n",
@@ -1251,6 +1572,67 @@ mod tests {
         assert!(!second.created());
         assert_eq!(store.revisions().expect("revisions list").len(), 1);
         assert_eq!(store.file_versions().expect("versions list").len(), 1);
+    }
+
+    #[test]
+    fn checkpoints_are_durable_pins_on_folder_revisions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("shared");
+        fs::create_dir_all(&folder).expect("folder creates");
+        let store = LocalStore::open_or_init(&folder)
+            .expect("store initializes")
+            .into_store();
+        let object = store
+            .object_cache()
+            .write_bytes(b"readme")
+            .expect("object writes");
+        let version = FileVersion::new(
+            FileVersionId::new("file-version-1").expect("file version id"),
+            "README.md",
+            FileKind::File,
+            Some(object.id().clone()),
+            Some(object.size_bytes()),
+            "unix:1",
+        )
+        .expect("file version creates");
+        let coalesced = store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, &[version])
+            .expect("revision creates");
+
+        let checkpoint = store
+            .create_checkpoint(coalesced.revision(), "before change")
+            .expect("checkpoint creates");
+        let reopened = LocalStore::open(&folder).expect("store reopens");
+        let checkpoints = reopened.checkpoints().expect("checkpoints load");
+        let pins = reopened.pins().expect("pins load");
+
+        assert_eq!(checkpoints, vec![checkpoint.clone()]);
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].revision_id(), coalesced.revision().id());
+
+        match reopened
+            .resolve_revision_target(checkpoint.id().as_str())
+            .expect("checkpoint resolves")
+        {
+            ResolvedRevisionTarget::Checkpoint {
+                checkpoint: resolved,
+                revision,
+            } => {
+                assert_eq!(resolved, checkpoint);
+                assert_eq!(revision.id(), coalesced.revision().id());
+            }
+            ResolvedRevisionTarget::Revision(_) => panic!("expected checkpoint target"),
+        }
+
+        match reopened
+            .resolve_revision_target("before change")
+            .expect("message resolves")
+        {
+            ResolvedRevisionTarget::Checkpoint { revision, .. } => {
+                assert_eq!(revision.id(), coalesced.revision().id());
+            }
+            ResolvedRevisionTarget::Revision(_) => panic!("expected checkpoint target"),
+        }
     }
 
     fn count_files(path: &Path) -> usize {
