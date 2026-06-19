@@ -115,8 +115,8 @@ Rust backend
           <li>Hosted metadata request handlers resolve bearer session tokens through the hosted session store and scope device/project/snapshot/cursor operations to the authenticated account.</li>
           <li>The hosted metadata server can run as a single-instance alpha API with `/ready`, one-time invite login, bearer session status/logout, and mock-dev auth disabled by default.</li>
           <li>Hosted metadata now models managed object credential leases with authenticated account/session lookup, optional project scope, R2/S3/MinIO-compatible provider references, capabilities, expiration, revocation, and rotation generation.</li>
-          <li>Production-shaped pairing recovery and rotation primitives model recovery grant references, device rotation intents, revocation, and key-envelope rotation generation without live recovery UX.</li>
-          <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a second SQLite/cache context, deferred materialize cursor commit, and safe restore-engine apply.</li>
+          <li>Production-shaped pairing recovery and rotation primitives model receiver-generated join/complete handoff, recovery grant references, device rotation intents, revocation, and key-envelope rotation generation without live recovery UX.</li>
+          <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a paired second SQLite/cache context, decrypt without publisher DB access, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
           <li>Local conflict records compare and persist divergent snapshot rows without source bytes.</li>
           <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>

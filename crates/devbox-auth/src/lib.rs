@@ -8,7 +8,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 const ENVELOPE_MAGIC: &[u8] = b"devbox-key-envelope-v1\n";
+const COMPLETION_ENVELOPE_MAGIC: &[u8] = b"devbox-pairing-completion-v1\n";
 const TOKEN_PREFIX: &str = "devbox-pair-v1";
+const JOIN_PREFIX: &str = "devbox-join-v1";
+const COMPLETION_PREFIX: &str = "devbox-complete-v1";
+const PUBLIC_ID_MAX_LEN: usize = 128;
+pub const REMOTE_DEVICE_KEY_SENTINEL_HEX: &str =
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
@@ -286,11 +292,14 @@ impl PairingInvitationToken {
         {
             return Err(AuthError::MalformedInvitation);
         }
+        let id = pairing_join_identifier(fields[1], "invitation id", "pairing-")?;
+        let account_id = pairing_join_identifier(fields[2], "account id", "account-")?;
+        let inviter_device_id = pairing_join_identifier(fields[3], "inviter device id", "device-")?;
 
         Ok(Self {
-            id: fields[1].to_string(),
-            account_id: fields[2].to_string(),
-            inviter_device_id: fields[3].to_string(),
+            id,
+            account_id,
+            inviter_device_id,
             expires_at_unix,
             secret_hex: fields[5].to_string(),
         })
@@ -305,6 +314,22 @@ impl PairingInvitationToken {
 
     pub fn secret_hash_hex(&self) -> String {
         hash_secret_hex(&self.secret_hex)
+    }
+
+    fn completion_key_hex(&self) -> AuthResult<String> {
+        let secret = decode_key_hex(&self.secret_hex, "pairing invitation secret")?;
+        let mut material = Vec::with_capacity(
+            self.id.len() + self.account_id.len() + self.inviter_device_id.len() + secret.len() + 3,
+        );
+        material.extend_from_slice(self.id.as_bytes());
+        material.push(0);
+        material.extend_from_slice(self.account_id.as_bytes());
+        material.push(0);
+        material.extend_from_slice(self.inviter_device_id.as_bytes());
+        material.push(0);
+        material.extend_from_slice(&secret);
+        let key = blake3::derive_key("devbox pairing completion key v1", &material);
+        Ok(hex_encode(&key))
     }
 }
 
@@ -360,6 +385,146 @@ impl fmt::Debug for PairingApproval {
             .field("device", &self.device)
             .field("envelope", &self.envelope)
             .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairingJoinRequest {
+    pub invitation_id: String,
+    pub account_id: String,
+    pub inviter_device_id: String,
+    pub receiver_device_id: String,
+}
+
+impl fmt::Debug for PairingJoinRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingJoinRequest")
+            .field("invitation_id", &self.invitation_id)
+            .field("account_id", &self.account_id)
+            .field("inviter_device_id", &self.inviter_device_id)
+            .field("receiver_device_id", &self.receiver_device_id)
+            .finish()
+    }
+}
+
+impl PairingJoinRequest {
+    pub fn parse(value: &str) -> AuthResult<Self> {
+        let fields = value.split('|').collect::<Vec<_>>();
+        if fields.len() != 5 || fields[0] != JOIN_PREFIX {
+            return Err(AuthError::MalformedInvitation);
+        }
+        if fields[1].is_empty()
+            || fields[2].is_empty()
+            || fields[3].is_empty()
+            || fields[4].is_empty()
+        {
+            return Err(AuthError::MalformedInvitation);
+        }
+        let invitation_id = pairing_join_identifier(fields[1], "invitation id", "pairing-")?;
+        let account_id = pairing_join_identifier(fields[2], "account id", "account-")?;
+        let inviter_device_id = pairing_join_identifier(fields[3], "inviter device id", "device-")?;
+        let receiver_device_id =
+            pairing_join_identifier(fields[4], "receiver device id", "device-")?;
+
+        Ok(Self {
+            invitation_id,
+            account_id,
+            inviter_device_id,
+            receiver_device_id,
+        })
+    }
+
+    pub fn expose_for_cli(&self) -> String {
+        format!(
+            "{JOIN_PREFIX}|{}|{}|{}|{}",
+            self.invitation_id, self.account_id, self.inviter_device_id, self.receiver_device_id
+        )
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairingCompletion {
+    pub account_id: String,
+    pub device_id: String,
+    pub invitation_id: String,
+    pub envelope: KeyEnvelope,
+}
+
+impl fmt::Debug for PairingCompletion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingCompletion")
+            .field("account_id", &self.account_id)
+            .field("device_id", &self.device_id)
+            .field("invitation_id", &self.invitation_id)
+            .field("envelope", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PairingCompletion {
+    pub fn parse(value: &str) -> AuthResult<Self> {
+        let fields = value.split('|').collect::<Vec<_>>();
+        if fields.len() != 10 || fields[0] != COMPLETION_PREFIX {
+            return Err(AuthError::MalformedInvitation);
+        }
+        let rotation_generation = fields[9]
+            .parse::<u64>()
+            .map_err(|_| AuthError::MalformedInvitation)?;
+        if fields[1..9].iter().any(|field| field.is_empty())
+            || fields[6] != fields[1]
+            || hex_decode(fields[7]).is_none()
+        {
+            return Err(AuthError::MalformedInvitation);
+        }
+        let envelope = KeyEnvelope {
+            id: fields[4].to_string(),
+            account_id: fields[1].to_string(),
+            device_id: fields[2].to_string(),
+            key_ref: fields[5].to_string(),
+            ciphertext_hex: fields[7].to_string(),
+            created_at: fields[8].to_string(),
+            rotation_generation,
+        };
+        Ok(Self {
+            account_id: fields[1].to_string(),
+            device_id: fields[2].to_string(),
+            invitation_id: fields[3].to_string(),
+            envelope,
+        })
+    }
+
+    pub fn expose_for_cli(&self) -> String {
+        format!(
+            "{COMPLETION_PREFIX}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.account_id,
+            self.device_id,
+            self.invitation_id,
+            self.envelope.id,
+            self.envelope.key_ref,
+            self.envelope.account_id,
+            self.envelope.ciphertext_hex,
+            self.envelope.created_at,
+            self.envelope.rotation_generation
+        )
+    }
+
+    pub fn open_with_token(&self, token: &PairingInvitationToken) -> AuthResult<String> {
+        if self.invitation_id != token.id
+            || self.account_id != token.account_id
+            || self.envelope.account_id != self.account_id
+            || self.envelope.device_id != self.device_id
+            || self.envelope.key_ref != "pairing-completion-token-v1"
+        {
+            return Err(AuthError::MalformedInvitation);
+        }
+        let completion_key_hex = token.completion_key_hex()?;
+        let aad = pairing_completion_aad(&self.invitation_id, &self.envelope);
+        open_encrypted_key_envelope(
+            &self.envelope,
+            &completion_key_hex,
+            &aad,
+            COMPLETION_ENVELOPE_MAGIC,
+        )
     }
 }
 
@@ -688,29 +853,7 @@ pub fn approve_pairing_invitation(
     now: &str,
     now_unix: i64,
 ) -> AuthResult<PairingApproval> {
-    if stored.status != "pending" {
-        return Err(AuthError::InvitationNotPending {
-            invitation_id: stored.id.clone(),
-            status: stored.status.clone(),
-        });
-    }
-    if stored.account_id != token.account_id || stored.account_id != identity.account_id {
-        return Err(AuthError::AccountMismatch {
-            expected: stored.account_id.clone(),
-            actual: token.account_id.clone(),
-        });
-    }
-    if stored.id != token.id || stored.inviter_device_id != token.inviter_device_id {
-        return Err(AuthError::MalformedInvitation);
-    }
-    if stored.expires_at_unix <= now_unix {
-        return Err(AuthError::InvitationExpired {
-            invitation_id: stored.id.clone(),
-        });
-    }
-    if stored.secret_hash_hex != token.secret_hash_hex() {
-        return Err(AuthError::InvitationSecretMismatch);
-    }
+    validate_pairing_invitation(identity, stored, token, now_unix)?;
 
     let display_name = if device_name.trim().is_empty() {
         "approved device"
@@ -740,6 +883,114 @@ pub fn approve_pairing_invitation(
     })
 }
 
+fn validate_pairing_invitation(
+    identity: &LocalIdentityView,
+    stored: &PairingInvitation,
+    token: &PairingInvitationToken,
+    now_unix: i64,
+) -> AuthResult<()> {
+    if stored.status != "pending" {
+        return Err(AuthError::InvitationNotPending {
+            invitation_id: stored.id.clone(),
+            status: stored.status.clone(),
+        });
+    }
+    if stored.account_id != token.account_id || stored.account_id != identity.account_id {
+        return Err(AuthError::AccountMismatch {
+            expected: stored.account_id.clone(),
+            actual: token.account_id.clone(),
+        });
+    }
+    if stored.id != token.id || stored.inviter_device_id != token.inviter_device_id {
+        return Err(AuthError::MalformedInvitation);
+    }
+    if stored.expires_at_unix <= now_unix {
+        return Err(AuthError::InvitationExpired {
+            invitation_id: stored.id.clone(),
+        });
+    }
+    if stored.secret_hash_hex != token.secret_hash_hex() {
+        return Err(AuthError::InvitationSecretMismatch);
+    }
+    Ok(())
+}
+
+pub fn create_pairing_join_request(
+    token: &PairingInvitationToken,
+    receiver_device_id: &str,
+) -> AuthResult<PairingJoinRequest> {
+    let receiver_device_id =
+        strict_prefixed_identifier(receiver_device_id, "receiver device id", "device-")?;
+    Ok(PairingJoinRequest {
+        invitation_id: token.id.clone(),
+        account_id: token.account_id.clone(),
+        inviter_device_id: token.inviter_device_id.clone(),
+        receiver_device_id,
+    })
+}
+
+pub fn approve_pairing_join_request(
+    identity: &LocalIdentityView,
+    stored: &PairingInvitation,
+    token: &PairingInvitationToken,
+    join: &PairingJoinRequest,
+    device_name: &str,
+    now: &str,
+    now_unix: i64,
+) -> AuthResult<PairingApproval> {
+    validate_pairing_invitation(identity, stored, token, now_unix)?;
+    if join.invitation_id != stored.id
+        || join.account_id != stored.account_id
+        || join.inviter_device_id != stored.inviter_device_id
+    {
+        return Err(AuthError::MalformedInvitation);
+    }
+    let receiver_device_id =
+        pairing_join_identifier(&join.receiver_device_id, "receiver device id", "device-")?;
+    let display_name = if device_name.trim().is_empty() {
+        "approved device"
+    } else {
+        device_name.trim()
+    };
+    let completion_key_hex = token.completion_key_hex()?;
+    let envelope = create_key_envelope(
+        &identity.account_id,
+        &receiver_device_id,
+        &completion_key_hex,
+        &identity.sync_key_hex,
+        now,
+    )?;
+    let mut envelope = envelope;
+    envelope.key_ref = "pairing-completion-token-v1".to_string();
+    let aad = pairing_completion_aad(&stored.id, &envelope);
+    envelope.ciphertext_hex = create_encrypted_key_payload(
+        &completion_key_hex,
+        &identity.sync_key_hex,
+        &aad,
+        COMPLETION_ENVELOPE_MAGIC,
+    )?;
+    Ok(PairingApproval {
+        device: ApprovedDevice {
+            device_id: receiver_device_id,
+            account_id: identity.account_id.clone(),
+            display_name: display_name.to_string(),
+            device_key_hex: REMOTE_DEVICE_KEY_SENTINEL_HEX.to_string(),
+            invitation_id: stored.id.clone(),
+            approved_at: now.to_string(),
+        },
+        envelope,
+    })
+}
+
+pub fn pairing_completion_from_approval(approval: &PairingApproval) -> PairingCompletion {
+    PairingCompletion {
+        account_id: approval.device.account_id.clone(),
+        device_id: approval.device.device_id.clone(),
+        invitation_id: approval.device.invitation_id.clone(),
+        envelope: approval.envelope.clone(),
+    }
+}
+
 pub fn create_key_envelope(
     account_id: &str,
     device_id: &str,
@@ -747,32 +998,17 @@ pub fn create_key_envelope(
     sync_key_hex: &str,
     now: &str,
 ) -> AuthResult<KeyEnvelope> {
-    let device_key = decode_key_hex(device_key_hex, "device key")?;
-    let sync_key = decode_key_hex(sync_key_hex, "sync key")?;
-    let mut nonce = [0_u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce).map_err(|_| AuthError::Crypto)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&device_key));
-    let ciphertext = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &sync_key,
-                aad: device_id.as_bytes(),
-            },
-        )
-        .map_err(|_| AuthError::Crypto)?;
-
-    let mut envelope = Vec::with_capacity(ENVELOPE_MAGIC.len() + NONCE_LEN + ciphertext.len());
-    envelope.extend_from_slice(ENVELOPE_MAGIC);
-    envelope.extend_from_slice(&nonce);
-    envelope.extend_from_slice(&ciphertext);
-
     Ok(KeyEnvelope {
         id: random_prefixed_id("envelope")?,
         account_id: account_id.to_string(),
         device_id: device_id.to_string(),
         key_ref: "account-sync-key-v1".to_string(),
-        ciphertext_hex: hex_encode(&envelope),
+        ciphertext_hex: create_encrypted_key_payload(
+            device_key_hex,
+            sync_key_hex,
+            device_id,
+            ENVELOPE_MAGIC,
+        )?,
         created_at: now.to_string(),
         rotation_generation: 0,
     })
@@ -783,23 +1019,73 @@ pub fn open_key_envelope(
     device_key_hex: &str,
     device_id: &str,
 ) -> AuthResult<String> {
-    let device_key = decode_key_hex(device_key_hex, "device key")?;
+    open_encrypted_key_envelope(envelope, device_key_hex, device_id, ENVELOPE_MAGIC)
+}
+
+fn create_encrypted_key_payload(
+    wrapping_key_hex: &str,
+    sync_key_hex: &str,
+    aad: &str,
+    magic: &[u8],
+) -> AuthResult<String> {
+    let wrapping_key = decode_key_hex(wrapping_key_hex, "device key")?;
+    let sync_key = decode_key_hex(sync_key_hex, "sync key")?;
+    let mut nonce = [0_u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce).map_err(|_| AuthError::Crypto)?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(&wrapping_key));
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &sync_key,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| AuthError::Crypto)?;
+
+    let mut envelope = Vec::with_capacity(magic.len() + NONCE_LEN + ciphertext.len());
+    envelope.extend_from_slice(magic);
+    envelope.extend_from_slice(&nonce);
+    envelope.extend_from_slice(&ciphertext);
+
+    Ok(hex_encode(&envelope))
+}
+
+fn pairing_completion_aad(invitation_id: &str, envelope: &KeyEnvelope) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        COMPLETION_PREFIX,
+        invitation_id,
+        envelope.id,
+        envelope.account_id,
+        envelope.device_id,
+        envelope.key_ref,
+        envelope.created_at,
+        envelope.rotation_generation
+    )
+}
+
+fn open_encrypted_key_envelope(
+    envelope: &KeyEnvelope,
+    wrapping_key_hex: &str,
+    aad: &str,
+    magic: &[u8],
+) -> AuthResult<String> {
+    let wrapping_key = decode_key_hex(wrapping_key_hex, "device key")?;
     let envelope_bytes =
         hex_decode(&envelope.ciphertext_hex).ok_or(AuthError::InvalidHex { field: "envelope" })?;
-    if envelope_bytes.len() < ENVELOPE_MAGIC.len() + NONCE_LEN
-        || &envelope_bytes[..ENVELOPE_MAGIC.len()] != ENVELOPE_MAGIC
-    {
+    if envelope_bytes.len() < magic.len() + NONCE_LEN || &envelope_bytes[..magic.len()] != magic {
         return Err(AuthError::Crypto);
     }
-    let nonce_start = ENVELOPE_MAGIC.len();
+    let nonce_start = magic.len();
     let ciphertext_start = nonce_start + NONCE_LEN;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&device_key));
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(&wrapping_key));
     let plaintext = cipher
         .decrypt(
             XNonce::from_slice(&envelope_bytes[nonce_start..ciphertext_start]),
             Payload {
                 msg: &envelope_bytes[ciphertext_start..],
-                aad: device_id.as_bytes(),
+                aad: aad.as_bytes(),
             },
         )
         .map_err(|_| AuthError::Crypto)?;
@@ -999,6 +1285,46 @@ fn public_identifier(value: &str, field: &'static str) -> AuthResult<String> {
         });
     }
     Ok(trimmed.to_string())
+}
+
+fn strict_prefixed_identifier(
+    value: &str,
+    field: &'static str,
+    prefix: &str,
+) -> AuthResult<String> {
+    let trimmed = public_identifier(value, field)?;
+    if trimmed != value {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value must not include leading or trailing whitespace",
+        });
+    }
+    if trimmed.len() > PUBLIC_ID_MAX_LEN {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value is too long",
+        });
+    }
+    if !trimmed.starts_with(prefix) {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value does not use the expected public id prefix",
+        });
+    }
+    if !trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value must use printable public id characters",
+        });
+    }
+    Ok(trimmed)
+}
+
+fn pairing_join_identifier(value: &str, field: &'static str, prefix: &str) -> AuthResult<String> {
+    strict_prefixed_identifier(value, field, prefix).map_err(|_| AuthError::MalformedInvitation)
 }
 
 fn recovery_public_identifier(value: &str, field: &'static str) -> AuthResult<String> {
@@ -1235,6 +1561,22 @@ mod tests {
         assert_eq!(parsed.account_id, draft.invitation.account_id);
         assert_eq!(parsed.secret_hash_hex(), draft.invitation.secret_hash_hex);
         assert!(!encoded.contains(&draft.invitation.secret_hash_hex));
+        for poisoned in [
+            encoded.replace(&draft.token.id, "pairing-bad\nJoin request env: stolen"),
+            encoded.replace(
+                &draft.token.account_id,
+                "account-bad\nReceiver device id: stolen",
+            ),
+            encoded.replace(
+                &draft.token.inviter_device_id,
+                "device-bad\nCompletion env: stolen",
+            ),
+        ] {
+            assert!(matches!(
+                PairingInvitationToken::parse(&poisoned),
+                Err(AuthError::MalformedInvitation)
+            ));
+        }
     }
 
     #[test]
@@ -1294,6 +1636,82 @@ mod tests {
 
         assert_eq!(approval.device.display_name, "Travel laptop");
         assert_eq!(opened, identity().sync_key_hex);
+    }
+
+    #[test]
+    fn receiver_generated_join_request_creates_token_wrapped_completion() {
+        let draft = create_pairing_invitation(&identity(), "2026-06-18T10:00:00Z", 100, 600)
+            .expect("invitation creates");
+        let receiver_device_key =
+            "2222222222222222222222222222222222222222222222222222222222222222";
+        let join = create_pairing_join_request(&draft.token, "device-receiver")
+            .expect("join request creates");
+        let encoded_join = join.expose_for_cli();
+        let parsed_join = PairingJoinRequest::parse(&encoded_join).expect("join parses");
+        assert_eq!(parsed_join.receiver_device_id, "device-receiver");
+        assert!(!encoded_join.contains(receiver_device_key));
+        assert!(!encoded_join.contains(&draft.token.expose_for_cli()));
+        assert!(!format!("{parsed_join:?}").contains(receiver_device_key));
+        assert!(!format!("{parsed_join:?}").contains(&draft.token.expose_for_cli()));
+
+        let poisoned_join =
+            encoded_join.replace("device-receiver", "device-receiver\nCompletion env: stolen");
+        assert!(matches!(
+            PairingJoinRequest::parse(&poisoned_join),
+            Err(AuthError::MalformedInvitation)
+        ));
+        let mut forged_join = parsed_join.clone();
+        forged_join.receiver_device_id = "device-receiver\nCompletion env: stolen".to_string();
+        let forged_approval = approve_pairing_join_request(
+            &identity(),
+            &draft.invitation,
+            &draft.token,
+            &forged_join,
+            "Receiver laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        );
+        assert!(matches!(
+            forged_approval,
+            Err(AuthError::MalformedInvitation)
+        ));
+
+        let approval = approve_pairing_join_request(
+            &identity(),
+            &draft.invitation,
+            &draft.token,
+            &parsed_join,
+            "Receiver laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        )
+        .expect("join approval works");
+        assert_eq!(approval.device.device_id, "device-receiver");
+        let completion = pairing_completion_from_approval(&approval);
+        let encoded_completion = completion.expose_for_cli();
+        let parsed_completion =
+            PairingCompletion::parse(&encoded_completion).expect("completion parses");
+        let opened = parsed_completion
+            .open_with_token(&draft.token)
+            .expect("completion envelope opens with pairing token");
+        let wrong_key = open_key_envelope(
+            &parsed_completion.envelope,
+            receiver_device_key,
+            "device-receiver",
+        );
+
+        assert_eq!(opened, identity().sync_key_hex);
+        assert!(wrong_key.is_err());
+        let mut tampered_created_at = parsed_completion.clone();
+        tampered_created_at.envelope.created_at = "2026-06-18T11:00:00Z".to_string();
+        assert!(tampered_created_at.open_with_token(&draft.token).is_err());
+        let mut tampered_envelope_id = parsed_completion.clone();
+        tampered_envelope_id.envelope.id = "envelope-tampered".to_string();
+        assert!(tampered_envelope_id.open_with_token(&draft.token).is_err());
+        let mut tampered_generation = parsed_completion.clone();
+        tampered_generation.envelope.rotation_generation = 7;
+        assert!(tampered_generation.open_with_token(&draft.token).is_err());
+        assert!(!format!("{parsed_completion:?}").contains(&approval.envelope.ciphertext_hex));
     }
 
     #[test]

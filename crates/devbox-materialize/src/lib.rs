@@ -392,7 +392,7 @@ fn publish_snapshot_inner(
 ) -> MaterializeResult<PublishedSnapshotBundle> {
     let store = open_store(&request.db_path)?;
     let identity = store
-        .local_identity()?
+        .completed_local_identity()?
         .ok_or(MaterializeError::LocalIdentityMissing)?;
     let sync_key = SyncKey::from_hex(&identity.sync_key_hex)?;
     let persisted = store
@@ -498,7 +498,7 @@ fn import_snapshot_inner(
 ) -> MaterializeResult<ImportedSnapshotBundle> {
     let mut receiver_store = open_store(&request.db_path)?;
     let receiver_identity = receiver_store
-        .local_identity()?
+        .completed_local_identity()?
         .ok_or(MaterializeError::LocalIdentityMissing)?;
     let sync_key = sync_key_for_import(request, &receiver_identity.sync_key_hex)?;
     let manifest_object_key = if let Some(client) = metadata.as_mut() {
@@ -755,7 +755,7 @@ fn sync_key_for_import(
     let key_hex = if let Some(path) = &request.key_source_db_path {
         let key_store = open_store(path)?;
         key_store
-            .local_identity()?
+            .completed_local_identity()?
             .ok_or(MaterializeError::LocalIdentityMissing)?
             .sync_key_hex
     } else {
@@ -1473,6 +1473,115 @@ mod tests {
             .expect("cursor reads")
             .expect("cursor exists");
         assert_eq!(cursor.cursor_value, snapshot_id);
+    }
+
+    #[test]
+    fn paired_receiver_materializes_without_source_key_database() {
+        let fixture = FoundationFixture::new();
+        fixture.write("README.md", "hello from paired source\n");
+        let snapshot_id = fixture.persist_source_snapshot();
+        let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
+
+        publish_snapshot(
+            &PublishSnapshotRequest {
+                db_path: fixture.source_db.clone(),
+                cache_root: fixture.source_cache.clone(),
+                snapshot_id: snapshot_id.clone(),
+            },
+            &provider,
+        )
+        .expect("snapshot publishes");
+
+        let source_identity = local_identity_for_fixture(&fixture.source_db);
+        let source_view = local_identity_view_for_fixture(&source_identity);
+        let invitation =
+            devbox_auth::create_pairing_invitation(&source_view, "2026-06-18T10:00:00Z", 100, 600)
+                .expect("pairing invitation creates");
+        let mut source_store = Store::open_file(&fixture.source_db).expect("source opens");
+        source_store
+            .apply_migrations()
+            .expect("source migrations apply");
+        source_store
+            .insert_pairing_invitation(&invitation.invitation)
+            .expect("invitation persists");
+
+        let paired_receiver_db = fixture._dir.path().join("paired-receiver.sqlite3");
+        let paired_target = fixture._dir.path().join("paired-target");
+        let mut receiver_store = Store::open_file(&paired_receiver_db).expect("receiver opens");
+        receiver_store
+            .apply_migrations()
+            .expect("receiver migrations apply");
+        let receiver_identity = receiver_store
+            .prepare_pairing_receiver_identity(&invitation.token, "Receiver laptop")
+            .expect("receiver identity prepares");
+        let join = devbox_auth::create_pairing_join_request(
+            &invitation.token,
+            &receiver_identity.device_id,
+        )
+        .expect("join request creates");
+        let pending_import = import_snapshot(
+            &ImportSnapshotRequest {
+                db_path: paired_receiver_db.clone(),
+                cache_root: fixture.receiver_cache.clone(),
+                key_source_db_path: None,
+                snapshot_id: snapshot_id.clone(),
+            },
+            &provider,
+        )
+        .expect_err("pending receiver cannot import with all-zero key");
+        assert!(pending_import
+            .to_string()
+            .contains("local identity is pending pairing completion"));
+        let approval = devbox_auth::approve_pairing_join_request(
+            &source_view,
+            &invitation.invitation,
+            &invitation.token,
+            &join,
+            "Receiver laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        )
+        .expect("join request approves");
+        source_store
+            .persist_pairing_approval(&approval)
+            .expect("pairing approval persists");
+        let completion = devbox_auth::pairing_completion_from_approval(&approval);
+        let completed_receiver = receiver_store
+            .complete_pairing_for_local_device(&completion)
+            .expect("receiver completes pairing");
+        assert_eq!(
+            completed_receiver.sync_key_hex,
+            source_identity.sync_key_hex
+        );
+
+        let outcome = materialize_snapshot(
+            &MaterializationRequest {
+                db_path: paired_receiver_db,
+                cache_root: fixture.receiver_cache.clone(),
+                key_source_db_path: None,
+                snapshot_id: snapshot_id.clone(),
+                target: paired_target.clone(),
+                apply: true,
+            },
+            &provider,
+        )
+        .expect("paired receiver materializes");
+
+        assert_eq!(outcome.import.source_account_id, source_identity.account_id);
+        assert_eq!(
+            outcome.import.receiver_account_id,
+            source_identity.account_id
+        );
+        assert_eq!(
+            outcome.import.receiver_device_id,
+            receiver_identity.device_id
+        );
+        assert_eq!(outcome.import.downloaded_blob_count, 1);
+        assert!(outcome.applied);
+        assert_eq!(
+            fs::read_to_string(paired_target.join("README.md")).expect("readme restored"),
+            "hello from paired source\n"
+        );
     }
 
     #[test]
@@ -2328,6 +2437,17 @@ mod tests {
             .local_identity()
             .expect("identity reads")
             .expect("identity exists")
+    }
+
+    fn local_identity_view_for_fixture(
+        identity: &devbox_store::LocalIdentityRecord,
+    ) -> devbox_auth::LocalIdentityView {
+        devbox_auth::LocalIdentityView {
+            account_id: identity.account_id.clone(),
+            device_id: identity.device_id.clone(),
+            device_name: identity.device_name.clone(),
+            sync_key_hex: identity.sync_key_hex.clone(),
+        }
     }
 
     fn republish_manifest_metadata_with_key(

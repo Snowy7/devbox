@@ -1,10 +1,11 @@
 use devbox_auth::{
-    approve_pairing_invitation, create_account_ownership_proof, create_account_session,
-    create_device_rotation_intent, create_pairing_invitation, create_recovery_grant,
-    generate_alpha_invite_code, mock_login, now_unix_seconds, revoke_account_session,
+    approve_pairing_invitation, approve_pairing_join_request, create_account_ownership_proof,
+    create_account_session, create_device_rotation_intent, create_pairing_invitation,
+    create_pairing_join_request, create_recovery_grant, generate_alpha_invite_code, mock_login,
+    now_unix_seconds, pairing_completion_from_approval, revoke_account_session,
     validate_account_session, AccountOwnershipProofInput, DeviceProjectCursor,
     DeviceRotationIntent, DeviceRotationIntentInput, DeviceTrustRecord, LocalIdentityView,
-    PairingInvitationToken, RecoveryGrant,
+    PairingCompletion, PairingInvitationToken, PairingJoinRequest, RecoveryGrant,
 };
 use devbox_conflict::{
     compare_snapshots, path_to_conflict_string, ComparableEntry, ComparableSnapshot,
@@ -471,6 +472,71 @@ struct DeviceApproveArgs {
     device_name: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct DeviceJoinArgs {
+    db_path: String,
+    token: Option<String>,
+    token_env: Option<String>,
+    device_name: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DeviceApproveJoinArgs {
+    db_path: String,
+    token: Option<String>,
+    token_env: Option<String>,
+    join_request: Option<String>,
+    join_request_env: Option<String>,
+    device_name: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DeviceCompleteArgs {
+    db_path: String,
+    completion: Option<String>,
+    completion_env: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceJoinArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceJoinArgs")
+            .field("db_path", &self.db_path)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("token_env", &self.token_env)
+            .field("device_name", &self.device_name)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DeviceApproveJoinArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceApproveJoinArgs")
+            .field("db_path", &self.db_path)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("token_env", &self.token_env)
+            .field(
+                "join_request",
+                &self.join_request.as_ref().map(|_| "<redacted>"),
+            )
+            .field("join_request_env", &self.join_request_env)
+            .field("device_name", &self.device_name)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DeviceCompleteArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceCompleteArgs")
+            .field("db_path", &self.db_path)
+            .field(
+                "completion",
+                &self.completion.as_ref().map(|_| "<redacted>"),
+            )
+            .field("completion_env", &self.completion_env)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeviceRevokeArgs {
     db_path: String,
@@ -904,6 +970,36 @@ fn run_devices(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("join") => match parse_device_join_args(&args[1..])
+            .and_then(|args| devices_join(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox devices join --db <RECEIVER_DB> --token-env <ENV>|--token <TOKEN> --device-name <NAME>");
+                ExitCode::from(1)
+            }
+        },
+        Some("approve-join") => match parse_device_approve_join_args(&args[1..])
+            .and_then(|args| devices_approve_join(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox devices approve-join --db <SOURCE_DB> --token-env <ENV>|--token <TOKEN> --join-request-env <ENV>|--join-request <REQUEST> --device-name <NAME>");
+                ExitCode::from(1)
+            }
+        },
+        Some("complete") => match parse_device_complete_args(&args[1..])
+            .and_then(|args| devices_complete(&args).map_err(|error| error.to_string()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("devbox: {error}");
+                eprintln!("Usage: devbox devices complete --db <RECEIVER_DB> --completion-env <ENV>|--completion <COMPLETION>");
+                ExitCode::from(1)
+            }
+        },
         Some("revoke") => match parse_device_revoke_args(&args[1..])
             .and_then(|args| devices_revoke(&args).map_err(|error| error.to_string()))
         {
@@ -954,7 +1050,7 @@ fn run_devices(args: &[String]) -> ExitCode {
             }
         },
         _ => {
-            eprintln!("devbox: devices requires list, invite, approve, revoke, recovery, or rotate-key-envelope");
+            eprintln!("devbox: devices requires list, invite, approve, join, approve-join, complete, revoke, recovery, or rotate-key-envelope");
             print_devices_usage();
             ExitCode::from(2)
         }
@@ -1564,6 +1660,164 @@ fn parse_device_approve_args(args: &[String]) -> Result<DeviceApproveArgs, Strin
         token: token.ok_or_else(|| "devices approve requires --token <TOKEN>".to_string())?,
         device_name: device_name
             .ok_or_else(|| "devices approve requires --device-name <NAME>".to_string())?,
+    })
+}
+
+fn parse_device_join_args(args: &[String]) -> Result<DeviceJoinArgs, String> {
+    let mut db_path = None;
+    let mut token = None;
+    let mut token_env = None;
+    let mut device_name = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--token" => {
+                index += 1;
+                token = args.get(index).cloned();
+            }
+            "--token-env" => {
+                index += 1;
+                token_env = args.get(index).cloned();
+            }
+            "--device-name" => {
+                index += 1;
+                device_name = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices join option '{value}'"));
+            }
+            _ => return Err("devices join accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    if token.is_some() == token_env.is_some() {
+        return Err("devices join requires exactly one of --token or --token-env".to_string());
+    }
+
+    Ok(DeviceJoinArgs {
+        db_path: db_path.ok_or_else(|| "devices join requires --db <DB_PATH>".to_string())?,
+        token,
+        token_env,
+        device_name: device_name
+            .ok_or_else(|| "devices join requires --device-name <NAME>".to_string())?,
+    })
+}
+
+fn parse_device_approve_join_args(args: &[String]) -> Result<DeviceApproveJoinArgs, String> {
+    let mut db_path = None;
+    let mut token = None;
+    let mut token_env = None;
+    let mut join_request = None;
+    let mut join_request_env = None;
+    let mut device_name = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--token" => {
+                index += 1;
+                token = args.get(index).cloned();
+            }
+            "--token-env" => {
+                index += 1;
+                token_env = args.get(index).cloned();
+            }
+            "--join-request" => {
+                index += 1;
+                join_request = args.get(index).cloned();
+            }
+            "--join-request-env" => {
+                index += 1;
+                join_request_env = args.get(index).cloned();
+            }
+            "--device-name" => {
+                index += 1;
+                device_name = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices approve-join option '{value}'"));
+            }
+            _ => return Err("devices approve-join accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    if token.is_some() == token_env.is_some() {
+        return Err(
+            "devices approve-join requires exactly one of --token or --token-env".to_string(),
+        );
+    }
+
+    if join_request.is_some() == join_request_env.is_some() {
+        return Err(
+            "devices approve-join requires exactly one of --join-request or --join-request-env"
+                .to_string(),
+        );
+    }
+
+    Ok(DeviceApproveJoinArgs {
+        db_path: db_path
+            .ok_or_else(|| "devices approve-join requires --db <DB_PATH>".to_string())?,
+        token,
+        token_env,
+        join_request,
+        join_request_env,
+        device_name: device_name
+            .ok_or_else(|| "devices approve-join requires --device-name <NAME>".to_string())?,
+    })
+}
+
+fn parse_device_complete_args(args: &[String]) -> Result<DeviceCompleteArgs, String> {
+    let mut db_path = None;
+    let mut completion = None;
+    let mut completion_env = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--db" => {
+                index += 1;
+                db_path = args.get(index).cloned();
+            }
+            "--completion" => {
+                index += 1;
+                completion = args.get(index).cloned();
+            }
+            "--completion-env" => {
+                index += 1;
+                completion_env = args.get(index).cloned();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown devices complete option '{value}'"));
+            }
+            _ => return Err("devices complete accepts only flags".to_string()),
+        }
+
+        index += 1;
+    }
+
+    if completion.is_some() == completion_env.is_some() {
+        return Err(
+            "devices complete requires exactly one of --completion or --completion-env".to_string(),
+        );
+    }
+
+    Ok(DeviceCompleteArgs {
+        db_path: db_path.ok_or_else(|| "devices complete requires --db <DB_PATH>".to_string())?,
+        completion,
+        completion_env,
     })
 }
 
@@ -3269,7 +3523,7 @@ fn auth_mock_login(args: &DbOnlyArgs) -> Result<(), Box<dyn std::error::Error>> 
     let store = open_existing_metadata_store(&args.db_path)?;
     store.apply_migrations()?;
     let identity = store
-        .local_identity()?
+        .completed_local_identity()?
         .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
     let now = store.current_timestamp()?;
     let session = mock_login(&identity_view(&identity), &now);
@@ -3291,7 +3545,7 @@ fn auth_status(args: &DbOnlyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_existing_metadata_store(&args.db_path)?;
     store.apply_migrations()?;
     let identity = store
-        .local_identity()?
+        .completed_local_identity()?
         .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
     let session = store.auth_session(&identity.account_id)?;
 
@@ -3554,6 +3808,11 @@ fn devices_invite(args: &DeviceInviteArgs) -> Result<(), Box<dyn std::error::Err
     println!("Status: {}", draft.invitation.status);
     println!("Expires at unix: {}", draft.invitation.expires_at_unix);
     println!("Pairing token: {}", draft.token.expose_for_cli());
+    println!("Pairing token env: DEVBOX_PAIRING_TOKEN");
+    println!(
+        "export DEVBOX_PAIRING_TOKEN='{}'",
+        draft.token.expose_for_cli()
+    );
     println!("Provider: local/mock metadata");
     println!("Raw account/device keys: not printed");
 
@@ -3591,6 +3850,128 @@ fn devices_approve(args: &DeviceApproveArgs) -> Result<(), Box<dyn std::error::E
     println!("Raw account/device keys: not printed");
 
     Ok(())
+}
+
+fn devices_join(args: &DeviceJoinArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = Store::open_file(&args.db_path)?;
+    store.apply_migrations()?;
+    let token = PairingInvitationToken::parse(&pairing_token_for_receiver(args)?)?;
+    let identity = store.prepare_pairing_receiver_identity(&token, &args.device_name)?;
+    let join = create_pairing_join_request(&token, &identity.device_id)?;
+
+    println!("Pairing join request created");
+    println!("Account id: {}", join.account_id);
+    println!("Receiver device id: {}", join.receiver_device_id);
+    println!("Receiver device name: {}", identity.device_name);
+    println!("Invitation id: {}", join.invitation_id);
+    println!("Join request env: DEVBOX_PAIRING_JOIN_REQUEST");
+    println!("Join request excludes the receiver device key; send it with the pairing token to the source approver");
+    println!(
+        "export DEVBOX_PAIRING_JOIN_REQUEST='{}'",
+        join.expose_for_cli()
+    );
+
+    Ok(())
+}
+
+fn pairing_token_for_receiver(args: &DeviceJoinArgs) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(name) = &args.token_env {
+        return secret_from_env(name, "pairing invitation token");
+    }
+    args.token
+        .clone()
+        .ok_or_else(|| "devices join requires a pairing invitation token".into())
+}
+
+fn devices_approve_join(args: &DeviceApproveJoinArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let identity = store
+        .local_identity()?
+        .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
+    let join_request = pairing_join_request_for_approval(args)?;
+    let join = PairingJoinRequest::parse(&join_request)?;
+    let invitation = store
+        .pairing_invitation(&join.invitation_id)?
+        .ok_or_else(|| format!("pairing invitation not found: {}", join.invitation_id))?;
+    let token = PairingInvitationToken::parse(&pairing_token_for_approval(args)?)?;
+    let now = store.current_timestamp()?;
+    let approval = approve_pairing_join_request(
+        &identity_view(&identity),
+        &invitation,
+        &token,
+        &join,
+        &args.device_name,
+        &now,
+        now_unix_seconds(),
+    )?;
+    store.persist_pairing_approval(&approval)?;
+    let completion = pairing_completion_from_approval(&approval);
+
+    println!("Device join approved");
+    println!("Device id: {}", approval.device.device_id);
+    println!("Device name: {}", approval.device.display_name);
+    println!("Account id: {}", approval.device.account_id);
+    println!("Invitation id: {}", approval.device.invitation_id);
+    println!("Completion env: DEVBOX_PAIRING_COMPLETION");
+    println!("Completion is secret-bearing alpha handoff; share only with the receiver");
+    println!(
+        "export DEVBOX_PAIRING_COMPLETION='{}'",
+        completion.expose_for_cli()
+    );
+
+    Ok(())
+}
+
+fn devices_complete(args: &DeviceCompleteArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = open_existing_metadata_store(&args.db_path)?;
+    store.apply_migrations()?;
+    let completion = pairing_completion_for_receiver(args)?;
+    let completion = PairingCompletion::parse(&completion)?;
+    let identity = store.complete_pairing_for_local_device(&completion)?;
+
+    println!("Pairing completed");
+    println!("Account id: {}", identity.account_id);
+    println!("Device id: {}", identity.device_id);
+    println!("Device name: {}", identity.device_name);
+    println!("Key envelope stored: true");
+    println!("Receiver can import/materialize without --mock-key-source-db");
+    println!("Pairing completion consumed from secret-bearing alpha handoff");
+
+    Ok(())
+}
+
+fn pairing_join_request_for_approval(
+    args: &DeviceApproveJoinArgs,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(name) = &args.join_request_env {
+        return secret_from_env(name, "pairing join request");
+    }
+    args.join_request
+        .clone()
+        .ok_or_else(|| "devices approve-join requires a join request".into())
+}
+
+fn pairing_token_for_approval(
+    args: &DeviceApproveJoinArgs,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(name) = &args.token_env {
+        return secret_from_env(name, "pairing invitation token");
+    }
+    args.token
+        .clone()
+        .ok_or_else(|| "devices approve-join requires a pairing invitation token".into())
+}
+
+fn pairing_completion_for_receiver(
+    args: &DeviceCompleteArgs,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(name) = &args.completion_env {
+        return secret_from_env(name, "pairing completion");
+    }
+    args.completion
+        .clone()
+        .ok_or_else(|| "devices complete requires a pairing completion".into())
 }
 
 fn devices_revoke(args: &DeviceRevokeArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -3904,7 +4285,7 @@ fn sync_upload(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_existing_metadata_store(&args.db_path)?;
     store.apply_migrations()?;
     let identity = store
-        .local_identity()?
+        .completed_local_identity()?
         .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
     let sync_key = SyncKey::from_hex(&identity.sync_key_hex)?;
     let blob_id = BlobId::from_blake3_hex(&args.blob_id)?;
@@ -3930,7 +4311,7 @@ fn sync_download(args: &SyncBlobArgs) -> Result<(), Box<dyn std::error::Error>> 
     let store = open_existing_metadata_store(&args.db_path)?;
     store.apply_migrations()?;
     let identity = store
-        .local_identity()?
+        .completed_local_identity()?
         .ok_or("local identity is not initialized; run devbox init --db <DB_PATH>")?;
     let sync_key = SyncKey::from_hex(&identity.sync_key_hex)?;
     let blob_id = BlobId::from_blake3_hex(&args.blob_id)?;
@@ -3972,7 +4353,7 @@ fn metadata_import_options(
         let source_store = Store::open_file(path)?;
         source_store.apply_migrations()?;
         source_store
-            .local_identity()?
+            .completed_local_identity()?
             .ok_or("metadata account id could not be derived from --mock-key-source-db")?
             .account_id
     } else {
@@ -5605,6 +5986,9 @@ fn print_devices_usage() {
     eprintln!("  devbox devices list --db <DB_PATH>");
     eprintln!("  devbox devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]");
     eprintln!("  devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>");
+    eprintln!("  devbox devices join --db <RECEIVER_DB> --token-env <ENV>|--token <TOKEN> --device-name <NAME>");
+    eprintln!("  devbox devices approve-join --db <SOURCE_DB> --token-env <ENV>|--token <TOKEN> --join-request-env <ENV>|--join-request <REQUEST> --device-name <NAME>");
+    eprintln!("  devbox devices complete --db <RECEIVER_DB> --completion-env <ENV>|--completion <COMPLETION>");
     eprintln!("  devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]");
     eprintln!(
         "  devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF> [--audit-label <TEXT>] [--ttl-seconds <SECONDS>]"
@@ -6018,6 +6402,187 @@ mod tests {
         let logout = parse_auth_hosted_session_args(&custom_env_args, "hosted-logout")
             .expect("logout args parse");
         assert_eq!(logout.session_token_env, "DEVBOX_TEST_SESSION");
+    }
+
+    #[test]
+    fn device_join_approve_join_and_complete_args_redact_pairing_payloads() {
+        let join_args = vec![
+            "--db".to_string(),
+            "receiver.sqlite3".to_string(),
+            "--token".to_string(),
+            "raw-pairing-token".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        let join = parse_device_join_args(&join_args).expect("join args parse");
+        assert_eq!(join.db_path, "receiver.sqlite3");
+        assert_eq!(join.token.as_deref(), Some("raw-pairing-token"));
+        assert_eq!(join.token_env, None);
+        assert_eq!(join.device_name, "Laptop");
+        assert!(!format!("{join:?}").contains("raw-pairing-token"));
+
+        let join_env_args = vec![
+            "--db".to_string(),
+            "receiver.sqlite3".to_string(),
+            "--token-env".to_string(),
+            "DEVBOX_PAIRING_TOKEN".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        let join = parse_device_join_args(&join_env_args).expect("join env args parse");
+        assert_eq!(join.token, None);
+        assert_eq!(join.token_env.as_deref(), Some("DEVBOX_PAIRING_TOKEN"));
+
+        let mixed_token_source = vec![
+            "--db".to_string(),
+            "receiver.sqlite3".to_string(),
+            "--token".to_string(),
+            "raw-pairing-token".to_string(),
+            "--token-env".to_string(),
+            "DEVBOX_PAIRING_TOKEN".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        assert_eq!(
+            parse_device_join_args(&mixed_token_source)
+                .expect_err("token source must not be mixed"),
+            "devices join requires exactly one of --token or --token-env"
+        );
+
+        let approve_join_args = vec![
+            "--db".to_string(),
+            "source.sqlite3".to_string(),
+            "--token".to_string(),
+            "raw-pairing-token".to_string(),
+            "--join-request".to_string(),
+            "raw-join-request".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        let approve_join =
+            parse_device_approve_join_args(&approve_join_args).expect("approve join args parse");
+        assert_eq!(
+            approve_join.join_request.as_deref(),
+            Some("raw-join-request")
+        );
+        assert_eq!(approve_join.token.as_deref(), Some("raw-pairing-token"));
+        assert_eq!(approve_join.token_env, None);
+        assert_eq!(approve_join.join_request_env, None);
+        assert!(!format!("{approve_join:?}").contains("raw-join-request"));
+        assert!(!format!("{approve_join:?}").contains("raw-pairing-token"));
+
+        let approve_join_env_args = vec![
+            "--db".to_string(),
+            "source.sqlite3".to_string(),
+            "--token-env".to_string(),
+            "DEVBOX_PAIRING_TOKEN".to_string(),
+            "--join-request-env".to_string(),
+            "DEVBOX_PAIRING_JOIN_REQUEST".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        let approve_join = parse_device_approve_join_args(&approve_join_env_args)
+            .expect("approve join env args parse");
+        assert_eq!(approve_join.join_request, None);
+        assert_eq!(
+            approve_join.join_request_env.as_deref(),
+            Some("DEVBOX_PAIRING_JOIN_REQUEST")
+        );
+        assert_eq!(
+            approve_join.token_env.as_deref(),
+            Some("DEVBOX_PAIRING_TOKEN")
+        );
+
+        let missing_join_source = vec![
+            "--db".to_string(),
+            "source.sqlite3".to_string(),
+            "--token-env".to_string(),
+            "DEVBOX_PAIRING_TOKEN".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        assert_eq!(
+            parse_device_approve_join_args(&missing_join_source)
+                .expect_err("join request source is required"),
+            "devices approve-join requires exactly one of --join-request or --join-request-env"
+        );
+        let mixed_join_source = vec![
+            "--db".to_string(),
+            "source.sqlite3".to_string(),
+            "--token-env".to_string(),
+            "DEVBOX_PAIRING_TOKEN".to_string(),
+            "--join-request".to_string(),
+            "raw-join-request".to_string(),
+            "--join-request-env".to_string(),
+            "DEVBOX_PAIRING_JOIN_REQUEST".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        assert_eq!(
+            parse_device_approve_join_args(&mixed_join_source)
+                .expect_err("join request source must not be mixed"),
+            "devices approve-join requires exactly one of --join-request or --join-request-env"
+        );
+
+        let mixed_approval_token_source = vec![
+            "--db".to_string(),
+            "source.sqlite3".to_string(),
+            "--token".to_string(),
+            "raw-pairing-token".to_string(),
+            "--token-env".to_string(),
+            "DEVBOX_PAIRING_TOKEN".to_string(),
+            "--join-request-env".to_string(),
+            "DEVBOX_PAIRING_JOIN_REQUEST".to_string(),
+            "--device-name".to_string(),
+            "Laptop".to_string(),
+        ];
+        assert_eq!(
+            parse_device_approve_join_args(&mixed_approval_token_source)
+                .expect_err("approval token source must not be mixed"),
+            "devices approve-join requires exactly one of --token or --token-env"
+        );
+
+        let complete_args = vec![
+            "--db".to_string(),
+            "receiver.sqlite3".to_string(),
+            "--completion".to_string(),
+            "raw-pairing-completion".to_string(),
+        ];
+        let complete = parse_device_complete_args(&complete_args).expect("complete args parse");
+        assert_eq!(
+            complete.completion.as_deref(),
+            Some("raw-pairing-completion")
+        );
+        assert_eq!(complete.completion_env, None);
+        assert!(!format!("{complete:?}").contains("raw-pairing-completion"));
+
+        let complete_env_args = vec![
+            "--db".to_string(),
+            "receiver.sqlite3".to_string(),
+            "--completion-env".to_string(),
+            "DEVBOX_PAIRING_COMPLETION".to_string(),
+        ];
+        let complete =
+            parse_device_complete_args(&complete_env_args).expect("complete env args parse");
+        assert_eq!(complete.completion, None);
+        assert_eq!(
+            complete.completion_env.as_deref(),
+            Some("DEVBOX_PAIRING_COMPLETION")
+        );
+
+        let mixed_completion_source = vec![
+            "--db".to_string(),
+            "receiver.sqlite3".to_string(),
+            "--completion".to_string(),
+            "raw-pairing-completion".to_string(),
+            "--completion-env".to_string(),
+            "DEVBOX_PAIRING_COMPLETION".to_string(),
+        ];
+        assert_eq!(
+            parse_device_complete_args(&mixed_completion_source)
+                .expect_err("completion source must not be mixed"),
+            "devices complete requires exactly one of --completion or --completion-env"
+        );
     }
 
     #[test]
