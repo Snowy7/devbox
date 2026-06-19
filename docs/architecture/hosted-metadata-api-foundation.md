@@ -1,5 +1,9 @@
 # Hosted Metadata API Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice adds a production-shaped metadata service boundary without making Devbox a full
 hosted SaaS backend yet.
 

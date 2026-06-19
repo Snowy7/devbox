@@ -1,5 +1,9 @@
 # Auth and Device Pairing Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This slice adds the next Phase 1 trust foundation after local identity and encrypted object sync:
 
 - local/mock account ownership session state

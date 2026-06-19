@@ -1,5 +1,9 @@
 # Production Auth Account Boundary Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice adds a production-shaped account ownership proof and account session boundary
 without wiring a live OAuth/OIDC provider or browser login flow.
 

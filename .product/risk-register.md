@@ -8,10 +8,10 @@ The main risk is not whether sync can be built. The main risk is whether develop
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| Users think this is just Dropbox or Syncthing | High | Lead with automatic WIP snapshots, Git-safe restore, and dev policy engine |
+| Users think this is just Dropbox or Syncthing | High | Lead with automatic WIP snapshots, Git-safe restore, and dev-aware folder policy |
 | Users do not pay for personal sync | High | Validate Pro pricing before heavy team buildout |
 | Product feels scary because it touches code | High | Local snapshots first, explainable sync, dry-run mode, visible restore |
-| Too many edge cases for MVP | High | Start with explicit supported stacks and repo sizes |
+| Too many edge cases for MVP | High | Start with explicit supported stacks and folder sizes |
 | Conflict UX becomes confusing | Medium | Use divergent snapshots and clear device/time labels |
 
 ## Technical Risks
@@ -25,14 +25,14 @@ The main risk is not whether sync can be built. The main risk is whether develop
 | Case-sensitivity bugs | High | Detect filesystem behavior and flag incompatible paths |
 | Symlink/permission drift | High | Store metadata explicitly and test per OS |
 | Generated file explosions | High | Default dev ignores, artifact suppression, policy explain view |
-| Storage costs exceed pricing | High | Deduplication, chunking, generated artifact exclusions, project limits |
+| Storage costs exceed pricing | High | Deduplication, chunking, generated artifact exclusions, folder limits |
 | Large repo performance | Medium | Streaming manifests, incremental scanning, priority hydration |
 
 ## Business Risks
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| CDE vendors absorb the story | Medium | Differentiate as local-first workspace continuity |
+| CDE vendors absorb the story | Medium | Differentiate as local-first folder continuity |
 | GitHub adds similar WIP sync | High | Build cross-platform, Git-host-agnostic, local-first trust and timeline UX |
 | Teams require compliance too early | Medium | Keep team preview with design partners only |
 | Support burden overwhelms team | High | Narrow alpha, automated diagnostics, supported stack matrix |
@@ -46,7 +46,6 @@ Before public beta:
 - local-first failure mode
 - visible "what will sync" policy
 - panic pause
-- project export
+- folder export
 - support bundle without source content by default
 - public architecture note on Git safety
-

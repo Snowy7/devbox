@@ -26,7 +26,7 @@
           <p class="lead">Take the local snapshot foundation through a local watcher first, then add encrypted sync, device pairing, second-device materialization, and a minimal control surface for trusted alpha users.</p>
         </div>
         <div class="callout">
-          <strong>Exit gate:</strong> 25 alpha users complete the workflow with P50 project-ready time under 10 minutes and zero data loss or Git corruption incidents.
+          <strong>Exit gate:</strong> 25 alpha users complete the workflow with P50 folder-ready time under 10 minutes and zero data loss or Git corruption incidents.
         </div>
       </section>
 
@@ -34,8 +34,8 @@
         <h2>Alpha Workflow</h2>
         <div class="diagram">
           <div class="node"><span class="node-icon">A</span><div><strong>Install on desktop</strong><br><span class="muted">Select code root and create initial snapshots.</span></div></div>
-          <div class="node"><span class="node-icon">B</span><div><strong>Pair laptop</strong><br><span class="muted">Approve device, exchange keys, choose project.</span></div></div>
-          <div class="node"><span class="node-icon">C</span><div><strong>Materialize project</strong><br><span class="muted">Download encrypted packs, apply manifest, verify Git.</span></div></div>
+          <div class="node"><span class="node-icon">B</span><div><strong>Pair laptop</strong><br><span class="muted">Approve device, exchange keys, choose folder.</span></div></div>
+          <div class="node"><span class="node-icon">C</span><div><strong>Materialize folder</strong><br><span class="muted">Download encrypted packs, apply manifest, verify Git when present.</span></div></div>
           <div class="node"><span class="node-icon">D</span><div><strong>Keep coding</strong><br><span class="muted">Edit, run, restore, and sync back safely.</span></div></div>
         </div>
       </section>
@@ -47,7 +47,7 @@
             <h3>Sync Backend</h3>
             <ul class="checklist">
               <li>Rust API with device pairing and auth.</li>
-              <li>Hosted metadata API foundation for accounts, devices, projects, published manifests, and compare-and-set cursors. SQLite-backed dev/test storage is complete; Railway-shaped Postgres storage is available for hosted alpha; publish/import/materialize can opt into in-process mock-dev metadata wiring; account-session auth is now modeled for hosted handlers.</li>
+              <li>Hosted metadata API foundation for accounts, devices, folder scopes, published manifests, and compare-and-set cursors. SQLite-backed dev/test storage is complete; Railway-shaped Postgres storage is available for hosted alpha; publish/import/materialize can opt into in-process mock-dev metadata wiring; account-session auth is now modeled for hosted handlers.</li>
               <li>R2 blob backend behind a provider interface.</li>
               <li>Encrypted immutable blob upload and download. Local filesystem, S3-compatible R2/S3/MinIO, and hosted object-transfer provider foundations are complete; managed credential lease metadata and hosted shared-bucket prefix grants keep external tester clients away from raw bucket keys, while live cloud provisioning remains deferred.</li>
             </ul>
@@ -70,7 +70,7 @@
               <li>`devbox init`, `devices`, `sync`, `pause`, `restore`.</li>
           <li>Env-backed Electron shell for alpha onboarding, status, hosted config, object-access grants, pairing, and live sync commands.</li>
           <li>Tray state: ready, needs-config, command-only, blocked.</li>
-          <li>Redacted control surface for local paths, projects, conflicts, devices, secrets, remote prefix state, and settings.</li>
+          <li>Redacted control surface for local paths, folders, conflicts, devices, secrets, remote prefix state, and settings.</li>
           <li>macOS/Linux alpha release scripts for CLI/daemon/metadata tools and unsigned desktop bundles.</li>
           <li>Deterministic two-device smoke harness with redacted evidence logs.</li>
               <li>Support bundle without source content by default.</li>
@@ -83,7 +83,7 @@
               <li>Explicit local secret block/template/envelope-reference policy records.</li>
               <li>Git verification after materialization.</li>
               <li>Atomic writes with rollback.</li>
-              <li>Manual pause and project exclusion.</li>
+              <li>Manual pause and folder exclusion.</li>
             </ul>
           </article>
         </div>
@@ -97,14 +97,14 @@
           <li>The account/device model remains multi-device-capable even though one installation has one current local device.</li>
           <li>Encrypted blob upload and download work through a local filesystem remote provider without cloud credentials.</li>
           <li>S3-compatible encrypted blob transport can target Cloudflare R2, AWS S3, or MinIO with redacted environment-based credential configuration.</li>
-          <li>Hosted metadata API/store/handler foundations model accounts, devices, projects, published snapshot manifests, and server-side compare-and-set device/project cursors.</li>
+          <li>Hosted metadata API/store/handler foundations model accounts, devices, folder scopes, published snapshot manifests, and server-side compare-and-set device/folder cursors.</li>
           <li>Publish/import/materialize can opt into in-process mock-dev hosted metadata for manifest discovery and server-side cursor compare-and-set.</li>
           <li>Live daemon sync can scan/debounce, persist idempotent snapshots, publish encrypted objects, register hosted mock-dev metadata, discover latest remote snapshots, and import/materialize with conflict refusal.</li>
-          <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
+          <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/folder cursors are in place.</li>
           <li>Production-shaped account ownership proof and account session primitives model provider subject/email/domain proof, token-hash sessions, expiration, revocation, and no-network CLI/dev persistence.</li>
-          <li>Hosted metadata handlers now support explicit mock-dev headers for tests/dev plus production-shaped account-session bearer auth resolved through the hosted session store, with account-scoped device/project/snapshot/cursor operations.</li>
+          <li>Hosted metadata handlers now support explicit mock-dev headers for tests/dev plus production-shaped account-session bearer auth resolved through the hosted session store, with account-scoped device/folder/snapshot/cursor operations.</li>
           <li>Hosted metadata can now run as a single-instance alpha API with `/ready`, one-time invite login, bearer session status/logout, and mock-dev auth disabled by default in the server binary.</li>
-          <li>Managed object credential lease and object-access grant primitives model account/session/project-scoped R2/S3/MinIO-compatible provider references, canonical shared-bucket prefixes, capabilities, expiration, revocation, and rotation generation without live provider provisioning.</li>
+          <li>Managed object credential lease and object-access grant primitives model account/session/folder-scoped R2/S3/MinIO-compatible provider references, canonical shared-bucket prefixes, capabilities, expiration, revocation, and rotation generation without live provider provisioning.</li>
           <li>Hosted object transfer now proxies encrypted object put/get/head/list through the metadata API with account-session auth and server-held bucket credentials.</li>
           <li>Hosted metadata can run on Railway/Postgres via DATABASE_URL, with CI parity coverage and SQLite retained for local/dev tests.</li>
           <li>Production-shaped pairing recovery and rotation primitives model receiver-generated join/complete handoff, recovery grant references, revocation, device rotation intents, and key-envelope rotation generation with explicit secret-bearing alpha payloads.</li>
@@ -113,7 +113,7 @@
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
           <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
           <li>Env-backed redacted Electron alpha shell, explicit path-scoped secret policy records, guarded manual conflict resolution records, alpha package scripts, and deterministic two-device smoke evidence are now in place.</li>
-          <li>OAuth/OIDC login, signed installers, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and multi-region/observability hardening remain deferred.</li>
+          <li>OAuth/OIDC login, signed installers, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Loom work, and multi-region/observability hardening remain deferred.</li>
         </ul>
       </section>
 
@@ -134,7 +134,7 @@
               <td>Shows the core promise works outside our machines.</td>
             </tr>
             <tr>
-              <td>P50 project ready</td>
+              <td>P50 folder ready</td>
               <td>Under 10 minutes</td>
               <td>Tests whether sync feels magical enough.</td>
             </tr>

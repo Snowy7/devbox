@@ -2,7 +2,9 @@
 
 ## Scope
 
-This sizing estimates the opportunity for a developer-native workspace continuity platform that begins with personal code-folder sync and expands into team workspaces, agent sandboxes, and Git-compatible source control.
+This sizing estimates the opportunity for a developer-native folder continuity platform that begins
+with personal code-folder sync and expands into teams, agent sandboxes, and Loom-powered source
+control.
 
 This is not a mature standalone analyst category. The sizing triangulates from:
 
@@ -25,7 +27,8 @@ This is not a mature standalone analyst category. The sizing triangulates from:
 
 ### Narrow Market
 
-Developer workspace continuity for local code folders, including sync, snapshots, restore, and Git-compatible work-in-progress preservation.
+Developer folder continuity for local code folders, including sync, snapshots, restore, and Git-safe
+work-in-progress preservation.
 
 ### Expansion Market
 
@@ -35,7 +38,7 @@ Workspace-state infrastructure for:
 - laptop replacement and onboarding
 - secure code mobility
 - agent sandboxes
-- source-control timelines
+- Loom source-control timelines
 - Git-compatible publishing
 
 ## Bottom-Up Sizing
@@ -69,7 +72,7 @@ The broader application development software market is much larger, but it inclu
 | Initial SAM | GitHub-centric, multi-machine developers in US/EU/English-speaking markets | 5M to 10M | USD 120 to USD 180 | USD 600M to USD 1.8B |
 | 5-year SOM, conservative | Paid personal and small-team adoption | 50k seats | USD 140 | USD 7M ARR |
 | 5-year SOM, base | Strong solo wedge plus team preview | 250k seats | USD 180 | USD 45M ARR |
-| 5-year SOM, upside | Team and agent workspace traction | 500k seats | USD 240 | USD 120M ARR |
+| 5-year SOM, upside | Team and agent sandbox traction | 500k seats | USD 240 | USD 120M ARR |
 
 ## Sensitivity
 
@@ -77,9 +80,9 @@ The estimate is most sensitive to:
 
 - paid-seat conversion from developer population
 - whether teams buy this as a productivity/security layer
-- whether agent workspaces become mandatory infrastructure
+- whether agent sandboxes become mandatory infrastructure
 - whether the product can support enterprise governance without becoming a cloud IDE
-- storage and sync costs per active project
+- storage and sync costs per active folder
 
 ## Pricing Hypothesis
 
@@ -94,4 +97,3 @@ The estimate is most sensitive to:
 The first market is not "everyone who uses Git." It is developers who feel acute pain from multi-machine work, WIP safety, local setup drift, and agent experimentation.
 
 The bigger market opens only after the product proves it can preserve work safely. Trust is the conversion gate.
-

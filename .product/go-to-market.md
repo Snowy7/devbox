@@ -5,7 +5,7 @@
 Start with developers who:
 
 - use at least two machines
-- keep many projects under a code folder
+- keep many repos or apps under a code folder
 - work locally rather than exclusively in cloud IDEs
 - use Git but often have uncommitted WIP
 - experiment with AI coding tools or agents
@@ -18,7 +18,7 @@ Likely early adopters:
 - senior full-stack developers
 - consultants and agencies
 - AI coding power users
-- open-source maintainers with many projects
+- open-source maintainers with many repos
 
 ## Initial Message
 
@@ -36,7 +36,7 @@ Trust message:
 
 Developer-specific message:
 
-> Git-compatible. Dev-aware. Secrets-safe.
+> Git-safe. Dev-aware. Secrets-safe.
 
 ## Launch Positioning
 
@@ -49,7 +49,7 @@ Do not lead with:
 
 Lead with:
 
-- workspace continuity
+- folder continuity
 - WIP safety
 - code-folder sync
 - automatic restore points
@@ -72,11 +72,11 @@ Developer-native channels:
 
 ## Demo Script
 
-1. Show desktop with project open and uncommitted work.
+1. Show desktop with a code folder open and uncommitted work.
 2. Add a new untracked file and edit existing files.
 3. Close desktop.
 4. Open laptop.
-5. Project appears.
+5. The folder appears.
 6. Show exact WIP, including untracked file.
 7. Show generated dependencies were not copied.
 8. Show restore timeline.
@@ -98,14 +98,14 @@ USD 10/month
 - multi-device sync
 - encrypted cloud storage
 - longer restore history
-- priority project selection
+- priority folder selection
 - conflict timeline
 
 ### Team
 
 USD 15/user/month
 
-- shared workspace links
+- shared folder links
 - team policies
 - basic admin
 - retention
@@ -147,7 +147,6 @@ Teams will buy for:
 - Why Git does not save your working state.
 - Why Dropbox is dangerous for code folders.
 - How to move between machines without stashing.
-- How to safely run agents against a codebase.
+- How to safely run agents against a code folder.
 - Local-first developer workflows in an AI era.
 - Worktrees, stashes, and WIP commits are symptoms.
-

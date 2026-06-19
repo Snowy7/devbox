@@ -2,14 +2,14 @@
 
 ## Architecture Goal
 
-Build a local-first, Git-compatible workspace graph that can support:
+Build a local-first folder-state graph, codenamed Loom, that can support:
 
 - personal code-folder sync
 - automatic WIP snapshots
 - reliable restore
 - team sharing and policy
-- copy-on-write agent workspaces
-- future source-control primitives
+- agent sandboxes
+- future source-control workflows
 
 The architecture should never depend on treating a developer code folder as dumb files.
 
@@ -18,10 +18,10 @@ The architecture should never depend on treating a developer code folder as dumb
 ```text
 Local filesystem
   -> watcher and scanner
-  -> project classifier
+  -> developer-folder analyzer
   -> policy engine
   -> content-addressed object store
-  -> workspace timeline
+  -> folder timeline
   -> encrypted sync protocol
   -> device materializer
 ```
@@ -32,16 +32,22 @@ Local filesystem
 | --- | --- |
 | Account | Owner identity and billing/security scope |
 | Device | Trusted machine with keys and capabilities |
-| CodeRoot | User-selected folder such as `~/Code` |
-| Project | Detected repo or directory inside a code root |
+| SharedFolder | User-selected folder such as `~/Code` |
+| FolderScope | Implementation boundary for one synced folder or nested folder |
 | PolicySet | Rules for sync, ignore, secrets, rehydration, and retention |
-| Snapshot | Immutable workspace state at a point in time |
+| Object | Content-addressed bytes |
+| FileVersion | One path's captured content state |
+| FolderRevision | Coherent folder tree assembled from file versions |
+| Snapshot | Current implementation term that maps roughly to a folder revision |
 | Manifest | Path tree with blob ids, metadata, permissions, symlinks, and policy decisions |
 | Blob | Content-addressed file chunk or packed object |
-| Workstream | Mutable pointer to a line of snapshots |
+| Checkpoint | Human meaningful marker on captured folder state |
+| Pin | Retention marker that protects a folder revision |
+| Sandbox | Isolated writable view for parallel human or agent work |
+| Overlay | Machine-local dependencies, caches, local config, and secrets shared safely across sandboxes |
 | Operation | Timeline event: edit, snapshot, restore, divergence, merge, policy change |
-| DeviceState | Last known project state on a device |
-| GitState | Git-specific refs, HEAD, index, object, and remote metadata captured safely |
+| DeviceState | Last known folder state on a device |
+| GitState | Git-specific context captured safely when the folder uses Git |
 | SecretEnvelope | Encrypted secret payload or blocked secret decision |
 
 ## Storage Model
@@ -51,7 +57,7 @@ Local:
 - embedded database for metadata, likely SQLite first
 - local object cache
 - append-only operation log
-- project manifests
+- folder manifests
 - device sync cursors
 
 Cloud:
@@ -69,18 +75,18 @@ Current Phase 1 foundation status:
 - encrypted immutable blob upload/download works through a local filesystem provider
 - S3-compatible encrypted blob transport can target Cloudflare R2, AWS S3, or MinIO with redacted
   env-based credential configuration
-- hosted metadata API/store/handler foundations model accounts, devices, projects, published
-  snapshot manifests, and server-side device/project cursors with compare-and-set updates using
+- hosted metadata API/store/handler foundations model accounts, devices, implementation folder scopes, published
+  snapshot manifests, and server-side device/folder cursors with compare-and-set updates using
   SQLite for dev/tests
 - local/mock auth session, pairing invitation approval, key envelopes, device revocation, and
-  device/project cursor primitives exist in SQLite
+  device/folder cursor primitives exist in SQLite
 - production-shaped account ownership proof and account session primitives model external provider
   subject, verified email/domain, token-hash sessions, expiration, revocation, and safe no-network
   dev persistence without live OAuth
 - hosted metadata handlers preserve explicit mock-dev header auth for tests/dev and add
   production-shaped account-session bearer auth resolved through the hosted session store, scoping
-  devices, projects, snapshots, cursors, and managed leases to the authenticated account boundary
-- hosted metadata managed object credential lease primitives model account/session/project-scoped
+  devices, folder scopes, snapshots, cursors, and managed leases to the authenticated account boundary
+- hosted metadata managed object credential lease primitives model account/session/folder-scoped
   R2/S3/MinIO-compatible provider references, capabilities, expiration, revocation, and rotation
   generation without storing or printing raw object credentials
 - local pairing primitives now include recovery grant references, grant revocation, device rotation
@@ -91,7 +97,7 @@ Current Phase 1 foundation status:
   publish paths
 - local conflict records compare divergent snapshots with path-level metadata rows and persist them
   in SQLite without source bytes
-- local sync preflight reconciles receiving device/project cursors with local and incoming
+- local sync preflight reconciles receiving device/folder cursors with local and incoming
   snapshots, refuses divergent local/mock import or materialization, and persists readable conflict
   records without advancing the cursor
 - local/mock publish/import/materialize can opt into in-process hosted metadata for manifest
@@ -99,7 +105,7 @@ Current Phase 1 foundation status:
 - no-network Electron private-alpha shell, explicit path-scoped secret policy records, and guarded
   manual conflict resolution records are in place
 - live OAuth/login integration, live Cloudflare/AWS object credential provisioning, production
-  pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and
+  pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Loom work, and
   production deployment hardening remain deferred
 
 ## Content Addressing
@@ -108,11 +114,27 @@ Every durable file content chunk should be addressed by hash.
 
 Benefits:
 
-- deduplication across devices and projects
+- deduplication across devices and folders
 - fast restore
 - cheap divergent snapshots
-- foundation for copy-on-write agent workspaces
+- foundation for agent sandboxes
 - future source-control compatibility
+
+## Loom History Model
+
+Loom should not create a heavyweight whole-folder revision for every edit. It should capture and
+deduplicate file content frequently, then assemble coherent folder revisions at stable boundaries:
+
+- after a debounce window
+- before or after a Loom command
+- before sync
+- before restore
+- before sandbox merge
+- when a user creates a checkpoint
+
+The user can inspect and restore automatic folder revisions even if no checkpoint was made. A
+checkpoint is a name and message attached to a folder revision, not the first moment the work becomes
+durable. Pins protect important revisions from retention cleanup.
 
 ## Git Handling
 
@@ -131,13 +153,13 @@ Git repositories need a dedicated adapter:
    - restore untracked files according to policy
 6. Run verification such as `git status`, `git fsck` where appropriate, and manifest checks.
 
-This lets Git keep doing what it is good at while Devbox owns live workspace continuity.
+This lets Git keep doing what it is good at while Devbox owns live folder continuity.
 
 ## Policy Engine
 
 Policy layers, highest priority first:
 
-1. explicit user/project policy
+1. explicit user/folder policy
 2. team policy later
 3. secret policy
 4. language/framework defaults
@@ -158,7 +180,8 @@ Default generated directories:
 - `.cache`
 - `coverage`
 
-Important caveat: some projects intentionally commit or depend on directories named like generated artifacts. The policy engine must explain and allow overrides.
+Important caveat: some folders intentionally commit or depend on directories named like generated
+artifacts. The policy engine must explain and allow overrides.
 
 ## Secrets
 
@@ -187,15 +210,15 @@ Instead:
 - create divergent snapshots
 - name the device and timestamp
 - show affected files
-- allow restore, compare, merge, or keep both workstreams
+- allow restore, compare, merge, or keep both states
 
 Example:
 
 ```text
-project-a
-  main workstream
-  divergent snapshot from laptop at 2026-06-18 18:45
-  divergent snapshot from desktop at 2026-06-18 18:47
+shared-folder
+  main folder state
+  divergent state from laptop at 2026-06-18 18:45
+  divergent state from desktop at 2026-06-18 18:47
 ```
 
 ## Sync Algorithm Shape
@@ -221,7 +244,8 @@ while an account can accumulate many approved devices over time.
 
 ## Rehydration
 
-The product should avoid syncing heavy dependency directories by default. It should make rehydration visible:
+The product should avoid syncing heavy dependency directories by default. It should make rehydration
+or overlay behavior visible:
 
 - "Run npm install"
 - "Run pnpm install"
@@ -229,7 +253,7 @@ The product should avoid syncing heavy dependency directories by default. It sho
 - "Create virtualenv"
 - "Docker image must be rebuilt"
 
-Later this can become automated per project policy.
+Later this can become automated per folder policy.
 
 ## Future Team Foundation
 
@@ -240,33 +264,33 @@ Add later:
 - device approval
 - managed retention
 - audit log
-- protected projects
+- protected folders
 - private package visibility
-- shared workspace links
+- shared folder links
 - admin recovery
 
-These are metadata and policy layers on top of the same workspace graph.
+These are metadata and policy layers on top of the same Loom folder-state graph.
 
 ## Future Agent Foundation
 
-Agents should get copy-on-write workspaces:
+Agents should get sandboxes:
 
-- create agent workstream from snapshot
-- materialize only changed files
+- create agent sandbox from a checkpoint or current folder state
+- isolate source edits while sharing safe overlays
 - capture every agent operation
 - provide diff, test, and provenance
-- merge or discard workstream
+- merge or discard sandbox work
 
 This is much cleaner if the core snapshot graph exists from day one.
 
-## Future Better-Git Foundation
+## Future Loom Foundation
 
-Long term, Git becomes an adapter:
+Long term, Loom becomes the source-control primitive and Git becomes an adapter:
 
 - import Git repo
 - map commits to snapshots
-- map branches to workstreams
-- export selected workstream to Git commits
+- map branches to sandboxes or checkpoints where needed
+- export selected checkpoint/proposal to Git commits
 - publish to GitHub/GitLab
 - preserve compatibility with existing CI and code review
 
@@ -274,7 +298,7 @@ New primitives:
 
 - automatic checkpoints
 - semantic summaries
-- workstreams instead of branches
-- snapshots instead of stashes
-- copy-on-write spaces instead of worktrees
+- sandboxes instead of branches/worktrees as the default parallel-work model
+- snapshots/checkpoints instead of stashes
+- shared overlays instead of duplicated local environments
 - operation log instead of reflog archaeology

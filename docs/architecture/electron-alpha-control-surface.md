@@ -1,5 +1,9 @@
 # Electron Alpha Control Surface
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice turns `apps/desktop` from a placeholder into a private-alpha Electron shell.
 
 ## Boundary
@@ -57,5 +61,5 @@ scripts/package-desktop-alpha.sh v0.1.0-alpha.1
 ## Deferred
 
 Deferred work includes live daemon IPC, production OAuth UI, live provider provisioning, signed
-installers, paid/team flows, agent workflows, Git replacement UI, automatic conflict resolution, and
+installers, paid/team flows, agent workflows, Loom UI, automatic conflict resolution, and
 production packaging.

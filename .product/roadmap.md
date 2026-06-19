@@ -2,7 +2,8 @@
 
 ## Roadmap Principle
 
-Ship the narrowest product that proves workspace trust, while building the graph, policy, and sync foundations needed for teams, agents, and Git replacement.
+Ship the narrowest product that proves folder trust, while building the graph, policy, and sync
+foundations needed for teams, agents, and Loom.
 
 ## Phase 0: Prototype Foundation
 
@@ -12,12 +13,12 @@ Goal: prove local snapshot and restore safety.
 
 Deliverables:
 
-- local project scanner
+- local developer-folder scanner
 - default dev ignore rules
 - content-addressed local object store
 - snapshot manifest
 - restore command
-- local change feed / operation log comparing current workspace state to the latest snapshot
+- local change feed / operation log comparing current folder state to the latest snapshot
 - Git repo detector
 - destructive test suite
 
@@ -52,8 +53,8 @@ Completed foundations:
 - local account/current-device identity and key material
 - encrypted remote blob transport through a local filesystem provider
 - S3-compatible encrypted remote blob provider foundation for Cloudflare R2, AWS S3, and MinIO
-- hosted metadata API/store/handler foundation for accounts, devices, projects, published snapshot
-  manifests, and server-side device/project cursors with compare-and-set updates
+- hosted metadata API/store/handler foundation for accounts, devices, implementation folder scopes, published snapshot
+  manifests, and server-side device/folder cursors with compare-and-set updates
 - local/mock auth session, pairing invitation, approved-device trust, key envelope, revocation, and
   cursor primitives
 - production-shaped account ownership proof and account session primitives with provider
@@ -61,7 +62,7 @@ Completed foundations:
   persistence
 - authenticated hosted metadata request context with explicit mock-dev header mode for tests/dev
   and production-shaped account-session bearer auth resolved through the hosted session store
-- managed object credential lease foundation for account/session/project-scoped R2/S3/MinIO-shaped
+- managed object credential lease foundation for account/session/folder-scoped R2/S3/MinIO-shaped
   provider references, capabilities, expiration, revocation, rotation generation, and no-network
   mock/dev CLI smoke checks
 - production-shaped pairing recovery and rotation primitives, including recovery grant references,
@@ -74,8 +75,8 @@ Completed foundations:
 - local sync preflight and cursor reconciliation that refuses divergent local/mock import or
   materialization and persists readable conflict records without advancing cursors
 - opt-in mock-dev hosted metadata wiring for publish/import/materialize manifest discovery and
-  server-side device/project cursor compare-and-set
-- no-network Electron private-alpha shell for status, projects, sync activity, conflicts, devices,
+  server-side device/folder cursor compare-and-set
+- no-network Electron private-alpha shell for status, folders, sync activity, conflicts, devices,
   secret policy, and settings
 - explicit path-scoped secret policy records for block, template, and encrypted envelope references
 - guarded manual conflict resolution records with no automatic apply or merge
@@ -90,12 +91,12 @@ Remaining deferred work:
 - automatic conflict merge/apply resolution
 - paid/team administration
 - agent workflows
-- Git replacement/version-control semantics
+- Loom source-control semantics
 
 Exit criteria:
 
 - 25 alpha users complete desktop-to-laptop workflow
-- P50 second-device project ready under 10 minutes
+- P50 second-device folder ready under 10 minutes
 - zero data loss incidents
 - zero Git corruption incidents
 
@@ -108,9 +109,9 @@ Goal: make the product safe enough for paid personal beta.
 Deliverables:
 
 - timeline UI
-- project policy editor
+- folder policy editor
 - rehydration hints
-- restore file/project/code-root
+- restore file/folder/code-root
 - sync explain view
 - Windows/macOS/Linux watcher hardening
 - cost and cache controls
@@ -120,7 +121,7 @@ Exit criteria:
 
 - 500 beta users
 - 40% connect second device within 7 days
-- 30% weekly active synced projects
+- 30% weekly active synced folders
 - restore success above 95%
 - support load understood by issue category
 
@@ -135,7 +136,7 @@ Deliverables:
 - billing
 - storage limits
 - retention tiers
-- priority project selection
+- priority folder selection
 - VS Code extension
 - import/migration assistant
 - public docs
@@ -169,14 +170,14 @@ Exit criteria:
 - admin trust score positive
 - no increase in core safety incidents
 
-## Phase 5: Agent Workspaces
+## Phase 5: Agent Sandboxes
 
 Goal: make agents safe by default.
 
 Deliverables:
 
-- copy-on-write agent workstreams
-- agent workspace API
+- isolated agent sandboxes
+- agent folder-state API
 - snapshot provenance
 - run/test result attachment
 - discard/merge agent work
@@ -185,18 +186,18 @@ Deliverables:
 
 Exit criteria:
 
-- agent workspace creation under 30 seconds for typical repo
+- agent sandbox creation under 30 seconds for typical folder
 - agent changes reviewable without noisy micro-commits
-- accepted agent workstream rate improving
+- accepted agent work rate improving
 - rollback success above 99%
 
-## Phase 6: Better Git Layer
+## Phase 6: Loom Layer
 
-Goal: expose a new source-control UX without breaking Git compatibility.
+Goal: expose Loom's source-control UX without breaking Git compatibility.
 
 Deliverables:
 
-- workstream UI
+- sandbox and checkpoint UI
 - Git import/export
 - semantic checkpoints
 - branchless local flow

@@ -3,14 +3,14 @@
 This is the private-alpha Electron + React + TypeScript shell for Devbox.
 
 The app is a local control surface for the desktop-to-laptop alpha loop. It shows local DB/cache and
-project paths, hosted API/session/project config, remote kind and shared bucket prefix, object-access
+folder paths, hosted API/session/folder config, remote kind and shared bucket prefix, object-access
 lease state, receiver pairing handoff, live sync command state, manual conflict records, explicit
 secret policy records, and redacted settings. The Electron bridge derives state from `DEVBOX_*`
 environment variables when present and otherwise falls back to safe placeholders, so it can build and
 run without cloud credentials, browser login, Docker, Postgres, or production services.
 
-The desktop app must call the Rust daemon or a narrow local bridge for workspace mutations. It must
-never write, delete, restore, or merge project files directly from renderer code.
+The desktop app must call the Rust daemon or a narrow local bridge for folder mutations. It must
+never write, delete, restore, or merge shared-folder files directly from renderer code.
 
 ## Commands
 

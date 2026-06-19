@@ -10,29 +10,33 @@ This folder turns the product strategy into implementation phases:
 - Architecture: daemon, desktop app, backend, storage, and repo layout.
 - Validation: metrics, experiments, and launch gates.
 
-The MVP rule is simple: earn trust before expanding into teams, agents, or a Git replacement.
+The MVP rule is simple: earn trust before exposing teams, agents, or Loom as source control.
+
+Language note: older alpha planning docs often say "project" for a scoped folder. New product
+language should say shared folder. The source-control primitive underneath Devbox is codenamed Loom;
+Git remains a compatibility surface, not the product center.
 
 Current Phase 1 foundation status: snapshot/restore, manual change-feed scanning, the local watcher,
 local account/current-device identity, encrypted blob transport through a local filesystem remote
 provider, S3-compatible encrypted object transport for R2/S3/MinIO-style remotes, hosted metadata
-API/store/handler foundations for accounts/devices/projects/published manifests/server-side
+API/store/handler foundations for accounts/devices/folder scopes/published manifests/server-side
 compare-and-set cursors, local/mock auth plus device-pairing trust primitives, local/mock
 second-device materialization through encrypted remotes, local high-confidence secret blocking, and
 local conflict-as-divergent-snapshot compare/persist metadata are in place. Local sync preflight now
-uses device/project cursors to refuse divergent local/mock import and materialization before file
+uses device/folder cursors to refuse divergent local/mock import and materialization before file
 blobs are downloaded or applied, while persisting readable conflict records. Publish/import/materialize
 can now opt into in-process mock-dev hosted metadata for published manifest discovery and
 server-side cursor compare-and-set. The daemon now has a live sync automation foundation that
-debounces/scans project changes, persists idempotent live snapshots, publishes encrypted objects,
+debounces/scans folder changes, persists idempotent live snapshots, publishes encrypted objects,
 registers hosted mock-dev metadata, discovers the latest remote snapshot, and imports/materializes
 through cursor/conflict preflight. Production-shaped account ownership proof and account session
 models now cover provider subject/email/domain proof, token-hash sessions, expiration, revocation,
 and no-network CLI/dev persistence. Hosted metadata now has explicit mock-dev header auth for
 tests/dev plus production-shaped account-session bearer auth resolved through the hosted session
-store, with handlers scoping devices/projects/snapshots/cursors to the authenticated account.
+store, with handlers scoping devices/folders/snapshots/cursors to the authenticated account.
 Hosted metadata can now run as a single-instance alpha API with `/ready`, one-time invite login,
 bearer session status/logout, and mock-dev auth disabled by default in the server binary.
-Hosted metadata now also models account/session/project-scoped managed object credential leases
+Hosted metadata now also models account/session/folder-scoped managed object credential leases
 and server-mediated object-access grants with redacted provider references, canonical shared-bucket
 prefixes, expiration, revocation, rotation generation, hosted CLI resolution, and no-network
 mock/dev CLI smoke commands. Hosted object transfer now proxies encrypted object put/get/head/list
@@ -46,5 +50,4 @@ control surface, explicit path-scoped secret policy records, guarded manual conf
 records, macOS/Linux alpha release scripts, and a deterministic two-device smoke harness with
 redacted evidence logs. OAuth/OIDC provider login, signed installers, live Cloudflare/AWS credential
 provisioning, production pairing UX, multi-region/observability hardening, automatic
-merge/apply resolution, paid/team/agent/Git
-replacement work remain deferred.
+merge/apply resolution, paid/team/agent/Loom work remain deferred.

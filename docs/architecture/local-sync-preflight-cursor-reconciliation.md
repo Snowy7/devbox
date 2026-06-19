@@ -1,5 +1,9 @@
 # Local Sync Preflight and Cursor Reconciliation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice makes the local divergent-snapshot conflict model active in the local/mock
 second-device path.
 
@@ -13,7 +17,7 @@ The implementation is local-first:
 - `devbox-cli` exposes a scriptable `devbox sync preflight` command.
 
 It does not add production auth, managed R2/S3 credential provisioning, automatic merge/apply
-resolution, Git replacement UX, or a hosted conflict service. The Electron alpha shell can now show
+resolution, Loom UX, or a hosted conflict service. The Electron alpha shell can now show
 redacted env-backed conflict state, hosted config, object-access scope, pairing, and CLI/daemon
 command hints, while real daemon IPC remains a later integration point. A hosted metadata API
 foundation now models server-side compare-and-set cursors, and the opt-in mock-dev sync wiring can

@@ -2,7 +2,8 @@
 
 Last updated: 2026-06-19
 
-This folder is the working product foundation for a developer-native "Dropbox for Code" that can later expand into team workspaces, agent workspaces, and a better Git-compatible source-control layer.
+This folder is the working product foundation for Devbox: developer folder continuity that can later
+expand into teams, agent sandboxes, and a new source-control primitive.
 
 ## Core Thesis
 
@@ -14,7 +15,8 @@ The wedge is simple:
 
 The foundation is deeper:
 
-> A durable workspace graph that captures live developer state, with Git as a compatibility adapter.
+> Loom, a source-control primitive for file versions, folder revisions, checkpoints, safe sandboxes,
+> shared overlays, and agent-friendly folder state.
 
 ## Folder Map
 
@@ -24,7 +26,7 @@ The foundation is deeper:
 - [kpi-framework.md](kpi-framework.md) - north star, activation, reliability, growth, and guardrail metrics.
 - [product-business-analysis.md](product-business-analysis.md) - recommendation, opportunity logic, and prioritization.
 - [architecture-foundation.md](architecture-foundation.md) - durable technical foundation for sync, Git compatibility, teams, and agents.
-- [roadmap.md](roadmap.md) - phased plan from personal sync to source-control replacement.
+- [roadmap.md](roadmap.md) - phased plan from personal sync to Loom-powered source control.
 - [go-to-market.md](go-to-market.md) - ICPs, positioning, pricing, and launch loops.
 - [risk-register.md](risk-register.md) - product, technical, trust, security, and business risks.
 - [experiments.md](experiments.md) - validation plan and user research scripts.
@@ -35,9 +37,12 @@ The foundation is deeper:
 
 ## Recommended First Decision
 
-Start with solo developer, multi-machine workspace sync. Do not start with teams, cloud IDEs, agents, or a Git replacement as the first public product.
+Start with solo developer, multi-machine folder sync. Do not start with teams, cloud IDEs, agents, or
+Loom as the visible first public product.
 
-That choice is not timid. It is the fastest way to earn the trust needed to own developer working state. Once the product can safely sync a live code folder across machines, the same primitives can support team sharing, copy-on-write agent sandboxes, semantic checkpoints, and Git-compatible publishing.
+That choice is not timid. It is the fastest way to earn the trust needed to own developer working
+state. Once the product can safely sync a live code folder across machines, Loom can support team
+sharing, agent sandboxes, human checkpoints, and Git-compatible publishing.
 
 ## Current Source Context
 
@@ -51,5 +56,5 @@ product step is alpha validation of one narrow promise:
 1. Install on desktop.
 2. Select a code folder.
 3. Install on laptop.
-4. Open one project.
+4. Open the synced folder.
 5. The exact working state is present, restorable, and safe.

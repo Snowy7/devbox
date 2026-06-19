@@ -1,5 +1,9 @@
 # Hosted Metadata Sync Flow Wiring
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice wires the existing local/mock second-device sync flows to the hosted metadata
 foundation without requiring a network service in normal development or CI.
 

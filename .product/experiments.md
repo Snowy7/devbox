@@ -6,17 +6,17 @@ Validate the wedge before building a broad platform.
 
 ## Core Hypotheses
 
-1. Developers with multiple machines feel acute pain around uncommitted work and local project continuity.
+1. Developers with multiple machines feel acute pain around uncommitted work and local folder continuity.
 2. Developers will trust a tool that snapshots and restores before it syncs.
 3. Dev-aware policy is enough to differentiate from generic sync.
 4. A USD 10/month Pro plan is plausible for power users.
-5. The same workspace graph can later support teams and agents.
+5. The same Loom graph can later support teams and agents.
 
 ## Prototype Experiments
 
 ### Experiment 1: Local Snapshot Trust
 
-Build a CLI that snapshots a repo and restores it.
+Build a CLI that snapshots a folder and restores it.
 
 Success:
 
@@ -68,7 +68,7 @@ Success:
 1. How many machines do you code on weekly?
 2. What is in your main code folder?
 3. When did you last lose, forget, or manually move work-in-progress?
-4. Do you ever avoid switching machines because setup/state is annoying?
+4. Do you ever avoid switching machines because folder setup/state is annoying?
 5. How do you handle uncommitted work today?
 6. Have you tried Dropbox, iCloud, Syncthing, rsync, dotfiles, or dev containers for this?
 7. What would make you afraid to use this?
@@ -84,7 +84,7 @@ Choose users with:
 - active local development
 - mixed stacks
 - Git experience
-- willingness to test on real but non-critical projects
+- willingness to test on real but non-critical folders
 - strong feedback habits
 
 Avoid initially:
@@ -104,4 +104,3 @@ Avoid initially:
 | Sync validation | 25 users complete two-device workflow |
 | Pricing validation | 100 paid-intent signups or 20 paid pilots |
 | Team validation | 5 design partners identify budget owner and use case |
-

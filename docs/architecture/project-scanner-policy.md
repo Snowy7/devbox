@@ -1,4 +1,9 @@
-# Project Scanner and Policy Foundation
+# Developer Folder Scanner and Policy Foundation
+
+Historical terminology note: this architecture slice uses `project` for detected developer folders.
+New product language should say shared folder or detected folder. Devbox is not built around
+projects; it analyzes whatever folder the user shares. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
 
 This slice adds a read-only scanner that classifies local project directories and explains default generated-artifact exclusions. It does not create snapshots, hash content, write metadata, sync files, or call language package managers.
 

@@ -1,5 +1,9 @@
 # Local Change Feed Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This foundation moves Devbox from persisted manual snapshots toward a local answer to "what
 changed?" The daemon watcher now calls the same shared scan orchestration after debounced filesystem
 events; the persisted feed remains local-only.
@@ -64,5 +68,5 @@ This foundation deliberately does not implement:
 - conflict detection or resolution
 - cross-device sync
 - teams, agents, or shared workspaces
-- Git replacement behavior
+- Loom source-control behavior
 - Electron or desktop UI surfaces

@@ -1,5 +1,9 @@
 # Live Sync Daemon Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice moves Devbox from manual publish/import commands toward "things are always
 synced" while keeping the alpha boundary conservative.
 

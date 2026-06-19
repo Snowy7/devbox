@@ -1,5 +1,9 @@
 # Local Watcher Daemon Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This slice introduces the local Phase 1 bridge between filesystem events and the existing pending
 local change feed.
 

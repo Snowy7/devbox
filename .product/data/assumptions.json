@@ -1,8 +1,8 @@
 {
-  "updated": "2026-06-18",
+  "updated": "2026-06-19",
   "product": "Devbox",
   "core_thesis": "Your code folder, everywhere.",
-  "foundation_thesis": "A durable workspace graph with Git as a compatibility adapter.",
+  "foundation_thesis": "Loom: a folder-state graph for implicit history, checkpoints, safe sandboxes, shared overlays, and Git compatibility.",
   "market_anchors": {
     "github_developers_2025": 180000000,
     "software_development_tools_market_2026_usd": 7440000000,
@@ -16,7 +16,7 @@
     "business_monthly_usd_per_user": 25
   },
   "mvp_non_goals": [
-    "replace Git",
+    "ask users to replace Git first",
     "host code review",
     "build a cloud IDE",
     "support real-time collaborative editing",
@@ -28,4 +28,3 @@
     "zero secret leak incidents"
   ]
 }
-

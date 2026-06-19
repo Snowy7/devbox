@@ -3,6 +3,9 @@
 This is the deployable Devbox alpha API surface. Railway-hosted multi-user alpha deployments should
 run `devbox-metadata` against managed Postgres through `DATABASE_URL`.
 
+Language note: the hosted API still uses `project` in routes and storage because the alpha schema
+uses that word for a scoped shared folder. Product docs should say shared folder.
+
 SQLite remains supported for local development and tests. Do not use SQLite for the shared external
 tester backend.
 
@@ -136,6 +139,6 @@ cargo run -p devbox-cli -- auth hosted-logout \
 - Raw session tokens are returned once and should be kept in an ignored local env file or shell env.
 - R2 credentials stay on the metadata server for hosted object transfer; trusted operators can still
   run direct-S3 smoke tests with local bucket keys.
-- Device pairing and project key envelopes are still local alpha flows, not hosted onboarding UX.
+- Device pairing and folder key envelopes are still local alpha flows, not hosted onboarding UX.
 - OAuth/OIDC provider login, team billing, multi-region hardening, and signed installers remain
   future work.

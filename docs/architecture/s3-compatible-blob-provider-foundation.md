@@ -1,5 +1,9 @@
 # S3-Compatible Blob Provider Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice adds a production-shaped encrypted object remote for the existing sync pipeline.
 `devbox-sync` can now target S3-compatible object storage such as Cloudflare R2, AWS S3, or MinIO
 behind the same `RemoteBlobProvider` boundary used by the local filesystem provider.

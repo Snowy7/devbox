@@ -1,5 +1,10 @@
 # MVP Technical Foundation
 
+Historical terminology note: this architecture slice uses `project` as an early implementation term
+for a scoped shared folder. New product language should say shared folder. Loom is the codename for
+the deeper source-control primitive underneath Devbox; `devbox-git` is compatibility support for
+existing Git folders, not the product foundation.
+
 This document records the first PR-sized technical skeleton for Devbox. It is intentionally kept as
 historical architecture context: the goal was to establish crate boundaries, local domain vocabulary,
 and future app layout before snapshot, restore, sync, and policy execution landed.

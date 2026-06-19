@@ -2,23 +2,30 @@
 
 ## One-Line Product
 
-Devbox is developer-native workspace sync: your code folder, work-in-progress, and project context follow you across every machine.
+Devbox is developer-native folder sync: your code folder, work-in-progress, and local context follow
+you across every machine.
 
 ## Category Bet
 
-The next source-control primitive is not the commit. It is the workspace timeline.
+The next source-control primitive is not the commit. It is the live folder timeline.
 
-Git records intentional project history. Devbox records live developer state:
+Git records intentional repo history. Devbox records live developer folder state:
 
 - changed files
 - untracked files
 - local notes
 - generated-but-important fixtures
-- project policies
+- folder policies
 - secrets policy
 - device state
 - automatic checkpoints
-- agent workstreams
+- agent sandboxes
+
+The codename for this deeper primitive is **Loom**. Devbox is the product users install. Loom is the
+source-control engine direction underneath it.
+
+Loom history should be layered: frequent file versions, coherent folder revisions at stable
+boundaries, and human checkpoints for moments worth naming.
 
 ## Initial Wedge
 
@@ -28,22 +35,23 @@ The first product promise:
 
 > Close desktop. Open laptop. Keep coding.
 
-This is intentionally narrower than teams, agents, or Git replacement. It tests the hardest trust loop directly: can developers let us touch their working tree?
+This is intentionally narrower than teams, agents, or Loom as a visible source-control product. It tests
+the hardest trust loop directly: can developers let us touch their live folder?
 
 ## Expansion Path
 
 1. Personal sync: make code folders continuous across machines.
-2. Recovery: automatic snapshots, restore, and project-level timelines.
+2. Recovery: automatic snapshots, restore, and folder-level timelines.
 3. Sharing: send a trusted collaborator the exact current workspace state.
 4. Teams: managed policies, audit, device replacement, onboarding, and private packages.
-5. Agents: copy-on-write sandboxes, reviewable agent timelines, safe merge.
-6. Better Git: workstreams, semantic checkpoints, GitHub/GitLab export, branchless local UX.
+5. Agents: safe sandboxes, reviewable agent timelines, merge or discard.
+6. Loom: checkpoints, sandboxes, overlays, GitHub/GitLab export, branchless local UX.
 
 ## Personas
 
 ### Indie Developer
 
-Has a desktop and laptop. Works across many projects. Hates setup drift and forgotten WIP.
+Has a desktop and laptop. Works across many folders and repos. Hates setup drift and forgotten WIP.
 
 Primary job: "Let me continue wherever I am."
 
@@ -68,7 +76,7 @@ Primary job: "Let agents explore without wrecking my main workspace."
 ## Product Principles
 
 - Never lose work.
-- Git-compatible before Git-replacing.
+- Git-compatible because Git is normal developer context.
 - Local-first by default.
 - Developer state is structured, not dumb files.
 - Generated artifacts should be rehydrated, not blindly copied.
@@ -81,7 +89,7 @@ Primary job: "Let agents explore without wrecking my main workspace."
 
 ### For Individuals
 
-Your code folder, everywhere. Works with Git, VS Code, JetBrains, terminal, and your existing projects.
+Your code folder, everywhere. Works with Git, VS Code, JetBrains, terminal, and your existing folders.
 
 ### For Teams
 
@@ -89,11 +97,11 @@ Reliable developer workspaces without forcing every engineer into a cloud IDE.
 
 ### For Agents
 
-Safe copy-on-write workspaces for AI agents, with reviewable timelines and Git-compatible output.
+Safe sandboxes for AI agents, with reviewable timelines and Git-compatible output.
 
 ## Non-Goals For MVP
 
-- Replacing Git.
+- Asking users to replace Git first.
 - Hosting code review.
 - Building a cloud IDE.
 - Supporting real-time Google-Docs-style collaborative editing.
@@ -106,9 +114,9 @@ Safe copy-on-write workspaces for AI agents, with reviewable timelines and Git-c
 Must have:
 
 - cross-platform local daemon
-- code-root selection
-- project detection
-- Git-aware state capture
+- folder selection
+- developer-folder analysis
+- Git-safe state capture
 - dev-aware ignore defaults
 - encrypted sync
 - automatic WIP snapshots
@@ -120,7 +128,7 @@ Should have:
 
 - basic desktop tray/menu
 - VS Code extension
-- project health warnings
+- folder health warnings
 - dependency rehydration hints
 - secret policy prompts
 
@@ -136,9 +144,8 @@ Can wait:
 ## Product Surfaces
 
 - Local daemon: watches, snapshots, syncs, restores.
-- CLI: status, devices, projects, pause, snapshot, restore, explain.
+- CLI: status, devices, folders, pause, snapshot, restore, explain.
 - Tray/menu app: health, conflicts, sync state.
-- Timeline UI: project restore points and divergences.
-- Editor extension: current state, branch/workstream, restore, conflict notices.
+- Timeline UI: folder restore points and divergences.
+- Editor extension: current state, checkpoint/sandbox, restore, conflict notices.
 - Web app later: devices, team policies, shared workspaces, billing.
-

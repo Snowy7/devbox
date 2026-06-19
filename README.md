@@ -1,10 +1,22 @@
 # Devbox
 
-Devbox is a developer-native workspace continuity project: your code folder, work-in-progress, and project context should follow you across machines.
+Devbox is developer folder continuity: your code folder, work-in-progress, and local context should
+follow you across machines.
 
 The first product wedge is simple:
 
 > Close desktop. Open laptop. Keep coding.
+
+The product is about **shared folders**, not projects. A shared folder can be a big `~/Code` folder,
+one repo, nested developer workspaces, or plain files. Devbox should account for developer tools such
+as Git, dependencies, generated outputs, and secrets, but it should not make the user think about
+those internals just to keep working.
+
+The deeper source-control primitive underneath Devbox is codenamed **Loom**. Devbox is the product
+experience; Loom is the direction for file versions, folder revisions, checkpoints, safe parallel
+sandboxes, shared local overlays, and agent-friendly folder state. Git remains a compatibility surface because
+developers use it today, not the foundation Devbox is trying to become. See
+[docs/devbox-and-loom.md](docs/devbox-and-loom.md).
 
 This repository currently contains the product foundation and MVP planning artifacts:
 
@@ -22,7 +34,7 @@ This repository currently contains the product foundation and MVP planning artif
 - Backend: Rust API, Postgres
 - Remote blob storage: Cloudflare R2 behind an S3-compatible interface; provider foundation exists
   for R2/S3/MinIO-compatible encrypted blobs. A hosted metadata API foundation now models
-  accounts, devices, projects, published snapshot manifests, and server-side compare-and-set
+  accounts, devices, implementation folder scopes, published snapshot manifests, and server-side compare-and-set
   cursors with SQLite for dev/tests. The local/mock publish, import, and materialize flows can now
   opt into an in-process mock-dev SQLite metadata store for manifest discovery and cursor
   compare-and-set without network services. A production-shaped account ownership proof and account
@@ -30,13 +42,13 @@ This repository currently contains the product foundation and MVP planning artif
   and revocation without live OAuth. Hosted metadata HTTP handlers now preserve explicit mock-dev
   header mode for tests/dev and also accept production-shaped `Authorization: Bearer <session-token>`
   account-session auth resolved through the hosted session store. Hosted metadata now also models
-  managed object credential leases with account/session/project scoping, R2/S3/MinIO-shaped provider
+  managed object credential leases with account/session/folder-scope scoping, R2/S3/MinIO-shaped provider
   references, redacted credential references, expiration, revocation, and rotation generation.
-  Hosted object-access resolution now returns account-session-authorized, project-scoped shared
+  Hosted object-access resolution now returns account-session-authorized, folder-scoped shared
   bucket prefixes such as `accounts/<account-id>/projects/<project-id>` through a server-mediated
   broker boundary, and the hosted object transfer path now proxies encrypted object bytes through the
   metadata API so external tester clients need only a Devbox session token, not raw R2/S3 bucket
-  keys. The local daemon now has a live sync loop that can scan/debounce a project, persist an
+  keys. The local daemon now has a live sync loop that can scan/debounce a shared folder, persist an
   idempotent live snapshot, publish encrypted objects through local, trusted direct-S3, or hosted
   object-transfer remotes, register hosted mock-dev metadata, discover the latest published remote
   snapshot, and import or materialize it with cursor/conflict preflight.
@@ -52,8 +64,8 @@ This repository currently contains the product foundation and MVP planning artif
   scripts, docs, and an env template. A deterministic two-device smoke harness proves
   receiver-generated pairing, pending-receiver fail-closed behavior, live publish, latest remote
   discovery, and receiver materialization with redacted evidence logs. The private-alpha desktop
-  shell now provides an Electron control surface for local DB/cache/project paths, hosted
-  API/session/project config, R2/shared-bucket prefix state, pairing, live sync command state,
+  shell now provides an Electron control surface for local DB/cache/folder paths, hosted
+  API/session/folder config, R2/shared-bucket prefix state, pairing, live sync command state,
   conflicts, devices, secret policy, and settings. It reads redacted `DEVBOX_*` setup state and
   does not start sync or mutate files directly. The hosted metadata server now has a
   Railway-shaped Postgres backend selected by `DATABASE_URL`/`DEVBOX_METADATA_DATABASE_URL`, while
@@ -62,6 +74,9 @@ This repository currently contains the product foundation and MVP planning artif
   paid/team/agent/Git-replacement work remain deferred.
 
 ## Local MVP Surface
+
+Language note: many current commands still use `project` because the first alpha schema used that
+word for a scoped shared folder. New product language should say shared folder.
 
 The current CLI can create/list/show/restore local snapshots and scan pending local changes:
 
@@ -134,6 +149,6 @@ Railway/Postgres deployment is wired for the hosted metadata backend; OAuth, UI 
 multi-region/observability hardening remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
-for the project root. Created, modified, and deleted files become pending local operations in
+for the shared folder root. Created, modified, and deleted files become pending local operations in
 SQLite. Generated dependencies, policy exclusions, symlinks, and unsupported filesystem nodes are
 summarized but are not persisted as uploadable operations.

@@ -103,7 +103,7 @@ Release evidence
           <li><code>BlobStore</code>: put, get, head, delete encrypted blob packs.</li>
           <li><code>PolicyEngine</code>: classify include, ignore, block, encrypt, or rehydrate decisions.</li>
           <li><code>GitAdapter</code>: inspect repo state, verify materialization, and avoid dumb-syncing `.git`.</li>
-          <li><code>DaemonApi</code>: status, projects, timeline, restore, settings, warnings, pause.</li>
+          <li><code>DaemonApi</code>: status, folders, timeline, restore, settings, warnings, pause.</li>
         </ul>
       </section>
 
@@ -130,7 +130,7 @@ Release evidence
           <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>
           <li>The private-alpha Electron shell reads redacted `DEVBOX_*` setup state for local paths, hosted session/project config, object-access lease, shared bucket prefix, pairing, live sync command state, and safety records.</li>
           <li>Alpha release scripts package CLI/daemon/metadata tools and an unsigned desktop bundle; the deterministic smoke harness proves two-device pairing, fail-closed pending receivers, live publish, latest pull, and materialization.</li>
-          <li>OAuth/OIDC login, live recovery UX, signed installers, live Cloudflare/AWS object credential provisioning, automatic merge/apply resolution, paid/team/agent/Git replacement work, and multi-region/observability hardening remain deferred.</li>
+          <li>OAuth/OIDC login, live recovery UX, signed installers, live Cloudflare/AWS object credential provisioning, automatic merge/apply resolution, paid/team/agent/Loom work, and multi-region/observability hardening remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
         </ul>
       </section>

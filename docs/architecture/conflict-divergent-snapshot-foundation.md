@@ -1,5 +1,9 @@
 # Conflict as Divergent Snapshots Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice adds a local conflict model for comparing and persisting divergent snapshots.
 It is a compare-and-record foundation, not an automatic merge engine.
 
@@ -12,7 +16,7 @@ The foundation is local-first and metadata-only:
 - `devbox-cli` exposes manual/scriptable conflict commands and guarded manual resolution records.
 
 It does not implement production auth, hosted conflict metadata, server-side cursors, R2/S3,
-automatic merge, Git replacement UX, or materialization into non-empty targets. The private-alpha
+automatic merge, Loom UX, or materialization into non-empty targets. The private-alpha
 Electron shell can display conflict records and manual CLI paths, but real daemon-driven conflict UI
 and automatic resolution remain deferred.
 

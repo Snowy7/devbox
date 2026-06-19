@@ -1,5 +1,9 @@
 # Private Alpha UX and Safety Completion
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This PR completes the private-alpha MVP control/safety surface over the foundations that already
 exist in the Rust crates.
 

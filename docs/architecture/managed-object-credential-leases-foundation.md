@@ -1,5 +1,9 @@
 # Managed Object Credential Lease Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice adds a production-shaped metadata foundation for Devbox-managed object-storage
 credential leases and account-session-scoped object-access grants without making live Cloudflare R2,
 AWS S3, or MinIO provisioning calls.

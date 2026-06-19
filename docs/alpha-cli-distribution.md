@@ -4,6 +4,11 @@ Devbox alpha testers need downloadable command-line tools and a runnable desktop
 before signed installers and polished hosted operations exist. For now, publishing is local: build the
 macOS/Linux alpha archives on matching hosts and upload them to a GitHub Release with `gh`.
 
+Language note: this alpha distribution guide still uses `project` in env vars, command flags, and
+prefixes because the current alpha API uses that implementation term for a scoped shared folder.
+Product language should say shared folder. Loom is the codename for the source-control primitive
+underneath Devbox.
+
 GitHub Packages is not the right first home for raw native binaries. Packages is useful for npm,
 NuGet, Maven, RubyGems, and containers. Devbox alpha tools should start as GitHub Release assets.
 
@@ -56,7 +61,7 @@ Pass credential variable names to the CLI and daemon:
 Do not pass raw key values as CLI arguments.
 
 For external multi-user alpha testing, tester machines should not receive shared bucket credentials.
-Use one shared bucket with per-account/project prefixes. The hosted transfer path keeps R2/S3
+Use one shared bucket with per-account/folder-scope prefixes. The hosted transfer path keeps R2/S3
 credentials on the Devbox metadata server and lets tester clients move encrypted object bytes through
 the account-session/object-access boundary. The server enables object-access resolution and hosted
 object transfer when these server-side env vars are populated:
@@ -82,8 +87,8 @@ The prefix shape is the authorization boundary:
 accounts/<account-id>/projects/<project-id>
 ```
 
-Every grant is scoped to one account session, one project, one lease, and one prefix. A tester should
-never be told to set a prefix outside their own account/project path. External testers use
+Every grant is scoped to one account session, one folder scope, one lease, and one prefix. A tester should
+never be told to set a prefix outside their own account/folder path. External testers use
 `--remote-kind hosted`; trusted operators can still use `--remote-kind s3` when they intentionally
 place local bucket credentials on their own machine.
 

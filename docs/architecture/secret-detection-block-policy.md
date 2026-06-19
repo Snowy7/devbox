@@ -1,5 +1,9 @@
 # Secret Detection and Block Policy
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This Phase 1 slice adds local high-confidence secret blocking to snapshot and local/mock sync
 foundations. It protects the future cloud path by preventing obvious secrets from becoming included
 snapshot blobs by default.

@@ -10,7 +10,7 @@ Thanks for talking with us. We are exploring a developer-native way to make your
 2. How many machines do you code on weekly?
 3. What operating systems do you use?
 4. What IDEs and terminals do you use?
-5. Where do your projects live locally?
+5. Where do your code folders live locally?
 
 ## Current Workflow
 
@@ -18,7 +18,7 @@ Thanks for talking with us. We are exploring a developer-native way to make your
 2. What usually works?
 3. What usually breaks?
 4. How do you handle uncommitted work?
-5. Do you ever avoid switching machines because of project state?
+5. Do you ever avoid switching machines because of folder state?
 
 ## Existing Solutions
 
@@ -43,5 +43,4 @@ Thanks for talking with us. We are exploring a developer-native way to make your
 
 ## Close
 
-Would you be willing to test this on a non-critical repo when the prototype is ready?
-
+Would you be willing to test this on a non-critical folder when the prototype is ready?

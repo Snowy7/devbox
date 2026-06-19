@@ -5,13 +5,13 @@ Owner:
 
 ## Headline
 
-One sentence on whether workspace continuity got more reliable this week.
+One sentence on whether folder continuity got more reliable this week.
 
 ## Metrics
 
 - Successful workspace continuations:
 - Activation to second device:
-- Time to project ready:
+- Time to folder ready:
 - Snapshot capture latency:
 - Restore success rate:
 - Conflict rate:
@@ -44,4 +44,3 @@ One sentence on whether workspace continuity got more reliable this week.
 - Ship:
 - Learn:
 - Fix:
-

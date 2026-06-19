@@ -2,9 +2,11 @@
 
 ## Recommendation
 
-Build the first product as solo developer, multi-machine code-folder sync with automatic snapshots and Git-safe workspace state capture.
+Build the first product as solo developer, multi-machine code-folder sync with automatic snapshots
+and Git-safe folder state capture.
 
-Do not build a Git replacement first. Do not build a CDE first. Do not build team administration first.
+Do not expose Loom as a Git replacement first. Do not build a CDE first. Do not build team
+administration first.
 
 The foundation should support those paths, but the first wedge should prove the trust loop.
 
@@ -51,11 +53,12 @@ This has three advantages:
 - secrets
 - conflict semantics
 
-The opportunity is the gap between Git and generic sync.
+The opportunity is the gap between Git and generic sync. Loom is the long-term primitive that can
+own that gap, but Devbox should first make the folder-continuity promise real.
 
 ## Alternatives Considered
 
-### Start With A Git Replacement
+### Start With Loom As The Visible Product
 
 Pros:
 
@@ -70,7 +73,7 @@ Cons:
 - teams cannot adopt without ecosystem compatibility
 - hard to explain before users feel the workspace pain
 
-Decision: not first.
+Decision: not first. Build Loom underneath, but sell Devbox as folder continuity.
 
 ### Start With Cloud Development Environments
 
@@ -121,19 +124,19 @@ Decision: yes.
 
 ## Initial Product Bet
 
-The MVP should not merely sync files. It should introduce a local timeline from the first day.
+The MVP should not merely sync files. It should introduce a local folder timeline from the first day.
 
 If the product only syncs files, it becomes a fragile Dropbox clone.
 
-If it snapshots workspace state, it becomes the first layer of a better source-control model.
+If it snapshots folder state, it becomes the first layer of Loom.
 
 ## Prioritized MVP Capabilities
 
-1. Project detector and policy engine.
+1. Developer-folder analyzer and policy engine.
 2. Git-safe state capture.
 3. Content-addressed local snapshots.
 4. Encrypted sync backend.
-5. Second-device project materialization.
+5. Second-device folder materialization.
 6. Restore timeline.
 7. Conflict-as-divergent-snapshot model.
 8. Secret policy.
@@ -166,7 +169,7 @@ The right sequencing is:
 1. Earn individual trust.
 2. Convert power users to Pro.
 3. Sell teams on policy, onboarding, and recovery.
-4. Sell agent workspaces as infrastructure.
+4. Sell agent sandboxes as infrastructure.
 5. Replace more source-control workflows over time.
 
 ## Most Important Unknowns
@@ -182,4 +185,3 @@ The right sequencing is:
 Before writing the full sync backend, prototype the local snapshot and restore layer.
 
 If users do not trust automatic local snapshots, they will not trust cross-device sync.
-

@@ -1,5 +1,9 @@
 # Second-Device Materialization Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This slice completes the first local/mock Phase 1 vertical path for second-device continuation:
 
 - publish a persisted snapshot through the encrypted local filesystem remote

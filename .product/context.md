@@ -2,22 +2,25 @@
 
 ## Decision Frame
 
-We are planning a product that starts as "Dropbox for devs" and can eventually become a developer workspace platform for teams, agents, and source control.
+We are planning a product that starts as developer folder continuity and can eventually become a
+workspace platform for teams, agents, and source control.
 
 The immediate decision is what foundation to build so the first wedge is small enough to ship, but the architecture does not block the later ambition.
 
 ## Working Definition
 
-Devbox is a developer-native workspace continuity system.
+Devbox is a developer-native folder continuity system.
 
-It syncs code folders across machines, but it does not behave like generic file sync. It understands projects, source-control state, ignored files, generated artifacts, secrets, dependencies, restore points, and divergent work.
+It syncs developer folders across machines, but it does not behave like generic file sync. It
+understands the developer-shaped mess inside those folders: repos, nested apps, ignored files,
+generated artifacts, secrets, dependencies, restore points, and divergent work.
 
 ## What The User Has Made Clear
 
 - The first felt need is personal and visceral: open a laptop and the code folder from the desktop is already there.
 - The product should make folders feel like they are "at the same place" across machines.
 - Existing products do not feel built for this developer workflow.
-- The long-term ambition includes teams, agents, and a better Git.
+- The long-term ambition includes teams, agents, and a new source-control primitive codenamed Loom.
 - Because of that ambition, the foundation matters more than a quick sync hack.
 
 ## Relevant Public Context
@@ -25,16 +28,19 @@ It syncs code folders across machines, but it does not behave like generic file 
 - GitHub reported more than 180 million developers on GitHub in 2025, plus nearly 1 billion commits and 43.2 million merged pull requests per month. This indicates both a huge developer population and an expanding volume of code-change activity.
 - Stack Overflow's 2025 survey shows modern development is dependency-heavy and cloud/toolchain-heavy: Docker usage reached 71.1% among all respondents and 73.8% among professional developers. This reinforces why generic file sync struggles with code folders.
 - Gartner defines cloud development environments as remote, ready-to-use cloud-hosted workspaces that reduce local setup friction. That validates the pain, but CDEs solve it by moving work away from the local machine. Devbox should solve a different job: keep local workspaces continuous across machines.
-- Jujutsu shows a credible direction for "better Git" UX through automatic snapshots and Git compatibility. Devbox should learn from this but should not require users to replace Git on day one.
+- Jujutsu shows a credible direction for better source-control UX through automatic snapshots and
+  Git compatibility. Devbox should learn from this, but users should not need to replace Git on day
+  one.
 - Sonar's 2026 State of Code report says 64% of surveyed developers have started using AI agents and 72% of developers who have tried AI coding tools use them every day. Agent workspaces are not a side quest; they are a future workspace primitive.
 
 ## Key Assumptions
 
 - The first buyer is an individual developer with more than one machine, not a platform team.
 - Trust is the main adoption constraint. Losing work once is fatal.
-- Git remains the collaboration standard for the first several years.
+- Git remains the collaboration standard for the first several years and must be supported as folder
+  context.
 - The product must preserve normal local workflows: terminal, IDE, Git CLI, language servers, file watchers, and local builds.
-- The long-term platform should own workspace state, not just files.
+- The long-term platform should own folder state, not just files.
 
 ## Business Context Note
 
@@ -44,7 +50,7 @@ The market does not have a clean public category called "developer workspace syn
 - Git and Git hosting
 - cloud development environments
 - DevOps/developer productivity platforms
-- AI agent workspace orchestration
+- AI agent sandbox orchestration
 
 That ambiguity is good if the wedge is crisp. It is dangerous if positioning gets vague.
 
@@ -60,5 +66,4 @@ Say:
 
 Then the product earns the right to say:
 
-> Your workspace already has a timeline. Git is just one way to publish it.
-
+> Your folder already has a timeline. Git is just one way to publish it.

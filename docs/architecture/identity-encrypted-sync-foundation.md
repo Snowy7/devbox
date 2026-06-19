@@ -1,5 +1,9 @@
 # Local Identity and Encrypted Object Sync Foundation
 
+Historical terminology note: this architecture slice may use `project` for an implementation-scoped
+shared folder. New product language should say shared folder. Loom is the codename for the deeper
+source-control primitive underneath Devbox.
+
 This slice introduces the first Phase 1 sync foundation after the local watcher daemon:
 
 - local account and current-device identity in SQLite
