@@ -20,6 +20,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,6 +31,9 @@ const DAEMON_DIR: &str = "daemon";
 const STATUS_FILE: &str = "status.tsv";
 const STOP_FILE: &str = "stop.request";
 const LOG_FILE: &str = "daemon.log";
+const LOCK_FILE: &str = "daemon.lock";
+
+static STATUS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonLoopOptions {
@@ -88,6 +92,7 @@ pub struct DaemonStartReport {
     pub pid: u32,
     pub status_path: PathBuf,
     pub log_path: PathBuf,
+    pub already_running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +152,9 @@ pub enum DaemonError {
         path: PathBuf,
         message: String,
     },
+    AlreadyRunning {
+        pid: u32,
+    },
 }
 
 impl fmt::Display for DaemonError {
@@ -187,6 +195,9 @@ impl fmt::Display for DaemonError {
             Self::InvalidStatus { path, message } => {
                 write!(f, "could not read daemon status {}: {message}", path.display())
             }
+            Self::AlreadyRunning { pid } => {
+                write!(f, "background sync is already running with pid {pid}")
+            }
         }
     }
 }
@@ -206,7 +217,8 @@ impl std::error::Error for DaemonError {
             | Self::DivergentState { .. }
             | Self::BlockedSource { .. }
             | Self::DeferredSource { .. }
-            | Self::InvalidStatus { .. } => None,
+            | Self::InvalidStatus { .. }
+            | Self::AlreadyRunning { .. } => None,
         }
     }
 }
@@ -241,6 +253,17 @@ pub fn start_background(options: &DaemonStartOptions) -> DaemonResult<DaemonStar
     let store = LocalStore::open(&options.folder)?;
     let paths = DaemonPaths::new(&store);
     paths.ensure()?;
+    if let Some(status) = live_status(&store, &paths)? {
+        return Ok(DaemonStartReport {
+            folder: store.folder_root().to_path_buf(),
+            pid: status.pid.expect("live status has a pid"),
+            status_path: paths.status_path,
+            log_path: paths.log_path,
+            already_running: true,
+        });
+    }
+
+    acquire_daemon_lock(&paths)?;
     remove_file_if_exists(&paths.stop_path)?;
 
     fs::write(
@@ -252,7 +275,14 @@ pub fn start_background(options: &DaemonStartOptions) -> DaemonResult<DaemonStar
         source,
     })?;
 
-    let pid = spawn_run_loop_process(&store, options)?;
+    let pid = match spawn_run_loop_process(&store, options) {
+        Ok(pid) => pid,
+        Err(error) => {
+            let _ = remove_file_if_exists(&paths.lock_path);
+            return Err(error);
+        }
+    };
+    write_lock_pid(&paths.lock_path, pid)?;
 
     let status = status_for_state(&store, "starting", Some(pid), None, 0, None)?;
     write_status(&paths.status_path, &status)?;
@@ -262,6 +292,7 @@ pub fn start_background(options: &DaemonStartOptions) -> DaemonResult<DaemonStar
         pid,
         status_path: paths.status_path,
         log_path: paths.log_path,
+        already_running: false,
     })
 }
 
@@ -269,6 +300,16 @@ pub fn request_stop(folder: impl AsRef<Path>) -> DaemonResult<DaemonStopReport> 
     let store = LocalStore::open(folder)?;
     let paths = DaemonPaths::new(&store);
     paths.ensure()?;
+    if live_status(&store, &paths)?.is_none() {
+        let status = status_for_state(&store, "stopped", None, None, 0, None)?;
+        write_status(&paths.status_path, &status)?;
+        return Ok(DaemonStopReport {
+            folder: store.folder_root().to_path_buf(),
+            stop_path: paths.stop_path,
+            status,
+        });
+    }
+
     fs::write(&paths.stop_path, format!("requested_at\t{}\n", timestamp())).map_err(|source| {
         DaemonError::Io {
             path: paths.stop_path.clone(),
@@ -285,6 +326,12 @@ pub fn request_stop(folder: impl AsRef<Path>) -> DaemonResult<DaemonStopReport> 
 }
 
 pub fn read_status(folder: impl AsRef<Path>) -> DaemonResult<DaemonStatus> {
+    let store = LocalStore::open(folder)?;
+    let paths = DaemonPaths::new(&store);
+    normalize_status(&store, &paths)
+}
+
+fn read_status_without_normalizing(folder: impl AsRef<Path>) -> DaemonResult<DaemonStatus> {
     let store = LocalStore::open(folder)?;
     let paths = DaemonPaths::new(&store);
     match parse_status(&paths.status_path)? {
@@ -426,6 +473,7 @@ pub fn run_loop(options: &DaemonLoopOptions) -> DaemonResult<()> {
         )?,
     )?;
     remove_file_if_exists(&paths.stop_path)?;
+    remove_lock_if_owner(&paths.lock_path, std::process::id())?;
     Ok(())
 }
 
@@ -697,11 +745,15 @@ fn write_status(path: &Path, status: &DaemonStatus) -> DaemonResult<()> {
         path: parent.to_path_buf(),
         source,
     })?;
-    let temp_path = path.with_extension("tmp");
-    let mut file = File::create(&temp_path).map_err(|source| DaemonError::Io {
-        path: temp_path.clone(),
-        source,
-    })?;
+    let temp_path = status_temp_path(path);
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|source| DaemonError::Io {
+            path: temp_path.clone(),
+            source,
+        })?;
     for (key, value) in [
         ("version", "1".to_string()),
         ("folder", status.folder.display().to_string()),
@@ -760,10 +812,22 @@ fn write_status(path: &Path, status: &DaemonStatus) -> DaemonResult<()> {
         source,
     })?;
     drop(file);
-    fs::rename(&temp_path, path).map_err(|source| DaemonError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    match fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(source) => {
+            let _ = remove_file_if_exists(&temp_path);
+            Err(DaemonError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
+}
+
+fn status_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().expect("daemon status has a parent");
+    let counter = STATUS_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!("status.{}.{}.tmp", std::process::id(), counter))
 }
 
 fn parse_status(path: &Path) -> DaemonResult<Option<DaemonStatus>> {
@@ -906,6 +970,157 @@ fn remove_file_if_exists(path: &Path) -> DaemonResult<()> {
     }
 }
 
+fn live_status(store: &LocalStore, paths: &DaemonPaths) -> DaemonResult<Option<DaemonStatus>> {
+    let status = normalize_status(store, paths)?;
+    if status
+        .pid
+        .is_some_and(|pid| active_daemon_state(&status.state) && process_is_running(pid))
+    {
+        return Ok(Some(status));
+    }
+
+    Ok(None)
+}
+
+fn normalize_status(store: &LocalStore, paths: &DaemonPaths) -> DaemonResult<DaemonStatus> {
+    let status = read_status_without_normalizing(store.folder_root())?;
+
+    if let Some(pid) = status.pid {
+        if active_daemon_state(&status.state) && !process_is_running(pid) {
+            clear_daemon_control_files(paths)?;
+            let stopped = status_for_state(
+                store,
+                "stopped",
+                None,
+                None,
+                status.cycles,
+                Some(format!("cleared stale daemon pid {pid}")),
+            )?;
+            write_status(&paths.status_path, &stopped)?;
+            return Ok(stopped);
+        }
+    }
+
+    if let Some(lock_pid) = read_lock_pid(&paths.lock_path)? {
+        if !process_is_running(lock_pid) {
+            remove_file_if_exists(&paths.lock_path)?;
+        }
+    }
+
+    Ok(status)
+}
+
+fn active_daemon_state(state: &str) -> bool {
+    matches!(state, "starting" | "running" | "blocked")
+}
+
+fn clear_daemon_control_files(paths: &DaemonPaths) -> DaemonResult<()> {
+    remove_file_if_exists(&paths.stop_path)?;
+    remove_file_if_exists(&paths.lock_path)
+}
+
+fn acquire_daemon_lock(paths: &DaemonPaths) -> DaemonResult<()> {
+    loop {
+        match File::options()
+            .write(true)
+            .create_new(true)
+            .open(&paths.lock_path)
+        {
+            Ok(mut file) => {
+                file.write_all(format!("pid\t{}\n", std::process::id()).as_bytes())
+                    .map_err(|source| DaemonError::Io {
+                        path: paths.lock_path.clone(),
+                        source,
+                    })?;
+                return Ok(());
+            }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                match read_lock_pid(&paths.lock_path)? {
+                    Some(pid) if process_is_running(pid) => {
+                        return Err(DaemonError::AlreadyRunning { pid });
+                    }
+                    _ => remove_file_if_exists(&paths.lock_path)?,
+                }
+            }
+            Err(source) => {
+                return Err(DaemonError::Io {
+                    path: paths.lock_path.clone(),
+                    source,
+                });
+            }
+        }
+    }
+}
+
+fn write_lock_pid(path: &Path, pid: u32) -> DaemonResult<()> {
+    fs::write(path, format!("pid\t{pid}\n")).map_err(|source| DaemonError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn read_lock_pid(path: &Path) -> DaemonResult<Option<u32>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(DaemonError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+
+    Ok(contents
+        .lines()
+        .find_map(|line| line.strip_prefix("pid\t"))
+        .and_then(|value| value.trim().parse().ok()))
+}
+
+fn remove_lock_if_owner(path: &Path, owner_pid: u32) -> DaemonResult<()> {
+    match read_lock_pid(path)? {
+        Some(pid) if pid == owner_pid => remove_file_if_exists(path),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+
+    let filter = format!("PID eq {pid}");
+    let output = Command::new("tasklist")
+        .arg("/FI")
+        .arg(filter)
+        .arg("/FO")
+        .arg("CSV")
+        .arg("/NH")
+        .stdin(Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .any(|line| line.contains(&format!("\",\"{pid}\",")) || line.contains(&format!(",{pid},")))
+}
+
+#[cfg(not(windows))]
+fn process_is_running(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
 #[cfg(windows)]
 fn spawn_run_loop_process(store: &LocalStore, options: &DaemonStartOptions) -> DaemonResult<u32> {
     let exe = std::env::current_exe().map_err(|source| DaemonError::Spawn { source })?;
@@ -982,6 +1197,7 @@ struct DaemonPaths {
     status_path: PathBuf,
     stop_path: PathBuf,
     log_path: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl DaemonPaths {
@@ -991,6 +1207,7 @@ impl DaemonPaths {
             status_path: root.join(STATUS_FILE),
             stop_path: root.join(STOP_FILE),
             log_path: root.join(LOG_FILE),
+            lock_path: root.join(LOCK_FILE),
             root,
         }
     }
@@ -1041,6 +1258,49 @@ mod tests {
         assert_eq!(parsed.pid, Some(7));
         assert_eq!(parsed.cycles, 3);
         assert_eq!(parsed.last_error.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn stale_dead_pid_status_is_cleared() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("source");
+        fs::create_dir_all(&folder).expect("folder creates");
+        let store = LocalStore::open_or_init(&folder)
+            .expect("store initializes")
+            .into_store();
+        let paths = DaemonPaths::new(&store);
+        paths.ensure().expect("daemon paths create");
+        let dead_pid = dead_test_pid();
+        let status =
+            status_for_state(&store, "running", Some(dead_pid), None, 7, None).expect("status");
+        write_status(&paths.status_path, &status).expect("status writes");
+        write_lock_pid(&paths.lock_path, dead_pid).expect("lock writes");
+        fs::write(&paths.stop_path, "requested_at\tunix:1\n").expect("stop writes");
+
+        let normalized = read_status(&folder).expect("status normalizes");
+
+        assert_eq!(normalized.state, "stopped");
+        assert_eq!(normalized.pid, None);
+        assert_eq!(normalized.cycles, 7);
+        assert!(normalized
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("cleared stale daemon pid")));
+        assert!(!paths.lock_path.exists());
+        assert!(!paths.stop_path.exists());
+    }
+
+    #[test]
+    fn status_temp_paths_are_unique_per_write() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let status_path = dir.path().join("status.tsv");
+
+        let first = status_temp_path(&status_path);
+        let second = status_temp_path(&status_path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(dir.path()));
+        assert_eq!(second.parent(), Some(dir.path()));
     }
 
     #[test]
@@ -1184,5 +1444,11 @@ mod tests {
 
     fn path_string(path: &Path) -> String {
         path.to_str().expect("test path is UTF-8").to_string()
+    }
+
+    fn dead_test_pid() -> u32 {
+        (900_000..999_999)
+            .find(|pid| !process_is_running(*pid))
+            .expect("a non-running pid exists for stale status test")
     }
 }

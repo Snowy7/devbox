@@ -427,7 +427,11 @@ fn run_sync_start(args: &[String]) -> Result<(), String> {
     let report = loom_daemon::start_background(&options).map_err(|error| error.to_string())?;
 
     println!("Folder: {}", report.folder.display());
-    println!("Background sync: starting");
+    if report.already_running {
+        println!("Background sync: already running");
+    } else {
+        println!("Background sync: starting");
+    }
     println!("Daemon pid: {}", report.pid);
     println!("Status: {}", report.status_path.display());
     println!("Log: {}", report.log_path.display());

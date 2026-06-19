@@ -235,6 +235,7 @@ fn background_sync_start_stop_updates_materialized_target() {
         "50".to_string(),
     ]);
     assert_success(&source_start);
+    let source_pid = value_after(&stdout(&source_start), "Daemon pid: ");
     let target_start = run_loom_vec(vec![
         "sync".to_string(),
         "start".to_string(),
@@ -248,6 +249,20 @@ fn background_sync_start_stop_updates_materialized_target() {
 
     wait_for_status(&source, "running");
     wait_for_status(&target, "running");
+
+    let duplicate_source_start = run_loom_vec(vec![
+        "sync".to_string(),
+        "start".to_string(),
+        source.to_str().expect("UTF-8 path").to_string(),
+        "--debounce-ms".to_string(),
+        "50".to_string(),
+        "--poll-ms".to_string(),
+        "50".to_string(),
+    ]);
+    assert_success(&duplicate_source_start);
+    let duplicate_stdout = stdout(&duplicate_source_start);
+    assert!(duplicate_stdout.contains("Background sync: already running"));
+    assert_eq!(value_after(&duplicate_stdout, "Daemon pid: "), source_pid);
 
     std::fs::write(source.join("README.md"), "after\n").expect("readme edits");
     wait_for_file_contents(&target.join("README.md"), "after\n");
