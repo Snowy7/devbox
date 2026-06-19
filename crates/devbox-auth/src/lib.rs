@@ -12,6 +12,7 @@ const COMPLETION_ENVELOPE_MAGIC: &[u8] = b"devbox-pairing-completion-v1\n";
 const TOKEN_PREFIX: &str = "devbox-pair-v1";
 const JOIN_PREFIX: &str = "devbox-join-v1";
 const COMPLETION_PREFIX: &str = "devbox-complete-v1";
+const PUBLIC_ID_MAX_LEN: usize = 128;
 pub const REMOTE_DEVICE_KEY_SENTINEL_HEX: &str =
     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
@@ -416,11 +417,17 @@ impl PairingJoinRequest {
         {
             return Err(AuthError::MalformedInvitation);
         }
+        let invitation_id = pairing_join_identifier(fields[1], "invitation id", "pairing-")?;
+        let account_id = pairing_join_identifier(fields[2], "account id", "account-")?;
+        let inviter_device_id = pairing_join_identifier(fields[3], "inviter device id", "device-")?;
+        let receiver_device_id =
+            pairing_join_identifier(fields[4], "receiver device id", "device-")?;
+
         Ok(Self {
-            invitation_id: fields[1].to_string(),
-            account_id: fields[2].to_string(),
-            inviter_device_id: fields[3].to_string(),
-            receiver_device_id: fields[4].to_string(),
+            invitation_id,
+            account_id,
+            inviter_device_id,
+            receiver_device_id,
         })
     }
 
@@ -909,12 +916,13 @@ pub fn create_pairing_join_request(
     token: &PairingInvitationToken,
     receiver_device_id: &str,
 ) -> AuthResult<PairingJoinRequest> {
-    public_identifier(receiver_device_id, "receiver device id")?;
+    let receiver_device_id =
+        strict_prefixed_identifier(receiver_device_id, "receiver device id", "device-")?;
     Ok(PairingJoinRequest {
         invitation_id: token.id.clone(),
         account_id: token.account_id.clone(),
         inviter_device_id: token.inviter_device_id.clone(),
-        receiver_device_id: receiver_device_id.to_string(),
+        receiver_device_id,
     })
 }
 
@@ -934,6 +942,8 @@ pub fn approve_pairing_join_request(
     {
         return Err(AuthError::MalformedInvitation);
     }
+    let receiver_device_id =
+        pairing_join_identifier(&join.receiver_device_id, "receiver device id", "device-")?;
     let display_name = if device_name.trim().is_empty() {
         "approved device"
     } else {
@@ -942,7 +952,7 @@ pub fn approve_pairing_join_request(
     let completion_key_hex = token.completion_key_hex()?;
     let envelope = create_key_envelope(
         &identity.account_id,
-        &join.receiver_device_id,
+        &receiver_device_id,
         &completion_key_hex,
         &identity.sync_key_hex,
         now,
@@ -958,7 +968,7 @@ pub fn approve_pairing_join_request(
     )?;
     Ok(PairingApproval {
         device: ApprovedDevice {
-            device_id: join.receiver_device_id.clone(),
+            device_id: receiver_device_id,
             account_id: identity.account_id.clone(),
             display_name: display_name.to_string(),
             device_key_hex: REMOTE_DEVICE_KEY_SENTINEL_HEX.to_string(),
@@ -1274,6 +1284,46 @@ fn public_identifier(value: &str, field: &'static str) -> AuthResult<String> {
     Ok(trimmed.to_string())
 }
 
+fn strict_prefixed_identifier(
+    value: &str,
+    field: &'static str,
+    prefix: &str,
+) -> AuthResult<String> {
+    let trimmed = public_identifier(value, field)?;
+    if trimmed != value {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value must not include leading or trailing whitespace",
+        });
+    }
+    if trimmed.len() > PUBLIC_ID_MAX_LEN {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value is too long",
+        });
+    }
+    if !trimmed.starts_with(prefix) {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value does not use the expected public id prefix",
+        });
+    }
+    if !trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(AuthError::InvalidOwnershipProof {
+            field,
+            reason: "value must use printable public id characters",
+        });
+    }
+    Ok(trimmed)
+}
+
+fn pairing_join_identifier(value: &str, field: &'static str, prefix: &str) -> AuthResult<String> {
+    strict_prefixed_identifier(value, field, prefix).map_err(|_| AuthError::MalformedInvitation)
+}
+
 fn recovery_public_identifier(value: &str, field: &'static str) -> AuthResult<String> {
     public_identifier(value, field).map_err(|_| AuthError::InvalidRecoveryGrant {
         field,
@@ -1584,6 +1634,28 @@ mod tests {
         assert!(!encoded_join.contains(&draft.token.expose_for_cli()));
         assert!(!format!("{parsed_join:?}").contains(receiver_device_key));
         assert!(!format!("{parsed_join:?}").contains(&draft.token.expose_for_cli()));
+
+        let poisoned_join =
+            encoded_join.replace("device-receiver", "device-receiver\nCompletion env: stolen");
+        assert!(matches!(
+            PairingJoinRequest::parse(&poisoned_join),
+            Err(AuthError::MalformedInvitation)
+        ));
+        let mut forged_join = parsed_join.clone();
+        forged_join.receiver_device_id = "device-receiver\nCompletion env: stolen".to_string();
+        let forged_approval = approve_pairing_join_request(
+            &identity(),
+            &draft.invitation,
+            &draft.token,
+            &forged_join,
+            "Receiver laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        );
+        assert!(matches!(
+            forged_approval,
+            Err(AuthError::MalformedInvitation)
+        ));
 
         let approval = approve_pairing_join_request(
             &identity(),
