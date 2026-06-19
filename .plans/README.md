@@ -35,13 +35,15 @@ bearer session status/logout, and mock-dev auth disabled by default in the serve
 Hosted metadata now also models account/session/project-scoped managed object credential leases
 and server-mediated object-access grants with redacted provider references, canonical shared-bucket
 prefixes, expiration, revocation, rotation generation, hosted CLI resolution, and no-network
-mock/dev CLI smoke commands. Local pairing now includes no-network recovery grant references,
+mock/dev CLI smoke commands. Hosted object transfer now proxies encrypted object put/get/head/list
+through the metadata API so external tester clients use account-session auth without local R2/S3
+bucket keys. Local pairing now includes no-network recovery grant references,
 receiver-generated join/complete handoff, revocation, device rotation intents, and key-envelope
 rotation generation. Paired receivers can now materialize with their own local key state instead of
 opening the publisher DB. The final private-alpha surface now adds an env-backed redacted Electron
 control surface, explicit path-scoped secret policy records, guarded manual conflict resolution
 records, macOS/Linux alpha release scripts, and a deterministic two-device smoke harness with
-redacted evidence logs. OAuth/OIDC provider login, hosted object proxy/signed URL data transfer,
-signed installers, live Cloudflare/AWS credential provisioning, production pairing UX, automatic
+redacted evidence logs. OAuth/OIDC provider login, signed installers, live Cloudflare/AWS credential
+provisioning, production pairing UX, automatic
 merge/apply resolution, paid/team/agent/Git
 replacement work, and production deployment hardening remain deferred.

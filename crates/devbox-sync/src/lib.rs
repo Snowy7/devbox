@@ -1,5 +1,6 @@
 //! Encrypted immutable blob transport for Devbox sync foundations.
 
+mod hosted;
 mod s3;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -13,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use hosted::{HostedObjectTransferConfig, HostedObjectTransferProvider, HostedRedactedConfig};
 pub use s3::{
     S3CompatibleBlobProvider, S3CompatibleConfig, S3Credentials, S3CredentialsSource,
     S3RedactedConfig,
@@ -174,6 +176,11 @@ pub trait RemoteBlobProvider {
     fn put(&self, key: &ObjectKey, bytes: &[u8]) -> SyncResult<PutOutcome>;
     fn get(&self, key: &ObjectKey) -> SyncResult<Option<Vec<u8>>>;
     fn head(&self, key: &ObjectKey) -> SyncResult<Option<ObjectMetadata>>;
+    fn list(&self, _prefix: Option<&ObjectKey>) -> SyncResult<Vec<ObjectMetadata>> {
+        Err(SyncError::RemoteTransport(
+            "remote object listing is not supported by this provider".to_string(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +290,53 @@ impl RemoteBlobProvider for LocalFilesystemBlobProvider {
             Err(error) => Err(error.into()),
         }
     }
+
+    fn list(&self, prefix: Option<&ObjectKey>) -> SyncResult<Vec<ObjectMetadata>> {
+        let objects_root = self.root.join(OBJECTS_DIR);
+        let search_root = prefix
+            .map(|key| self.path_for(key))
+            .unwrap_or_else(|| objects_root.clone());
+        if !search_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut objects = Vec::new();
+        collect_local_objects(&objects_root, &search_root, &mut objects)?;
+        objects.sort_by(|left, right| left.key.as_str().cmp(right.key.as_str()));
+        Ok(objects)
+    }
+}
+
+fn collect_local_objects(
+    objects_root: &Path,
+    path: &Path,
+    objects: &mut Vec<ObjectMetadata>,
+) -> SyncResult<()> {
+    let metadata = fs::metadata(path)?;
+    if metadata.is_file() {
+        let relative = path
+            .strip_prefix(objects_root)
+            .map_err(|error| SyncError::RemoteTransport(error.to_string()))?;
+        let key = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        objects.push(ObjectMetadata {
+            key: ObjectKey::new(key)?,
+            size_bytes: metadata.len(),
+        });
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        collect_local_objects(objects_root, &entry.path(), objects)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

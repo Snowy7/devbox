@@ -76,7 +76,7 @@ async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "--help" | "-h" => {
                 println!("Usage: devbox-metadata [--db <SQLITE_PATH>] [--listen <ADDR:PORT>] [--allow-mock-auth] [--session-ttl-seconds <SECONDS>] [--proof-ttl-seconds <SECONDS>]");
                 println!("Env: DEVBOX_METADATA_DB, DEVBOX_METADATA_LISTEN, PORT, DEVBOX_ALLOW_MOCK_AUTH, DEVBOX_SESSION_TTL_SECONDS, DEVBOX_PROOF_TTL_SECONDS");
-                println!("Object broker env: DEVBOX_OBJECT_ACCESS_KEY_ENV, DEVBOX_OBJECT_SECRET_KEY_ENV, DEVBOX_OBJECT_SESSION_TOKEN_ENV; defaults point at DEVBOX_R2_ACCESS_KEY_ID, DEVBOX_R2_SECRET_ACCESS_KEY, DEVBOX_R2_SESSION_TOKEN");
+                println!("Object broker env: DEVBOX_OBJECT_LOCAL_ROOT for local/dev server-mediated object storage, or DEVBOX_OBJECT_ACCESS_KEY_ENV, DEVBOX_OBJECT_SECRET_KEY_ENV, DEVBOX_OBJECT_SESSION_TOKEN_ENV; credential env-name defaults point at DEVBOX_R2_ACCESS_KEY_ID, DEVBOX_R2_SECRET_ACCESS_KEY, DEVBOX_R2_SESSION_TOKEN");
                 return Ok(());
             }
             value => return Err(format!("unknown option '{value}'").into()),
@@ -95,6 +95,12 @@ async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn object_access_broker_config_from_env(
 ) -> Result<ManagedObjectAccessBrokerConfig, Box<dyn std::error::Error>> {
+    if let Ok(root) = std::env::var("DEVBOX_OBJECT_LOCAL_ROOT") {
+        if !root.trim().is_empty() {
+            return Ok(ManagedObjectAccessBrokerConfig::server_managed_local(root)?);
+        }
+    }
+
     let access_key_env = std::env::var("DEVBOX_OBJECT_ACCESS_KEY_ENV")
         .unwrap_or_else(|_| "DEVBOX_R2_ACCESS_KEY_ID".to_string());
     let secret_key_env = std::env::var("DEVBOX_OBJECT_SECRET_KEY_ENV")

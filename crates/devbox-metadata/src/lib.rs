@@ -6,7 +6,8 @@
 //! hosted alpha mode uses one-time invite codes plus bearer account sessions. Production OAuth,
 //! managed object credential issuance, billing, and deployment hardening remain deferred.
 
-use axum::extract::{Path, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -16,6 +17,10 @@ use devbox_auth::{
     hash_session_token_hex, revoke_account_session as revoke_auth_account_session,
     validate_account_ownership_proof, validate_account_session_hash, AccountOwnershipProof,
     AccountOwnershipProofInput, AccountSession, AuthenticatedAccountSession,
+};
+use devbox_sync::{
+    LocalFilesystemBlobProvider, ObjectKey, ObjectMetadata, PutOutcome, RemoteBlobProvider,
+    S3CompatibleBlobProvider, S3CompatibleConfig, S3CredentialsSource, SyncError, SyncResult,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -563,6 +568,7 @@ pub struct ManagedObjectAccessBrokerConfig {
     pub server_access_key_env: Option<String>,
     pub server_secret_key_env: Option<String>,
     pub server_session_token_env: Option<String>,
+    pub server_local_object_root: Option<String>,
 }
 
 impl ManagedObjectAccessBrokerConfig {
@@ -572,6 +578,7 @@ impl ManagedObjectAccessBrokerConfig {
             server_access_key_env: None,
             server_secret_key_env: None,
             server_session_token_env: None,
+            server_local_object_root: None,
         }
     }
 
@@ -593,13 +600,35 @@ impl ManagedObjectAccessBrokerConfig {
             server_access_key_env: Some(access_key_env),
             server_secret_key_env: Some(secret_key_env),
             server_session_token_env: session_token_env,
+            server_local_object_root: None,
+        })
+    }
+
+    pub fn server_managed_local(root: impl Into<String>) -> MetadataResult<Self> {
+        let root = root.into();
+        let trimmed = root.trim();
+        if trimmed.is_empty()
+            || contains_secret_marker(trimmed)
+            || looks_like_raw_credential(trimmed)
+        {
+            return Err(MetadataError::InvalidRequest(
+                "server local object root must be a non-secret path".to_string(),
+            ));
+        }
+        Ok(Self {
+            server_managed_credentials: false,
+            server_access_key_env: None,
+            server_secret_key_env: None,
+            server_session_token_env: None,
+            server_local_object_root: Some(trimmed.to_string()),
         })
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.server_managed_credentials
-            && self.server_access_key_env.is_some()
-            && self.server_secret_key_env.is_some()
+        self.server_local_object_root.is_some()
+            || (self.server_managed_credentials
+                && self.server_access_key_env.is_some()
+                && self.server_secret_key_env.is_some())
     }
 }
 
@@ -624,6 +653,34 @@ pub struct ManagedObjectAccessGrant {
     pub rotation_generation: u64,
     pub credential_reference: String,
     pub credential_delivery: ManagedObjectAccessDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HostedObjectTransferQuery {
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HostedObjectListQuery {
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedObjectPutResponse {
+    pub key: String,
+    pub uploaded: bool,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedObjectListResponse {
+    pub objects: Vec<HostedObjectMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedObjectMetadata {
+    pub key: String,
+    pub size_bytes: u64,
 }
 
 impl fmt::Debug for ManagedObjectAccessGrant {
@@ -2554,6 +2611,16 @@ where
             "/v1/projects/:project_id/object-access/:lease_id",
             post(resolve_object_access::<S>),
         )
+        .route(
+            "/v1/projects/:project_id/object-access/:lease_id/object",
+            get(get_hosted_object::<S>)
+                .put(put_hosted_object::<S>)
+                .head(head_hosted_object::<S>),
+        )
+        .route(
+            "/v1/projects/:project_id/object-access/:lease_id/objects",
+            get(list_hosted_objects::<S>),
+        )
         .with_state(AppState {
             store: Arc::new(Mutex::new(store)),
             config,
@@ -2909,6 +2976,126 @@ where
     )?))
 }
 
+async fn put_hosted_object<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path((project_id, lease_id)): Path<(String, String)>,
+    Query(query): Query<HostedObjectTransferQuery>,
+    body: Bytes,
+) -> MetadataResult<Response>
+where
+    S: MetadataStore,
+{
+    let key = hosted_transfer_object_key(&query.key)?;
+    let provider = authorized_hosted_object_provider(
+        &state,
+        &headers,
+        &project_id,
+        &lease_id,
+        &[ManagedObjectCapability::Write],
+    )?;
+    let outcome = provider.put(&key, &body).map_err(hosted_object_error)?;
+    let status = if outcome.uploaded {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    let response = HostedObjectPutResponse {
+        key: key.to_string(),
+        uploaded: outcome.uploaded,
+        size_bytes: outcome.size_bytes,
+    };
+    Ok((status, Json(response)).into_response())
+}
+
+async fn get_hosted_object<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path((project_id, lease_id)): Path<(String, String)>,
+    Query(query): Query<HostedObjectTransferQuery>,
+) -> MetadataResult<Response>
+where
+    S: MetadataStore,
+{
+    let key = hosted_transfer_object_key(&query.key)?;
+    let provider = authorized_hosted_object_provider(
+        &state,
+        &headers,
+        &project_id,
+        &lease_id,
+        &[ManagedObjectCapability::Read],
+    )?;
+    let Some(bytes) = provider.get(&key).map_err(hosted_object_error)? else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("x-devbox-object-size", bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|error| MetadataError::InvalidRequest(error.to_string()))?)
+}
+
+async fn head_hosted_object<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path((project_id, lease_id)): Path<(String, String)>,
+    Query(query): Query<HostedObjectTransferQuery>,
+) -> MetadataResult<Response>
+where
+    S: MetadataStore,
+{
+    let key = hosted_transfer_object_key(&query.key)?;
+    let provider = authorized_hosted_object_provider(
+        &state,
+        &headers,
+        &project_id,
+        &lease_id,
+        &[ManagedObjectCapability::Head],
+    )?;
+    let Some(metadata) = provider.head(&key).map_err(hosted_object_error)? else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("x-devbox-object-size", metadata.size_bytes.to_string())
+        .body(Body::empty())
+        .map_err(|error| MetadataError::InvalidRequest(error.to_string()))?)
+}
+
+async fn list_hosted_objects<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path((project_id, lease_id)): Path<(String, String)>,
+    Query(query): Query<HostedObjectListQuery>,
+) -> MetadataResult<Json<HostedObjectListResponse>>
+where
+    S: MetadataStore,
+{
+    let prefix = query
+        .prefix
+        .as_deref()
+        .map(hosted_transfer_object_key)
+        .transpose()?;
+    let provider = authorized_hosted_object_provider(
+        &state,
+        &headers,
+        &project_id,
+        &lease_id,
+        &[ManagedObjectCapability::List],
+    )?;
+    let objects = provider
+        .list(prefix.as_ref())
+        .map_err(hosted_object_error)?
+        .into_iter()
+        .map(|metadata| HostedObjectMetadata {
+            key: metadata.key.to_string(),
+            size_bytes: metadata.size_bytes,
+        })
+        .collect();
+    Ok(Json(HostedObjectListResponse { objects }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedMetadataRequestContext {
     MockDev(MockDevIdentity),
@@ -3145,6 +3332,212 @@ pub fn validate_managed_object_access_prefix(
         ));
     }
     Ok(prefix)
+}
+
+fn authorized_hosted_object_provider<S: MetadataStore>(
+    state: &AppState<S>,
+    headers: &HeaderMap,
+    project_id: &str,
+    lease_id: &str,
+    required_capabilities: &[ManagedObjectCapability],
+) -> MetadataResult<Box<dyn RemoteBlobProvider>> {
+    let grant = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| MetadataError::PoisonedStore)?;
+        let context = request_context(headers, &*store, state.config.auth_policy)?;
+        let HostedMetadataRequestContext::AccountSession(session) = context else {
+            return Err(MetadataError::InvalidAccountSession(
+                "account session bearer auth is required for hosted object transfer".to_string(),
+            ));
+        };
+        managed_object_access_grant_for_account_session(
+            &*store,
+            &session,
+            project_id,
+            lease_id,
+            required_capabilities,
+            &state.config.object_access_broker,
+            devbox_auth::now_unix_seconds(),
+        )?
+    };
+
+    open_scoped_server_object_provider(&grant, &state.config.object_access_broker)
+}
+
+fn open_scoped_server_object_provider(
+    grant: &ManagedObjectAccessGrant,
+    broker_config: &ManagedObjectAccessBrokerConfig,
+) -> MetadataResult<Box<dyn RemoteBlobProvider>> {
+    let base: Box<dyn RemoteBlobProvider> =
+        if let Some(root) = broker_config.server_local_object_root.as_deref() {
+            Box::new(LocalFilesystemBlobProvider::open(root).map_err(hosted_object_error)?)
+        } else {
+            let access_env = broker_config
+                .server_access_key_env
+                .as_deref()
+                .ok_or_else(|| {
+                    MetadataError::InvalidRequest(
+                        "managed object access broker is missing server access key env".to_string(),
+                    )
+                })?;
+            let secret_env = broker_config
+                .server_secret_key_env
+                .as_deref()
+                .ok_or_else(|| {
+                    MetadataError::InvalidRequest(
+                        "managed object access broker is missing server secret key env".to_string(),
+                    )
+                })?;
+            let credentials = S3CredentialsSource::env(
+                access_env,
+                secret_env,
+                broker_config.server_session_token_env.as_deref(),
+            )
+            .map_err(hosted_object_error)?;
+            let config = S3CompatibleConfig::new(
+                &grant.endpoint,
+                &grant.bucket,
+                &grant.region,
+                None::<&str>,
+                credentials,
+            )
+            .map_err(hosted_object_error)?;
+            Box::new(S3CompatibleBlobProvider::from_env(config).map_err(hosted_object_error)?)
+        };
+
+    Ok(Box::new(PrefixScopedRemoteBlobProvider {
+        prefix: validate_managed_object_access_prefix(
+            &grant.prefix,
+            &grant.account_id,
+            &grant.project_id,
+        )?,
+        inner: base,
+    }))
+}
+
+struct PrefixScopedRemoteBlobProvider {
+    prefix: String,
+    inner: Box<dyn RemoteBlobProvider>,
+}
+
+impl PrefixScopedRemoteBlobProvider {
+    fn scoped_key(&self, key: &ObjectKey) -> SyncResult<ObjectKey> {
+        ObjectKey::new(format!("{}/{}", self.prefix, key.as_str()))
+    }
+
+    fn unscoped_metadata(&self, metadata: ObjectMetadata) -> SyncResult<Option<ObjectMetadata>> {
+        let scoped_prefix = format!("{}/", self.prefix);
+        let Some(relative) = metadata.key.as_str().strip_prefix(&scoped_prefix) else {
+            return Ok(None);
+        };
+        if relative.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ObjectMetadata {
+            key: ObjectKey::new(relative.to_string())?,
+            size_bytes: metadata.size_bytes,
+        }))
+    }
+}
+
+impl RemoteBlobProvider for PrefixScopedRemoteBlobProvider {
+    fn put(&self, key: &ObjectKey, bytes: &[u8]) -> SyncResult<PutOutcome> {
+        self.inner.put(&self.scoped_key(key)?, bytes)
+    }
+
+    fn get(&self, key: &ObjectKey) -> SyncResult<Option<Vec<u8>>> {
+        self.inner.get(&self.scoped_key(key)?)
+    }
+
+    fn head(&self, key: &ObjectKey) -> SyncResult<Option<ObjectMetadata>> {
+        Ok(self
+            .inner
+            .head(&self.scoped_key(key)?)?
+            .map(|metadata| ObjectMetadata {
+                key: key.clone(),
+                size_bytes: metadata.size_bytes,
+            }))
+    }
+
+    fn list(&self, prefix: Option<&ObjectKey>) -> SyncResult<Vec<ObjectMetadata>> {
+        let scoped_prefix = match prefix {
+            Some(prefix) => ObjectKey::new(format!("{}/{}", self.prefix, prefix.as_str()))?,
+            None => ObjectKey::new(self.prefix.clone())?,
+        };
+        let mut objects = self
+            .inner
+            .list(Some(&scoped_prefix))?
+            .into_iter()
+            .map(|metadata| self.unscoped_metadata(metadata))
+            .collect::<SyncResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        objects.sort_by(|left, right| left.key.as_str().cmp(right.key.as_str()));
+        Ok(objects)
+    }
+}
+
+fn hosted_transfer_object_key(value: &str) -> MetadataResult<ObjectKey> {
+    if value.trim() != value {
+        return Err(MetadataError::InvalidRequest(
+            "hosted object key must not have leading or trailing whitespace".to_string(),
+        ));
+    }
+    let key = ObjectKey::new(value).map_err(|error| {
+        MetadataError::InvalidRequest(format!("hosted object key is invalid: {error}"))
+    })?;
+    if key.as_str() == "accounts"
+        || key.as_str().starts_with("accounts/")
+        || !hosted_object_key_has_safe_public_chars(key.as_str())
+        || key
+            .as_str()
+            .split('/')
+            .any(|segment| segment == "*" || segment.eq_ignore_ascii_case("__sentinel__"))
+        || contains_secret_marker(key.as_str())
+        || looks_like_raw_credential(key.as_str())
+    {
+        return Err(MetadataError::InvalidRequest(
+            "hosted object key must be a non-secret safe relative key inside the grant prefix"
+                .to_string(),
+        ));
+    }
+    Ok(key)
+}
+
+fn hosted_object_key_has_safe_public_chars(value: &str) -> bool {
+    value.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    })
+}
+
+fn hosted_object_error(error: SyncError) -> MetadataError {
+    match error {
+        SyncError::MissingRemoteObject(key) => MetadataError::NotFound {
+            entity: "hosted object",
+            id: key.to_string(),
+        },
+        SyncError::RemoteObjectAlreadyExists { .. } => MetadataError::InvalidRequest(
+            "hosted object already exists with different bytes".to_string(),
+        ),
+        SyncError::InvalidObjectKey(message)
+        | SyncError::RemoteConfig(message)
+        | SyncError::RemoteCredentials(message) => MetadataError::InvalidRequest(message),
+        SyncError::Io(_)
+        | SyncError::BlobCache(_)
+        | SyncError::InvalidKey(_)
+        | SyncError::Encryption
+        | SyncError::Decryption
+        | SyncError::BlobIdMismatch { .. }
+        | SyncError::RemoteTransport(_) => {
+            MetadataError::InvalidRequest("hosted object transfer failed".to_string())
+        }
+    }
 }
 
 pub fn validate_env_reference_name(value: String, field: &'static str) -> MetadataResult<String> {
@@ -5431,6 +5824,328 @@ mod tests {
         assert_eq!(disabled.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn hosted_object_transfer_uses_server_storage_without_client_bucket_keys() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut store);
+        store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 4_000_000_000,
+                capabilities: vec![
+                    ManagedObjectCapability::Read,
+                    ManagedObjectCapability::Write,
+                    ManagedObjectCapability::Head,
+                    ManagedObjectCapability::List,
+                ],
+                ..managed_lease_request()
+            })
+            .expect("lease upserts");
+        let object_root = tempfile::tempdir().expect("object root creates");
+        let mut config = HostedApiConfig::local_dev();
+        config.object_access_broker = ManagedObjectAccessBrokerConfig::server_managed_local(
+            object_root.path().display().to_string(),
+        )
+        .expect("local broker validates");
+        let router = app_with_config(store, config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let addr = listener.local_addr().expect("listener addr reads");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("server runs");
+        });
+
+        let object_root_path = object_root.path().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let provider = devbox_sync::HostedObjectTransferProvider::new(
+                devbox_sync::HostedObjectTransferConfig::new(
+                    format!("http://{addr}"),
+                    PROJECT,
+                    "lease-alpha",
+                    "DEVBOX_SESSION_TOKEN",
+                )
+                .expect("hosted config validates"),
+                raw_token,
+            );
+            let key = ObjectKey::new("encrypted/blobs/b3/aa/bb/ciphertext")
+                .expect("object key validates");
+
+            assert!(provider.head(&key).expect("head succeeds").is_none());
+            let put = provider
+                .put(&key, b"encrypted-by-client")
+                .expect("put succeeds");
+            assert!(put.uploaded);
+            assert_eq!(put.size_bytes, "encrypted-by-client".len() as u64);
+            let duplicate = provider
+                .put(&key, b"encrypted-by-client")
+                .expect("duplicate put is idempotent");
+            assert!(!duplicate.uploaded);
+            assert_eq!(
+                provider
+                    .get(&key)
+                    .expect("get succeeds")
+                    .expect("object exists"),
+                b"encrypted-by-client"
+            );
+            assert_eq!(
+                provider
+                    .head(&key)
+                    .expect("head succeeds")
+                    .expect("object exists")
+                    .size_bytes,
+                "encrypted-by-client".len() as u64
+            );
+            let listed = provider
+                .list(Some(
+                    &ObjectKey::new("encrypted").expect("prefix validates"),
+                ))
+                .expect("list succeeds");
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].key, key);
+
+            let scoped_path = object_root_path
+                .join("objects")
+                .join("accounts")
+                .join(ACCOUNT)
+                .join("projects")
+                .join(PROJECT)
+                .join("encrypted")
+                .join("blobs")
+                .join("b3")
+                .join("aa")
+                .join("bb")
+                .join("ciphertext");
+            assert_eq!(
+                std::fs::read(scoped_path).expect("server-side object exists"),
+                b"encrypted-by-client"
+            );
+            assert!(!format!("{:?}", provider.config()).contains("encrypted-by-client"));
+            assert!(!provider
+                .config()
+                .redacted()
+                .to_string()
+                .contains("R2_SECRET"));
+        })
+        .await
+        .expect("hosted provider checks join");
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn hosted_object_transfer_enforces_scope_capabilities_and_lease_state() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut store);
+        store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 4_000_000_000,
+                capabilities: vec![ManagedObjectCapability::Read],
+                ..managed_lease_request()
+            })
+            .expect("read-only lease upserts");
+        let object_root = tempfile::tempdir().expect("object root creates");
+        let mut config = HostedApiConfig::local_dev();
+        config.object_access_broker = ManagedObjectAccessBrokerConfig::server_managed_local(
+            object_root.path().display().to_string(),
+        )
+        .expect("local broker validates");
+        let router = app_with_config(store, config);
+
+        let missing_write = router
+            .clone()
+            .oneshot(session_binary_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/object-access/lease-alpha/object?key=encrypted/blobs/test",
+                b"ciphertext",
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(missing_write.status(), StatusCode::BAD_REQUEST);
+        assert!(response_text(missing_write)
+            .await
+            .contains("missing write capability"));
+
+        let escaped_key = router
+            .clone()
+            .oneshot(session_binary_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/object-access/lease-alpha/object?key=accounts/account-other/projects/project-devbox/blob",
+                b"ciphertext",
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(escaped_key.status(), StatusCode::BAD_REQUEST);
+        assert!(response_text(escaped_key)
+            .await
+            .contains("inside the grant prefix"));
+
+        let unsafe_key = router
+            .clone()
+            .oneshot(session_binary_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/object-access/lease-alpha/object?key=encrypted/blobs/bad%0Aline",
+                b"ciphertext",
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(unsafe_key.status(), StatusCode::BAD_REQUEST);
+        assert!(response_text(unsafe_key)
+            .await
+            .contains("non-secret safe relative key"));
+
+        let mut same_account_cross_project_store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut same_account_cross_project_store);
+        same_account_cross_project_store
+            .upsert_project(UpsertProjectRequest {
+                account_id: ACCOUNT.to_string(),
+                project_id: "project-other".to_string(),
+                display_name: "other".to_string(),
+                root_hint: "other-root".to_string(),
+                project_kind: "mock-dev".to_string(),
+                updated_at: "2026-06-18T10:03:00Z".to_string(),
+            })
+            .expect("other project upserts");
+        same_account_cross_project_store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 4_000_000_000,
+                capabilities: vec![ManagedObjectCapability::Write],
+                ..managed_lease_request()
+            })
+            .expect("project-scoped lease upserts");
+        let mut same_account_cross_project_config = HostedApiConfig::local_dev();
+        same_account_cross_project_config.object_access_broker =
+            ManagedObjectAccessBrokerConfig::server_managed_local(
+                object_root.path().display().to_string(),
+            )
+            .expect("local broker validates");
+        let same_account_cross_project = app_with_config(
+            same_account_cross_project_store,
+            same_account_cross_project_config,
+        )
+        .oneshot(session_binary_request(
+            Method::PUT,
+            "/v1/projects/project-other/object-access/lease-alpha/object?key=encrypted/blobs/test",
+            b"ciphertext",
+            raw_token,
+        ))
+        .await
+        .expect("response returns");
+        assert_eq!(same_account_cross_project.status(), StatusCode::NOT_FOUND);
+
+        let other_raw_token = "raw-hosted-session-token-other";
+        let mut other_store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut other_store);
+        let other_proof =
+            account_proof_with_account_and_subject("account-other", "provider-subject-other");
+        other_store
+            .upsert_account_ownership_proof(other_proof.clone())
+            .expect("other proof upserts");
+        other_store
+            .upsert_account_session(
+                devbox_auth::create_account_session(
+                    &other_proof,
+                    other_raw_token,
+                    "2026-06-18T10:01:00Z",
+                    101,
+                    4_000_000_000,
+                )
+                .expect("other session creates"),
+            )
+            .expect("other session upserts");
+        other_store
+            .upsert_project(UpsertProjectRequest {
+                account_id: "account-other".to_string(),
+                project_id: PROJECT.to_string(),
+                display_name: PROJECT.to_string(),
+                root_hint: "other-root".to_string(),
+                project_kind: "mock-dev".to_string(),
+                updated_at: "2026-06-18T10:02:00Z".to_string(),
+            })
+            .expect("other project upserts");
+        let mut other_config = HostedApiConfig::local_dev();
+        other_config.object_access_broker = ManagedObjectAccessBrokerConfig::server_managed_local(
+            object_root.path().display().to_string(),
+        )
+        .expect("local broker validates");
+        let other_router = app_with_config(other_store, other_config);
+        let cross_account = other_router
+            .oneshot(session_binary_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/object-access/lease-alpha/object?key=encrypted/blobs/test",
+                b"ciphertext",
+                other_raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(cross_account.status(), StatusCode::NOT_FOUND);
+
+        let mut revoked_store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut revoked_store);
+        revoked_store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 4_000_000_000,
+                capabilities: vec![ManagedObjectCapability::Write],
+                ..managed_lease_request()
+            })
+            .expect("lease upserts");
+        revoked_store
+            .revoke_managed_object_credential_lease(
+                ACCOUNT,
+                Some(PROJECT),
+                "lease-alpha",
+                "2026-06-18T10:06:00Z",
+            )
+            .expect("lease revokes");
+        let mut revoked_config = HostedApiConfig::local_dev();
+        revoked_config.object_access_broker =
+            ManagedObjectAccessBrokerConfig::server_managed_local(
+                object_root.path().display().to_string(),
+            )
+            .expect("local broker validates");
+        let revoked = app_with_config(revoked_store, revoked_config)
+            .oneshot(session_binary_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/object-access/lease-alpha/object?key=encrypted/blobs/test",
+                b"ciphertext",
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(revoked.status(), StatusCode::BAD_REQUEST);
+        assert!(response_text(revoked).await.contains("lease is revoked"));
+
+        let mut expired_store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut expired_store);
+        expired_store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 1,
+                capabilities: vec![ManagedObjectCapability::Write],
+                ..managed_lease_request()
+            })
+            .expect("expired lease upserts");
+        let mut expired_config = HostedApiConfig::local_dev();
+        expired_config.object_access_broker =
+            ManagedObjectAccessBrokerConfig::server_managed_local(
+                object_root.path().display().to_string(),
+            )
+            .expect("local broker validates");
+        let expired = app_with_config(expired_store, expired_config)
+            .oneshot(session_binary_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/object-access/lease-alpha/object?key=encrypted/blobs/test",
+                b"ciphertext",
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+        assert_eq!(expired.status(), StatusCode::BAD_REQUEST);
+        assert!(response_text(expired).await.contains("lease is expired"));
+    }
+
     #[test]
     fn managed_object_credential_lease_validation_rejects_raw_material_and_redacts_debug() {
         let mut store = InMemoryMetadataStore::default();
@@ -5883,6 +6598,21 @@ mod tests {
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {raw_token}"))
             .body(Body::from(serde_json::to_vec(body).expect("json encodes")))
+            .expect("request builds")
+    }
+
+    fn session_binary_request(
+        method: Method,
+        uri: &str,
+        body: &[u8],
+        raw_token: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/octet-stream")
+            .header("authorization", format!("Bearer {raw_token}"))
+            .body(Body::from(body.to_vec()))
             .expect("request builds")
     }
 

@@ -17,6 +17,7 @@ use devbox_store::{
     NewSnapshotManifestEntry, Store, StoreError,
 };
 use devbox_sync::{
+    HostedObjectTransferConfig, HostedObjectTransferProvider, HostedRedactedConfig,
     LocalFilesystemBlobProvider, RemoteBlobProvider, S3CompatibleBlobProvider, S3CompatibleConfig,
     S3CredentialsSource, S3RedactedConfig,
 };
@@ -126,6 +127,7 @@ impl Default for SyncRemoteArgs {
 enum SyncRemoteKind {
     Local,
     S3,
+    Hosted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +168,7 @@ struct ObjectAccessArgs {
 enum RemoteProviderDescription {
     Local { root: PathBuf },
     S3 { redacted: S3RedactedConfig },
+    Hosted { redacted: HostedRedactedConfig },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,11 +407,12 @@ fn parse_sync_remote_arg(
             *index += 1;
             let value = args
                 .get(*index)
-                .ok_or_else(|| "--remote-kind requires local or s3".to_string())?;
+                .ok_or_else(|| "--remote-kind requires local, s3, or hosted".to_string())?;
             remote.kind = match value.as_str() {
                 "local" => SyncRemoteKind::Local,
                 "s3" => SyncRemoteKind::S3,
-                _ => return Err("--remote-kind requires local or s3".to_string()),
+                "hosted" => SyncRemoteKind::Hosted,
+                _ => return Err("--remote-kind requires local, s3, or hosted".to_string()),
             };
         }
         "--remote" => {
@@ -578,6 +582,22 @@ fn finalize_sync_remote(remote: SyncRemoteArgs) -> Result<SyncRemoteArgs, String
                 validate_env_name(name, "--s3-session-token-env")?;
             }
         }
+        SyncRemoteKind::Hosted => {
+            if remote.local_root.is_some() {
+                return Err("sync hosted remote does not accept --remote".to_string());
+            }
+            if remote.s3_endpoint.is_some()
+                || remote.s3_bucket.is_some()
+                || remote.s3_prefix.is_some()
+                || remote.s3_access_key_env.is_some()
+                || remote.s3_secret_key_env.is_some()
+                || remote.s3_session_token_env.is_some()
+            {
+                return Err(
+                    "sync hosted remote uses --object-access-* flags, not --s3-*".to_string(),
+                );
+            }
+        }
     }
 
     Ok(remote)
@@ -623,29 +643,58 @@ fn finalize_sync_metadata(
 }
 
 fn validate_sync_args(args: &SyncArgs) -> Result<(), String> {
-    if args.remote.kind == SyncRemoteKind::S3 {
-        if let Some(name) = &args.object_access.session_token_env {
-            validate_env_name(name, "--object-access-session-token-env")?;
+    match args.remote.kind {
+        SyncRemoteKind::Local => {
+            if args.object_access.api.is_some()
+                || args.object_access.lease_id.is_some()
+                || args.object_access.session_token_env.is_some()
+            {
+                return Err(
+                    "live sync local remote does not use --object-access-* flags".to_string(),
+                );
+            }
         }
-        if args.remote.s3_prefix.is_none() {
-            return Err(
-                "live sync with --remote-kind s3 requires --s3-prefix from object-access grant"
-                    .to_string(),
-            );
+        SyncRemoteKind::S3 => {
+            if let Some(name) = &args.object_access.session_token_env {
+                validate_env_name(name, "--object-access-session-token-env")?;
+            }
+            if args.remote.s3_prefix.is_none() {
+                return Err(
+                    "live sync with --remote-kind s3 requires --s3-prefix from object-access grant"
+                        .to_string(),
+                );
+            }
+            if args.object_access.api.is_none() || args.object_access.lease_id.is_none() {
+                return Err(
+                    "live sync with --remote-kind s3 requires --object-access-api and --object-access-lease"
+                        .to_string(),
+                );
+            }
+            if args.metadata.mode != SyncMetadataMode::MockDevSqlite
+                && args.object_access.session_token_env.is_none()
+            {
+                return Err(
+                    "live sync with --remote-kind s3 requires --object-access-session-token-env"
+                        .to_string(),
+                );
+            }
         }
-        if args.object_access.api.is_none() || args.object_access.lease_id.is_none() {
-            return Err(
-                "live sync with --remote-kind s3 requires --object-access-api and --object-access-lease"
-                    .to_string(),
-            );
-        }
-        if args.metadata.mode != SyncMetadataMode::MockDevSqlite
-            && args.object_access.session_token_env.is_none()
-        {
-            return Err(
-                "live sync with --remote-kind s3 requires --object-access-session-token-env"
-                    .to_string(),
-            );
+        SyncRemoteKind::Hosted => {
+            if let Some(name) = &args.object_access.session_token_env {
+                validate_env_name(name, "--object-access-session-token-env")?;
+            }
+            if args.object_access.api.is_none() || args.object_access.lease_id.is_none() {
+                return Err(
+                    "live sync with --remote-kind hosted requires --object-access-api and --object-access-lease"
+                        .to_string(),
+                );
+            }
+            if args.metadata.project_id.is_none() {
+                return Err(
+                    "live sync with --remote-kind hosted requires --metadata-project for object-access scope"
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -771,7 +820,7 @@ fn run_sync(args: SyncArgs) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     preflight_db_path(&args.db_path, &args.project_root).map_err(|error| error.to_string())?;
     ensure_completed_identity(&args.db_path)?;
-    resolve_object_access_for_s3(&args)?;
+    resolve_object_access_for_cloud_remote(&args)?;
 
     println!(
         "sync status=start db={} cache={} project={} mode={} remote_kind={} metadata_mode={} debounce_ms={} once={} max_cycles={}",
@@ -787,7 +836,7 @@ fn run_sync(args: SyncArgs) -> Result<(), String> {
             .map(|cycles| cycles.to_string())
             .unwrap_or_else(|| "-".to_string())
     );
-    print_remote_config(&args.remote)?;
+    print_remote_config(&args)?;
     print_metadata_config(&args.metadata);
 
     if args.once {
@@ -917,7 +966,7 @@ fn run_sync_cycle(args: &SyncArgs, cycle_index: usize) -> Result<(), String> {
                     persisted.project_id, project_id
                 ));
             }
-            let (provider, remote_description) = open_remote_provider(&args.remote)?;
+            let (provider, remote_description) = open_remote_provider(args)?;
             let published = if args.metadata.mode == SyncMetadataMode::MockDevSqlite {
                 let mut metadata_store = open_metadata_store(&args.metadata)?;
                 publish_snapshot_with_metadata(
@@ -988,7 +1037,7 @@ fn run_sync_cycle(args: &SyncArgs, cycle_index: usize) -> Result<(), String> {
             );
             return Ok(());
         };
-        let (provider, remote_description) = open_remote_provider(&args.remote)?;
+        let (provider, remote_description) = open_remote_provider(args)?;
         if let Some(target) = &args.target {
             let outcome = materialize_for_live_sync(
                 args,
@@ -1224,11 +1273,12 @@ fn clear_pending_for_project(db_path: &Path, project_id: &str) -> Result<(), Str
 }
 
 fn open_remote_provider(
-    remote: &SyncRemoteArgs,
+    args: &SyncArgs,
 ) -> Result<(Box<dyn RemoteBlobProvider>, RemoteProviderDescription), String> {
-    match remote.kind {
+    match args.remote.kind {
         SyncRemoteKind::Local => {
-            let root = remote
+            let root = args
+                .remote
                 .local_root
                 .as_ref()
                 .ok_or_else(|| "local remote requires --remote <REMOTE_DIR>".to_string())?;
@@ -1240,13 +1290,23 @@ fn open_remote_provider(
             ))
         }
         SyncRemoteKind::S3 => {
-            let config = s3_config_from_args(remote)?;
+            let config = s3_config_from_args(&args.remote)?;
             let redacted = config.redacted();
             let provider =
                 S3CompatibleBlobProvider::from_env(config).map_err(|error| error.to_string())?;
             Ok((
                 Box::new(provider),
                 RemoteProviderDescription::S3 { redacted },
+            ))
+        }
+        SyncRemoteKind::Hosted => {
+            let config = hosted_config_from_args(args)?;
+            let redacted = config.redacted();
+            let provider = HostedObjectTransferProvider::from_env(config)
+                .map_err(|error| error.to_string())?;
+            Ok((
+                Box::new(provider),
+                RemoteProviderDescription::Hosted { redacted },
             ))
         }
     }
@@ -1283,6 +1343,28 @@ fn s3_config_from_args(remote: &SyncRemoteArgs) -> Result<S3CompatibleConfig, St
         &remote.s3_region,
         remote.s3_prefix.as_deref(),
         credentials,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn hosted_config_from_args(args: &SyncArgs) -> Result<HostedObjectTransferConfig, String> {
+    HostedObjectTransferConfig::new(
+        args.object_access
+            .api
+            .as_deref()
+            .ok_or_else(|| "--object-access-api is required".to_string())?,
+        args.metadata
+            .project_id
+            .as_deref()
+            .ok_or_else(|| "--metadata-project is required".to_string())?,
+        args.object_access
+            .lease_id
+            .as_deref()
+            .ok_or_else(|| "--object-access-lease is required".to_string())?,
+        args.object_access
+            .session_token_env
+            .as_deref()
+            .unwrap_or("DEVBOX_SESSION_TOKEN"),
     )
     .map_err(|error| error.to_string())
 }
@@ -1398,8 +1480,11 @@ fn materialize_error_for_live_sync(error: MaterializeError) -> String {
     error.to_string()
 }
 
-fn resolve_object_access_for_s3(args: &SyncArgs) -> Result<(), String> {
-    if args.remote.kind != SyncRemoteKind::S3 {
+fn resolve_object_access_for_cloud_remote(args: &SyncArgs) -> Result<(), String> {
+    if !matches!(
+        args.remote.kind,
+        SyncRemoteKind::S3 | SyncRemoteKind::Hosted
+    ) {
         return Ok(());
     }
     let api = args
@@ -1450,7 +1535,7 @@ fn resolve_object_access_for_s3(args: &SyncArgs) -> Result<(), String> {
         .map_err(|error| format!("object access grant response was invalid: {error}"))?;
     validate_object_access_grant(args, &grant)?;
     println!(
-        "object_access status=resolved api={} session_token_env={} lease_id={} account_id={} project_id={} prefix={} credential_delivery={} credentials_returned=false",
+        "object_access status=resolved api={} session_token_env={} lease_id={} account_id={} project_id={} prefix={} credential_delivery={} client_bucket_credentials=false",
         script_value(api),
         script_value(session_token_env),
         script_value(&grant.lease_id),
@@ -1479,24 +1564,26 @@ fn validate_object_access_grant(
             return Err("object access grant account did not match --metadata-account".to_string());
         }
     }
-    let s3_prefix = args
-        .remote
-        .s3_prefix
-        .as_deref()
-        .ok_or_else(|| "s3 prefix is missing".to_string())?;
-    if grant.prefix != s3_prefix {
-        return Err("object access grant prefix did not match --s3-prefix".to_string());
-    }
-    if args
-        .remote
-        .s3_bucket
-        .as_deref()
-        .is_some_and(|bucket| bucket != grant.bucket)
-    {
-        return Err("object access grant bucket did not match --s3-bucket".to_string());
-    }
-    if args.remote.s3_region != grant.region {
-        return Err("object access grant region did not match --s3-region".to_string());
+    if args.remote.kind == SyncRemoteKind::S3 {
+        let s3_prefix = args
+            .remote
+            .s3_prefix
+            .as_deref()
+            .ok_or_else(|| "s3 prefix is missing".to_string())?;
+        if grant.prefix != s3_prefix {
+            return Err("object access grant prefix did not match --s3-prefix".to_string());
+        }
+        if args
+            .remote
+            .s3_bucket
+            .as_deref()
+            .is_some_and(|bucket| bucket != grant.bucket)
+        {
+            return Err("object access grant bucket did not match --s3-bucket".to_string());
+        }
+        if args.remote.s3_region != grant.region {
+            return Err("object access grant region did not match --s3-region".to_string());
+        }
     }
     Ok(())
 }
@@ -1538,13 +1625,14 @@ fn redact_http_error(error: ureq::Error) -> String {
     }
 }
 
-fn print_remote_config(remote: &SyncRemoteArgs) -> Result<(), String> {
-    match remote.kind {
+fn print_remote_config(args: &SyncArgs) -> Result<(), String> {
+    match args.remote.kind {
         SyncRemoteKind::Local => {
             println!(
                 "remote provider=local root={} credentials=not_used",
                 script_value(
-                    &remote
+                    &args
+                        .remote
                         .local_root
                         .as_ref()
                         .ok_or_else(|| "local remote root is missing".to_string())?
@@ -1554,8 +1642,14 @@ fn print_remote_config(remote: &SyncRemoteArgs) -> Result<(), String> {
             );
         }
         SyncRemoteKind::S3 => {
-            let config = s3_config_from_args(remote)?;
+            let config = s3_config_from_args(&args.remote)?;
             print_remote_description(&RemoteProviderDescription::S3 {
+                redacted: config.redacted(),
+            });
+        }
+        SyncRemoteKind::Hosted => {
+            let config = hosted_config_from_args(args)?;
+            print_remote_description(&RemoteProviderDescription::Hosted {
                 redacted: config.redacted(),
             });
         }
@@ -1581,6 +1675,15 @@ fn print_remote_description(description: &RemoteProviderDescription) {
                 script_value(&redacted.access_key_env),
                 script_value(&redacted.secret_key_env),
                 script_value(redacted.session_token_env.as_deref().unwrap_or("-"))
+            );
+        }
+        RemoteProviderDescription::Hosted { redacted } => {
+            println!(
+                "remote provider=hosted-object-transfer api_host={} project_id={} lease_id={} session_token_env={} client_bucket_credentials=false",
+                script_value(&redacted.api_host),
+                script_value(&redacted.project_id),
+                script_value(&redacted.lease_id),
+                script_value(&redacted.session_token_env)
             );
         }
     }
@@ -1620,6 +1723,7 @@ fn remote_kind_label(kind: SyncRemoteKind) -> &'static str {
     match kind {
         SyncRemoteKind::Local => "local",
         SyncRemoteKind::S3 => "s3",
+        SyncRemoteKind::Hosted => "hosted",
     }
 }
 
@@ -1760,7 +1864,10 @@ fn print_help() {
         "  devbox-daemon sync --pull --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-account <ACCOUNT_ID> --metadata-project <PROJECT_ID> [--to <TARGET_DIR> --apply] <PROJECT_ROOT> [--once]"
     );
     println!(
-        "  Add --remote-kind s3 plus --s3-* flags and --object-access-api/--object-access-lease for shared-bucket live alpha sync."
+        "  Add --remote-kind hosted plus --object-access-api/--object-access-lease and --metadata-project for external hosted object transfer without client bucket keys."
+    );
+    println!(
+        "  Add --remote-kind s3 plus --s3-* flags and --object-access-api/--object-access-lease only for trusted-operator direct R2/S3 smoke."
     );
 }
 

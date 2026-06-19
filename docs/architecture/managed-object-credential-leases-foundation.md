@@ -74,8 +74,9 @@ session tokens, object credentials, provider API tokens, fingerprints, or hashes
 
 `object-access resolve` calls the hosted API with `Authorization: Bearer <session-token>` loaded
 from `DEVBOX_SESSION_TOKEN` by default. It prints the authorized shared-bucket prefix and states that
-client object credentials are not returned. Direct S3-compatible CLI flags remain suitable only for
-trusted operator smoke tests with locally supplied env credentials.
+client object credentials are not returned. External testers use `--remote-kind hosted` to transfer
+encrypted bytes through the server-mediated API; direct S3-compatible CLI flags remain suitable only
+for trusted operator smoke tests with locally supplied env credentials.
 
 `devbox-daemon sync --remote-kind s3` now consumes the same object-access grant as a live alpha
 preflight. The daemon refuses shared-bucket live sync unless the hosted API/lease/session-token-env
@@ -83,22 +84,25 @@ are configured and the returned grant matches the requested bucket, region, acco
 and prefix. The grant still does not return client credentials; the direct S3 provider loads only
 environment variable names for the current transport.
 
+`devbox-daemon sync --remote-kind hosted` consumes the same grant for encrypted object transfer. The
+metadata API opens server-side object storage, applies the account/project prefix, and enforces
+read/write/head/list capabilities plus lease expiration, revocation, and rotation generation on each
+object operation.
+
 ## Sync Integration Boundary
 
 The existing local filesystem and S3-compatible object providers remain unchanged. S3-compatible
 remotes can still be configured with environment variable names. The grant model now gives live
-daemon sync a safe hosted authorization boundary for one shared bucket: authenticate the account
-session, resolve the project prefix, verify the requested S3 prefix, then use the current trusted
-operator S3 provider for encrypted object bytes. The future hosted object proxy or signed URL path
-will remove client-side object credentials from external tester machines. This intentionally does
-not pretend that Cloudflare R2 can mint arbitrary per-prefix end-user temporary credentials for us.
+daemon sync two safe shared-bucket modes: hosted transfer for external testers with no client bucket
+keys, and trusted direct-S3 smoke for operators who intentionally keep bucket keys on their own
+machine. This intentionally does not pretend that Cloudflare R2 can mint arbitrary per-prefix
+end-user temporary credentials for us.
 
 ## Deferred
 
 Remaining Phase 1 work still includes:
 
 - live OAuth/OIDC sign-in and hosted account proof verification
-- hosted object proxy or signed URL data transfer through the grant
 - live Cloudflare/AWS/MinIO credential provisioning APIs
 - production deployment hardening and abuse protection
 - production pairing/recovery UX and live credential recovery flows

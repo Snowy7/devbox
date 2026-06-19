@@ -49,7 +49,7 @@
               <li>Rust API with device pairing and auth.</li>
               <li>Hosted metadata API foundation for accounts, devices, projects, published manifests, and compare-and-set cursors. SQLite-backed dev/test storage is complete; publish/import/materialize can opt into in-process mock-dev metadata wiring; account-session auth is now modeled for hosted handlers; Postgres remains the production boundary.</li>
               <li>R2 blob backend behind a provider interface.</li>
-              <li>Encrypted immutable blob upload and download. Local filesystem and S3-compatible R2/S3/MinIO provider foundations are complete; managed credential lease metadata and hosted shared-bucket prefix grants are in place, while live cloud provisioning and hosted object proxy transfer are deferred.</li>
+              <li>Encrypted immutable blob upload and download. Local filesystem, S3-compatible R2/S3/MinIO, and hosted object-transfer provider foundations are complete; managed credential lease metadata and hosted shared-bucket prefix grants keep external tester clients away from raw bucket keys, while live cloud provisioning remains deferred.</li>
             </ul>
           </article>
           <article class="card workstream blue-line">
@@ -105,13 +105,14 @@
           <li>Hosted metadata handlers now support explicit mock-dev headers for tests/dev plus production-shaped account-session bearer auth resolved through the hosted session store, with account-scoped device/project/snapshot/cursor operations.</li>
           <li>Hosted metadata can now run as a single-instance alpha API with `/ready`, one-time invite login, bearer session status/logout, and mock-dev auth disabled by default in the server binary.</li>
           <li>Managed object credential lease and object-access grant primitives model account/session/project-scoped R2/S3/MinIO-compatible provider references, canonical shared-bucket prefixes, capabilities, expiration, revocation, and rotation generation without live provider provisioning.</li>
+          <li>Hosted object transfer now proxies encrypted object put/get/head/list through the metadata API with account-session auth and server-held bucket credentials.</li>
           <li>Production-shaped pairing recovery and rotation primitives model receiver-generated join/complete handoff, recovery grant references, revocation, device rotation intents, and key-envelope rotation generation with explicit secret-bearing alpha payloads.</li>
           <li>Local/mock second-device materialization now proves encrypted publish/import, paired-receiver decrypt without publisher DB access, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret detection blocks detected files before blob-cache writes and uploadable local/mock sync blobs.</li>
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
           <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
           <li>Env-backed redacted Electron alpha shell, explicit path-scoped secret policy records, guarded manual conflict resolution records, alpha package scripts, and deterministic two-device smoke evidence are now in place.</li>
-          <li>OAuth/OIDC login, hosted object proxy or signed URL transfer, signed installers, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
+          <li>OAuth/OIDC login, signed installers, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
         </ul>
       </section>
 

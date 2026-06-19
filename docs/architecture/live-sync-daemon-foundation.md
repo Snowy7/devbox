@@ -88,7 +88,19 @@ route later without changing the discovery contract.
 
 ## Shared Bucket Boundary
 
-For `--remote-kind s3`, live sync requires:
+For external tester object transfer, `--remote-kind hosted` requires:
+
+- `--object-access-api <URL>`
+- `--object-access-lease <LEASE_ID>`
+- `--object-access-session-token-env <ENV>` (defaults to `DEVBOX_SESSION_TOKEN`)
+- `--metadata-project <PROJECT_ID>`
+
+The daemon resolves the account-session object-access grant before opening the hosted object provider.
+The metadata API keeps bucket credentials server-side and enforces account/project prefix scope,
+object-key safety, lease state, and read/write/head/list capabilities on each encrypted object
+operation.
+
+For trusted-operator direct R2/S3 smoke, `--remote-kind s3` requires:
 
 - `--s3-prefix accounts/<account-id>/projects/<project-id>`
 - `--object-access-api <URL>`
@@ -97,16 +109,14 @@ For `--remote-kind s3`, live sync requires:
 
 The daemon resolves the account-session object-access grant before opening the S3 provider and
 verifies the grant bucket, region, project, account when supplied, and prefix. The grant does not
-return raw object credentials. The current direct S3 provider still loads trusted-operator
-credentials from environment variable names; the hosted object proxy or signed URL transport remains
-future work.
+return raw object credentials. The direct S3 provider still loads trusted-operator credentials from
+environment variable names and is not the external tester path.
 
 ## Deferred
 
 This is an alpha automation foundation, not full Dropbox semantics. Deferred work remains:
 
 - background retry queues, durable leases, and resumable transfer state
-- hosted object proxy or signed URL transfer
 - automatic merge/apply resolution for non-empty divergent worktrees
 - Electron tray controls and daemon IPC
 - production OAuth/OIDC onboarding and provider-backed credential provisioning

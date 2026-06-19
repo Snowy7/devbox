@@ -1,7 +1,7 @@
 # Alpha Tool Distribution
 
 Devbox alpha testers need downloadable command-line tools and a runnable desktop control surface
-before signed installers and hosted object transfer exist. For now, publishing is local: build the
+before signed installers and hosted deployment hardening exist. For now, publishing is local: build the
 macOS/Linux alpha archives on matching hosts and upload them to a GitHub Release with `gh`.
 
 GitHub Packages is not the right first home for raw native binaries. Packages is useful for npm,
@@ -55,11 +55,10 @@ Pass credential variable names to the CLI and daemon:
 Do not pass raw key values as CLI arguments.
 
 For external multi-user alpha testing, tester machines should not receive shared bucket credentials.
-Use one shared bucket with per-account/project prefixes. Today this is a grant-validation boundary,
-not a complete external object-transfer path: the hosted server can prove a tester is allowed to use
-a prefix, but the current sync provider still needs local S3 access/secret env values before it can
-move bytes. Run R2 credentials on the hosted metadata server only for grant resolution. The server
-enables object-access resolution when these server-side env vars are populated:
+Use one shared bucket with per-account/project prefixes. The hosted transfer path keeps R2/S3
+credentials on the Devbox metadata server and lets tester clients move encrypted object bytes through
+the account-session/object-access boundary. The server enables object-access resolution and hosted
+object transfer when these server-side env vars are populated:
 
 ```bash
 DEVBOX_R2_ACCESS_KEY_ID=server-side-access-key
@@ -72,6 +71,9 @@ You can rename the server-side variable names with `DEVBOX_OBJECT_ACCESS_KEY_ENV
 `DEVBOX_OBJECT_SECRET_KEY_ENV`, and `DEVBOX_OBJECT_SESSION_TOKEN_ENV`, but the server still checks
 that the referenced env vars have values before enabling grants. A Cloudflare API token is not
 required for the current broker; it does not call Cloudflare to mint temporary credentials.
+For local/dev hosted-transfer testing without R2, set `DEVBOX_OBJECT_LOCAL_ROOT` on the metadata
+server instead; this stores encrypted objects under a server-owned local object root and exercises the
+same session, lease, prefix, and capability checks.
 
 The prefix shape is the authorization boundary:
 
@@ -80,17 +82,16 @@ accounts/<account-id>/projects/<project-id>
 ```
 
 Every grant is scoped to one account session, one project, one lease, and one prefix. A tester should
-never be told to set a prefix outside their own account/project path. Until the object proxy or
-signed URL transport exists, do not call R2 object transfer external-tester ready without also
-placing bucket credentials on that tester machine; that credential placement is trusted-operator
-smoke only.
+never be told to set a prefix outside their own account/project path. External testers use
+`--remote-kind hosted`; trusted operators can still use `--remote-kind s3` when they intentionally
+place local bucket credentials on their own machine.
 
 ## Current Deployment Boundary
 
 The local trusted-operator real-R2 smoke path does not require deploying the Devbox API. The external
-multi-user auth/grant path does: run the hosted metadata API with server-side bucket credentials and
-have testers resolve object-access grants with their session token. Those grants do not yet provide
-usable object-transfer credentials.
+multi-user hosted-transfer path does: run the hosted metadata API with server-side bucket credentials
+and have testers use their session token against the object-access transfer endpoints. Raw bucket
+credentials stay server-side.
 
 The repo has a deployable hosted metadata alpha API with:
 
@@ -100,6 +101,7 @@ The repo has a deployable hosted metadata alpha API with:
 - hosted metadata handlers that reject mock-dev headers unless explicitly enabled
 - server-mediated object-access prefix grants for one shared R2 bucket when server-managed R2 env
   credentials are configured
+- hosted object transfer endpoints for encrypted put/get/head/list under the authorized prefix
 
 To test hosted login locally:
 
@@ -170,6 +172,23 @@ DEVBOX_LIVE_ONCE=true \
 scripts/devbox-live-sync-alpha.sh
 ```
 
+For external tester hosted object transfer, set `DEVBOX_REMOTE_KIND=hosted`,
+`DEVBOX_METADATA_API`, `DEVBOX_METADATA_DB`, `DEVBOX_METADATA_PROJECT`, `DEVBOX_SESSION_TOKEN`, and
+`DEVBOX_OBJECT_ACCESS_LEASE`. Do not set `DEVBOX_R2_ACCESS_KEY_ID` or
+`DEVBOX_R2_SECRET_ACCESS_KEY` on tester machines:
+
+```bash
+DEVBOX_REMOTE_KIND=hosted \
+DEVBOX_METADATA_API=http://127.0.0.1:8787 \
+DEVBOX_METADATA_DB=./metadata-alpha.sqlite3 \
+DEVBOX_METADATA_PROJECT=project-devbox \
+DEVBOX_SESSION_TOKEN='<tester-session-token>' \
+DEVBOX_OBJECT_ACCESS_LEASE=lease-alpha \
+DEVBOX_LIVE_MODE=push \
+DEVBOX_LIVE_ONCE=true \
+scripts/devbox-live-sync-alpha.sh
+```
+
 For trusted-operator shared-bucket R2 smoke testing, set `DEVBOX_REMOTE_KIND=s3`,
 `DEVBOX_METADATA_API`, `DEVBOX_METADATA_DB`, `DEVBOX_METADATA_PROJECT`, `DEVBOX_SESSION_TOKEN`,
 `DEVBOX_OBJECT_ACCESS_LEASE`, and `DEVBOX_R2_PREFIX=accounts/<account-id>/projects/<project-id>`.
@@ -177,20 +196,16 @@ The live daemon resolves the object-access grant before S3 work and refuses a pr
 the direct S3 transport still loads `DEVBOX_R2_ACCESS_KEY_ID` and `DEVBOX_R2_SECRET_ACCESS_KEY` from
 the local environment.
 
-The current real-R2 smoke path is split:
+The current object-transfer paths are split:
 
-- object bytes go to R2 only in trusted-operator direct-S3 smoke mode
+- external testers use hosted object transfer and need no local R2/S3 bucket keys
+- object bytes go directly to R2 only in trusted-operator direct-S3 smoke mode
 - trusted operators can still run direct S3-compatible CLI smoke tests with local `.env.r2.local`
   credentials and the authorized prefix
-- external testers can use hosted auth plus the server-mediated object-access grant to validate the
-  account/project/prefix permission boundary, but not to transfer R2 objects without local bucket
-  credentials
 - device trust can use receiver-generated pairing with `devices join`, `devices approve-join`, and
   `devices complete`
 - live daemon sync can publish current work and pull the latest hosted mock-dev snapshot with
   deterministic `--once` tests and long-running debounce mode
-- hosted object proxy or signed URL data transfer is deferred and is required before external
-  tester object transfer can avoid local bucket credentials
 - the Electron app reads redacted `DEVBOX_*` config and generated command state, but does not start
   the daemon or mutate files yet
 
@@ -295,14 +310,16 @@ one long-lived bucket token across tester machines.
 Current safe alpha setup:
 
 - server-side R2 credentials live only in the hosted metadata API environment for grant validation
+  and hosted object transfer
 - each tester can log in through the hosted alpha session flow and resolve a grant for exactly one
-  `accounts/<account-id>/projects/<project-id>` prefix, but that grant does not transfer bytes
+  `accounts/<account-id>/projects/<project-id>` prefix
+- external testers use `--remote-kind hosted` so encrypted object bytes travel through the Devbox
+  API without client bucket keys
 - direct `--remote-kind s3` with local R2 keys is trusted-operator smoke only
 - for same-user two-device tests, run the receiver-generated pairing flow before import/materialize
   so the receiver can decrypt without `--mock-key-source-db`
 - `--mock-key-source-db` remains only for legacy local smoke tests where both SQLite DBs are on the
   same machine
 
-The prefix grant is now the hosted authorization boundary. Until the object proxy/signed URL path is
-wired to the sync provider, raw direct S3 credentials remain outside the external-tester path and
-R2 object transfer is trusted-operator-only.
+The prefix grant is now the hosted authorization boundary. Raw direct S3 credentials remain outside
+the external-tester path; they are only for trusted-operator direct-R2 smoke.

@@ -34,5 +34,5 @@ exist in the Rust crates.
 
 The private-alpha completion does not include paid SaaS, team administration, agent workflows, Git
 replacement semantics, live OAuth/OIDC provider UI, live Cloudflare/AWS credential provisioning,
-hosted object proxy/signed URL transfer, signed installers, production deployment hardening, hosted
-conflict service, or automatic conflict resolution.
+signed installers, production deployment hardening, hosted conflict service, or automatic conflict
+resolution.

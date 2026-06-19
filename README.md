@@ -34,10 +34,12 @@ This repository currently contains the product foundation and MVP planning artif
   references, redacted credential references, expiration, revocation, and rotation generation.
   Hosted object-access resolution now returns account-session-authorized, project-scoped shared
   bucket prefixes such as `accounts/<account-id>/projects/<project-id>` through a server-mediated
-  broker boundary, and fails closed unless the metadata server has server-managed object credentials
-  configured. The local daemon now has a live sync loop that can scan/debounce a project, persist an
-  idempotent live snapshot, publish encrypted objects, register hosted mock-dev metadata, discover
-  the latest published remote snapshot, and import or materialize it with cursor/conflict preflight.
+  broker boundary, and the hosted object transfer path now proxies encrypted object bytes through the
+  metadata API so external tester clients need only a Devbox session token, not raw R2/S3 bucket
+  keys. The local daemon now has a live sync loop that can scan/debounce a project, persist an
+  idempotent live snapshot, publish encrypted objects through local, trusted direct-S3, or hosted
+  object-transfer remotes, register hosted mock-dev metadata, discover the latest published remote
+  snapshot, and import or materialize it with cursor/conflict preflight.
   Local
   pairing now includes receiver-generated join/complete handoff, so a paired laptop can install its
   own local account key envelope and materialize without opening the publisher DB or sharing its
@@ -54,7 +56,7 @@ This repository currently contains the product foundation and MVP planning artif
   API/session/project config, R2/shared-bucket prefix state, pairing, live sync command state,
   conflicts, devices, secret policy, and settings. It reads redacted `DEVBOX_*` setup state and
   does not start sync or mutate files directly. OAuth, live Cloudflare/AWS credential provisioning,
-  hosted object proxy/signed URL data transfer, signed installers, Postgres-backed
+  signed installers, Postgres-backed
   production deployment hardening, automatic conflict resolution, and paid/team/agent/Git-replacement
   work remain deferred.
 
@@ -94,7 +96,7 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 Alpha helper scripts:
 
 - `scripts/alpha-two-device-smoke.sh` runs a local two-device proof with pairing, pending receiver refusal, live publish, latest pull, materialization, and redacted evidence logs.
-- `scripts/devbox-live-sync-alpha.sh` maps `.env` values into a live daemon command for local or S3-compatible remotes.
+- `scripts/devbox-live-sync-alpha.sh` maps `.env` values into a live daemon command for local, hosted object-transfer, or trusted direct-S3 remotes.
 - `scripts/package-cli.sh <VERSION>` builds macOS/Linux alpha tool archives with CLI, daemon, metadata server, docs, env template, and helper scripts.
 - `scripts/package-desktop-alpha.sh <VERSION>` builds an unsigned Electron alpha control-surface bundle for macOS/Linux.
 
@@ -111,12 +113,11 @@ legacy local/mock trust bootstrap. New paired receiver flows should run `devices
 `devices approve-join`, and `devices complete` first; after completion the receiver can decrypt with
 its own local key state and does not need `--mock-key-source-db`. Invite-based hosted alpha login,
 session-auth hosted metadata request handling, and server-mediated object-access prefix grants now
-exist. The grant is the authorization boundary for a shared bucket; raw R2/S3 credentials are still
-not returned to tester clients. Live daemon sync with `--remote-kind s3` currently uses the grant as
-a hosted scope/prefix preflight and still requires trusted-operator local S3 env credentials for
-object transfer. External testers can validate login/grants now, but R2 object transfer without
-local bucket keys waits for the hosted object proxy or signed URL path. OAuth, object proxy/signed URL
-transfer, production deployment hardening, and UI onboarding remain deferred.
+exist. The grant is the authorization boundary for a shared bucket; raw R2/S3 credentials are not
+returned to tester clients. Live daemon sync with `--remote-kind hosted` transfers encrypted object
+bytes through the metadata API using only the tester's session token on the client. Trusted operators
+can still use `--remote-kind s3` for direct S3/R2 smoke tests with local bucket env keys. OAuth,
+Postgres/Railway deployment hardening, and UI onboarding remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

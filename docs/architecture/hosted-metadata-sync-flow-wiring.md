@@ -27,11 +27,12 @@ path should omit `--mock-key-source-db`: after `devices join -> approve-join -> 
 receiver DB already has a local device-key envelope created from the token-wrapped completion. The
 default path remains local/mock only and still derives the manifest object key locally. Hosted
 metadata handlers now support production-shaped account-session bearer auth, but these local sync
-commands still use the in-process mock-dev SQLite metadata mode and do not perform live
-OAuth-backed network auth. Managed object credential lease records and object-access grants now
-provide a hosted path for resolving an authenticated account/session/project prefix inside one shared
-R2/S3/MinIO-compatible bucket, but sync commands do not yet transfer object bytes through the hosted
-grant.
+commands still use the in-process mock-dev SQLite metadata mode for snapshot records and do not
+perform live OAuth-backed network auth. Managed object credential lease records and object-access
+grants now provide a hosted path for resolving an authenticated account/session/project prefix inside
+one shared R2/S3/MinIO-compatible bucket. Sync object bytes can use `--remote-kind hosted`, which
+proxies encrypted object put/get/head/list through the metadata API without returning raw bucket
+credentials to the client.
 
 The live daemon adds latest-snapshot discovery for the same account/project scope. Receivers can
 omit a pasted snapshot id and let `devbox-daemon sync --pull` resolve the latest published metadata
@@ -81,20 +82,25 @@ unsafe endpoint material.
 
 `devbox metadata object-access resolve` is the hosted/API-side counterpart. It uses
 `DEVBOX_SESSION_TOKEN` by default, calls the metadata API, and returns a redacted server-mediated
-grant for `accounts/<account-id>/projects/<project-id>`. Direct S3-compatible sync flags remain a
-trusted-operator smoke path until sync has a hosted object proxy or signed URL transport.
+grant for `accounts/<account-id>/projects/<project-id>`. `--remote-kind hosted` consumes the same
+API/session/lease boundary for encrypted object transfer. Direct S3-compatible sync flags remain a
+trusted-operator smoke path.
 
 `devbox-daemon sync --remote-kind s3` is stricter than the manual CLI smoke path: it requires an
 object-access API, lease id, session token environment variable name, and an `--s3-prefix` that
 matches the grant. The grant is used as an authorization/prefix preflight; raw object credentials
 are still loaded only from environment variable names for the current alpha transport.
 
+`devbox-daemon sync --remote-kind hosted` requires an object-access API, lease id, session token
+environment variable name, and `--metadata-project`. The daemon resolves the grant at startup and the
+hosted object provider enforces read/write/head/list capabilities, lease activity, account/project
+scope, and object-key safety on every transfer.
+
 ## Deferred
 
 This is personal-alpha wiring, not a production SaaS backend. Deferred work remains:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
-- hosted object proxy or signed URL transport for encrypted object bytes
 - live managed object credential provisioning and rotation against provider APIs
 - production deployment hardening and observability
 - Electron tray/status UI
