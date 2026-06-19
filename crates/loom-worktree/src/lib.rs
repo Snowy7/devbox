@@ -7,10 +7,11 @@ use loom_core::{FileKind, FileVersion, FileVersionId, LoomError, RevisionBoundar
 use loom_store::{path_to_store_string, ObjectCache, StoreError, STORE_DIR};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
-const SECRET_SCAN_PREFIX_BYTES: u64 = 1024 * 1024;
+#[cfg(test)]
+const OLD_SECRET_SCAN_PREFIX_BYTES: usize = 1024 * 1024;
 const MAX_SECRET_FINDINGS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,8 +340,8 @@ fn capture_file(
     captured_at: &str,
     capture: &mut WorktreeCapture,
 ) -> CaptureResult<()> {
-    let prefix = read_secret_scan_prefix(path)?;
-    let findings = SecretDetector.scan_bytes(&prefix);
+    let bytes = read_file_bytes_for_secret_check(path)?;
+    let findings = SecretDetector.scan_bytes(&bytes);
     if let Some(finding) = findings.first() {
         capture.summary.blocked_secret_files += 1;
         capture.blocked.push(CaptureNotice::new(
@@ -350,7 +351,7 @@ fn capture_file(
         return Ok(());
     }
 
-    let object = object_cache.write_file(path)?;
+    let object = object_cache.write_bytes(&bytes)?;
     let size_bytes = object.size_bytes();
     let version = FileVersion::new(
         stable_file_version_id(
@@ -435,20 +436,11 @@ fn file_kind_to_store(kind: FileKind) -> &'static str {
     }
 }
 
-fn read_secret_scan_prefix(path: &Path) -> CaptureResult<Vec<u8>> {
-    let mut file = fs::File::open(path).map_err(|source| CaptureError::Io {
+fn read_file_bytes_for_secret_check(path: &Path) -> CaptureResult<Vec<u8>> {
+    fs::read(path).map_err(|source| CaptureError::Io {
         path: path.to_path_buf(),
         source,
-    })?;
-    let mut reader = file.by_ref().take(SECRET_SCAN_PREFIX_BYTES);
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|source| CaptureError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(bytes)
+    })
 }
 
 fn relative_to(root: &Path, path: &Path) -> PathBuf {
@@ -766,6 +758,29 @@ mod tests {
         assert!(!reason.contains(&raw_secret));
     }
 
+    #[test]
+    fn blocks_late_secret_past_old_prefix_before_object_cache_write() {
+        let fixture = TestFolder::new();
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        let mut content = "a".repeat(OLD_SECRET_SCAN_PREFIX_BYTES + 32);
+        content.push_str("\nOPENAI_API_KEY=");
+        content.push_str(&raw_secret);
+        content.push('\n');
+        fixture.write("late-secret.env", &content);
+
+        let capture = fixture.capture();
+
+        assert!(capture.file_versions().is_empty());
+        assert_eq!(capture.summary().captured_files(), 0);
+        assert_eq!(capture.summary().blocked_secret_files(), 1);
+        assert_eq!(fixture.object_file_count(), 0);
+        assert!(!fixture.object_cache_contains(raw_secret.as_bytes()));
+        let reason = capture.blocked()[0].reason();
+        assert!(reason.contains("openai_api_key"));
+        assert!(reason.contains("sk-<redacted>"));
+        assert!(!reason.contains(&raw_secret));
+    }
+
     struct TestFolder {
         _dir: tempfile::TempDir,
         root: PathBuf,
@@ -822,6 +837,27 @@ mod tests {
                 }
             }
             count
+        }
+
+        fn object_cache_contains(&self, needle: &[u8]) -> bool {
+            let objects = self.store.store_root().join("objects");
+            let mut stack = vec![objects];
+            while let Some(path) = stack.pop() {
+                for entry in fs::read_dir(path).expect("directory reads") {
+                    let entry = entry.expect("entry reads");
+                    let entry_path = entry.path();
+                    if entry_path.is_dir() {
+                        stack.push(entry_path);
+                    } else {
+                        let bytes = fs::read(&entry_path).expect("object bytes read");
+                        if bytes.windows(needle.len()).any(|window| window == needle) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            false
         }
     }
 }
