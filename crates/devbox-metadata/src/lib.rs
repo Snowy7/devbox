@@ -7,7 +7,7 @@
 //! managed object credential issuance, billing, and deployment hardening remain deferred.
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -33,6 +33,7 @@ use url::Url;
 const MOCK_ACCOUNT_HEADER: &str = "x-devbox-mock-account-id";
 const MOCK_DEVICE_HEADER: &str = "x-devbox-mock-device-id";
 const AUTHORIZATION_HEADER: &str = "authorization";
+const HOSTED_OBJECT_UPLOAD_MAX_BYTES: usize = 512 * 1024 * 1024;
 const SECRET_MARKERS: &[&str] = &[
     "sync_key",
     "sync-key",
@@ -2615,7 +2616,8 @@ where
             "/v1/projects/:project_id/object-access/:lease_id/object",
             get(get_hosted_object::<S>)
                 .put(put_hosted_object::<S>)
-                .head(head_hosted_object::<S>),
+                .head(head_hosted_object::<S>)
+                .layer(DefaultBodyLimit::max(HOSTED_OBJECT_UPLOAD_MAX_BYTES)),
         )
         .route(
             "/v1/projects/:project_id/object-access/:lease_id/objects",
@@ -5930,6 +5932,59 @@ mod tests {
         .await
         .expect("hosted provider checks join");
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn hosted_object_upload_accepts_blobs_above_axum_default_limit() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut store);
+        store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 4_000_000_000,
+                capabilities: vec![ManagedObjectCapability::Write],
+                ..managed_lease_request()
+            })
+            .expect("lease upserts");
+        let object_root = tempfile::tempdir().expect("object root creates");
+        let mut config = HostedApiConfig::local_dev();
+        config.object_access_broker = ManagedObjectAccessBrokerConfig::server_managed_local(
+            object_root.path().display().to_string(),
+        )
+        .expect("local broker validates");
+        let router = app_with_config(store, config);
+        let body = vec![7_u8; 2 * 1024 * 1024 + 8192];
+        let response = router
+            .oneshot(session_binary_request(
+                Method::PUT,
+                "/v1/projects/project-devbox/object-access/lease-alpha/object?key=encrypted/blobs/b3/large/object",
+                &body,
+                raw_token,
+            ))
+            .await
+            .expect("response returns");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let response_body = response_text(response).await;
+        assert!(response_body.contains(&format!("\"size_bytes\":{}", body.len())));
+        let scoped_path = object_root
+            .path()
+            .join("objects")
+            .join("accounts")
+            .join(ACCOUNT)
+            .join("projects")
+            .join(PROJECT)
+            .join("encrypted")
+            .join("blobs")
+            .join("b3")
+            .join("large")
+            .join("object");
+        assert_eq!(
+            std::fs::metadata(scoped_path)
+                .expect("large object persists")
+                .len(),
+            body.len() as u64
+        );
     }
 
     #[tokio::test]

@@ -139,11 +139,21 @@ impl fmt::Display for HostedRedactedConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostedObjectTransferProvider {
     config: HostedObjectTransferConfig,
     session_token: String,
     agent: Agent,
+}
+
+impl fmt::Debug for HostedObjectTransferProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostedObjectTransferProvider")
+            .field("config", &self.config)
+            .field("session_token", &"<redacted>")
+            .field("agent", &"<ureq-agent>")
+            .finish()
+    }
 }
 
 impl HostedObjectTransferProvider {
@@ -401,4 +411,30 @@ fn validate_env_name(value: String, label: &'static str) -> SyncResult<String> {
 
 fn encode_api_segment(value: &str) -> String {
     utf8_percent_encode(value, API_ENCODE_SET).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_provider_debug_redacts_bearer_session_token() {
+        let provider = HostedObjectTransferProvider::new(
+            HostedObjectTransferConfig::new(
+                "https://metadata.example",
+                "project-devbox",
+                "lease-alpha",
+                "DEVBOX_SESSION_TOKEN",
+            )
+            .expect("hosted config validates"),
+            "raw-hosted-session-token-should-not-appear",
+        );
+
+        let debug = format!("{provider:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("HostedObjectTransferProvider"));
+        assert!(!debug.contains("raw-hosted-session-token-should-not-appear"));
+        assert!(!debug.contains("Bearer"));
+    }
 }
