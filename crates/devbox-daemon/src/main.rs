@@ -746,6 +746,12 @@ fn validate_sync_args(args: &SyncArgs) -> Result<(), String> {
             if let Some(name) = &args.object_access.session_token_env {
                 validate_env_name(name, "--object-access-session-token-env")?;
             }
+            if args.metadata.mode != SyncMetadataMode::HostedApi {
+                return Err(
+                    "live sync with --remote-kind hosted requires --metadata-mode hosted-api"
+                        .to_string(),
+                );
+            }
             if args.object_access.api.is_none() || args.object_access.lease_id.is_none() {
                 return Err(
                     "live sync with --remote-kind hosted requires --object-access-api and --object-access-lease"
@@ -2123,6 +2129,40 @@ mod tests {
         assert_eq!(
             error,
             "sync hosted API metadata derives account identity from the authenticated session; remove --metadata-account"
+        );
+    }
+
+    #[test]
+    fn sync_hosted_remote_rejects_mock_dev_sqlite_metadata() {
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--cache".to_string(),
+            "cache".to_string(),
+            "--remote-kind".to_string(),
+            "hosted".to_string(),
+            "--object-access-api".to_string(),
+            "https://metadata.example".to_string(),
+            "--object-access-lease".to_string(),
+            "lease-1".to_string(),
+            "--object-access-session-token-env".to_string(),
+            "DEVBOX_SESSION_TOKEN".to_string(),
+            "--metadata-mode".to_string(),
+            "mock-dev-sqlite".to_string(),
+            "--metadata-db".to_string(),
+            "metadata.sqlite3".to_string(),
+            "--metadata-project".to_string(),
+            "project-1".to_string(),
+            "--pull".to_string(),
+            "--once".to_string(),
+            "project".to_string(),
+        ];
+
+        let error = parse_sync_args(&args).expect_err("hosted remote requires hosted API metadata");
+
+        assert_eq!(
+            error,
+            "live sync with --remote-kind hosted requires --metadata-mode hosted-api"
         );
     }
 }

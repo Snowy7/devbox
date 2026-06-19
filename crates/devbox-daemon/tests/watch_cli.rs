@@ -385,18 +385,14 @@ fn sync_hosted_object_transfer_push_and_materialize_without_client_r2_keys() {
     fixture.write("README.md", "hosted transfer path\n");
 
     let push = run_devbox_daemon_vec_with_env(
-        fixture.hosted_sync_args(
-            &fixture.source_db,
-            &fixture.source_cache,
-            &server.url,
-            &source_identity.account_id,
-            true,
-        ),
+        fixture.hosted_sync_args(&fixture.source_db, &fixture.source_cache, &server.url, true),
         &[("DEVBOX_TEST_SESSION_TOKEN", session_token)],
     );
     assert_success(&push);
     let push_stdout = stdout(&push);
     assert!(push_stdout.contains("remote_kind=hosted"));
+    assert!(push_stdout.contains("metadata mode=hosted-api"));
+    assert!(push_stdout.contains("account_id=authenticated-session"));
     assert!(push_stdout.contains("client_bucket_credentials=false"));
     assert!(!push_stdout.contains("DEVBOX_R2_ACCESS_KEY_ID"));
     assert!(!push_stdout.contains("DEVBOX_R2_SECRET_ACCESS_KEY"));
@@ -412,12 +408,13 @@ fn sync_hosted_object_transfer_push_and_materialize_without_client_r2_keys() {
     fixture.pair_receiver_with_source();
     fs::create_dir_all(&fixture.target).expect("target creates");
     let pull = run_devbox_daemon_vec_with_env(
-        fixture.hosted_pull_args(&server.url, &source_identity.account_id),
+        fixture.hosted_pull_args(&server.url),
         &[("DEVBOX_TEST_SESSION_TOKEN", session_token)],
     );
     assert_success(&pull);
     let pull_stdout = stdout(&pull);
     assert!(pull_stdout.contains("action=materialize status=ok"));
+    assert!(pull_stdout.contains("metadata mode=hosted-api"));
     assert!(pull_stdout.contains("remote provider=hosted-object-transfer"));
     assert_eq!(
         fs::read_to_string(fixture.target.join("README.md")).expect("target file reads"),
@@ -739,7 +736,7 @@ impl LiveFixture {
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime creates");
             runtime.block_on(async move {
-                let mut config = HostedApiConfig::local_dev();
+                let mut config = HostedApiConfig::hosted_alpha();
                 config.object_access_broker =
                     ManagedObjectAccessBrokerConfig::server_managed_local(
                         object_root.display().to_string(),
@@ -770,7 +767,6 @@ impl LiveFixture {
         db_path: &Path,
         cache_root: &Path,
         api: &str,
-        account_id: &str,
         push: bool,
     ) -> Vec<String> {
         let mut args = vec![
@@ -788,11 +784,11 @@ impl LiveFixture {
             "--object-access-session-token-env".to_string(),
             "DEVBOX_TEST_SESSION_TOKEN".to_string(),
             "--metadata-mode".to_string(),
-            "mock-dev-sqlite".to_string(),
-            "--metadata-db".to_string(),
-            path_string(&self.metadata_db),
-            "--metadata-account".to_string(),
-            account_id.to_string(),
+            "hosted-api".to_string(),
+            "--metadata-api".to_string(),
+            api.to_string(),
+            "--metadata-session-token-env".to_string(),
+            "DEVBOX_TEST_SESSION_TOKEN".to_string(),
             "--metadata-project".to_string(),
             self.project_id(),
         ];
@@ -806,14 +802,8 @@ impl LiveFixture {
         args
     }
 
-    fn hosted_pull_args(&self, api: &str, account_id: &str) -> Vec<String> {
-        let mut args = self.hosted_sync_args(
-            &self.receiver_db,
-            &self.receiver_cache,
-            api,
-            account_id,
-            false,
-        );
+    fn hosted_pull_args(&self, api: &str) -> Vec<String> {
+        let mut args = self.hosted_sync_args(&self.receiver_db, &self.receiver_cache, api, false);
         let last = args.len() - 1;
         args[last] = path_string(&self.target);
         let insert_at = args.len() - 1;
