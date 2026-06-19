@@ -178,7 +178,7 @@ impl<'a> RestoreEngine<'a> {
         entries.sort_by(|left, right| {
             path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
         });
-        let mut materialized = Vec::new();
+        let mut target_versions = Vec::new();
 
         for entry in entries {
             let version = file_versions.get(entry.file_version_id()).ok_or_else(|| {
@@ -196,6 +196,13 @@ impl<'a> RestoreEngine<'a> {
                     ),
                 });
             }
+            target_versions.push(version.clone());
+        }
+
+        validate_restore_target_plan(&target_versions)?;
+
+        let mut materialized = Vec::new();
+        for version in &target_versions {
             materialized.push(preflight_materialization(
                 self.store,
                 current.root(),
@@ -509,6 +516,51 @@ pub fn diff_revision_to_capture(
 fn validate_restore_entries(revision: &FolderRevision) -> CaptureResult<()> {
     for entry in revision.entries() {
         validate_materialized_relative_path(entry.path())?;
+    }
+
+    Ok(())
+}
+
+fn validate_restore_target_plan(file_versions: &[FileVersion]) -> CaptureResult<()> {
+    let mut planned_paths = BTreeMap::new();
+
+    for version in file_versions {
+        validate_materialized_relative_path(version.path())?;
+        if matches!(version.kind(), FileKind::Symlink | FileKind::Unsupported) {
+            return Err(CaptureError::UnsafeRestore {
+                path: version.path().to_path_buf(),
+                reason: "only regular files and directories can be restored safely".to_string(),
+            });
+        }
+
+        if planned_paths
+            .insert(version.path().to_path_buf(), version.kind().clone())
+            .is_some()
+        {
+            return Err(CaptureError::UnsafeRestore {
+                path: version.path().to_path_buf(),
+                reason: "target revision contains duplicate entries for one path".to_string(),
+            });
+        }
+    }
+
+    for (path, kind) in &planned_paths {
+        if kind != &FileKind::File {
+            continue;
+        }
+
+        if let Some(descendant) = planned_paths
+            .keys()
+            .find(|candidate| *candidate != path && candidate.starts_with(path))
+        {
+            return Err(CaptureError::UnsafeRestore {
+                path: descendant.clone(),
+                reason: format!(
+                    "target revision would materialize {} as both a file and an ancestor",
+                    path_to_store_string(path)
+                ),
+            });
+        }
     }
 
     Ok(())
@@ -1417,6 +1469,56 @@ mod tests {
         ));
         assert_eq!(fixture.read("README.md"), "after\n");
         assert_eq!(fixture.read("new.txt"), "temporary\n");
+    }
+
+    #[test]
+    fn restore_target_file_child_conflict_leaves_worktree_unchanged() {
+        let fixture = TestFolder::new();
+        let foo_object = fixture
+            .store
+            .object_cache()
+            .write_bytes(b"foo\n")
+            .expect("foo object writes");
+        let child_object = fixture
+            .store
+            .object_cache()
+            .write_bytes(b"child\n")
+            .expect("child object writes");
+        let foo_version = FileVersion::new(
+            FileVersionId::new("file-version-foo").expect("file version id"),
+            "foo",
+            FileKind::File,
+            Some(foo_object.id().clone()),
+            Some(foo_object.size_bytes()),
+            "unix:1",
+        )
+        .expect("foo file version creates");
+        let child_version = FileVersion::new(
+            FileVersionId::new("file-version-foo-child").expect("file version id"),
+            "foo/bar.txt",
+            FileKind::File,
+            Some(child_object.id().clone()),
+            Some(child_object.size_bytes()),
+            "unix:1",
+        )
+        .expect("child file version creates");
+        let conflicting_revision = fixture
+            .store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, &[foo_version, child_version])
+            .expect("conflicting revision creates")
+            .revision()
+            .clone();
+
+        fixture.write("new.txt", "temporary\n");
+        let current = fixture.capture();
+
+        let error = RestoreEngine::new(&fixture.store)
+            .restore(&conflicting_revision, &current)
+            .expect_err("restore refuses target plan conflicts before mutation");
+
+        assert!(matches!(error, CaptureError::UnsafeRestore { .. }));
+        assert_eq!(fixture.read("new.txt"), "temporary\n");
+        assert!(!fixture.root.join("foo").exists());
     }
 
     #[test]
