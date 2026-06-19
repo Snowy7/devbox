@@ -358,7 +358,7 @@ fn sync_s3_live_mode_requires_object_access_and_env_names() {
 }
 
 #[test]
-fn live_sync_script_documents_required_s3_metadata_project() {
+fn live_sync_script_documents_hosted_api_without_shared_metadata_db() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -369,6 +369,10 @@ fn live_sync_script_documents_required_s3_metadata_project() {
 
     assert!(env_example.contains("DEVBOX_METADATA_PROJECT="));
     assert!(script.contains("DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT"));
+    assert!(script.contains("--metadata-mode hosted-api"));
+    assert!(script.contains("--metadata-api"));
+    assert!(script.contains("--metadata-session-token-env DEVBOX_SESSION_TOKEN"));
+    assert!(!script.contains("set DEVBOX_METADATA_DB for hosted live sync metadata"));
 }
 
 #[test]

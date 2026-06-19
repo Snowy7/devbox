@@ -6,7 +6,8 @@ foundation without requiring a network service in normal development or CI.
 ## Scope
 
 `crates/devbox-materialize` now exposes a small `HostedMetadataClient` boundary implemented by any
-`devbox-metadata::MetadataStore`. The current CLI opt-in mode uses `SqliteMetadataStore` in-process:
+`devbox-metadata::MetadataStore` and by an account-session HTTP client. The local deterministic
+opt-in mode uses `SqliteMetadataStore` in-process:
 
 ```text
 --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>
@@ -19,20 +20,28 @@ Import and materialize also require:
 --metadata-account <ACCOUNT_ID>  # or legacy-derive from --mock-key-source-db <PUBLISHER_DB>
 ```
 
-That account/project scope lets the receiver discover the manifest object key from hosted metadata
+That account/project scope lets the receiver discover the manifest object key from mock-dev metadata
 by `(account_id, project_id, snapshot_id)` before decrypting the encrypted bundle. In the current
 mock-dev CLI path, `--mock-key-source-db <PUBLISHER_DB>` can provide the publisher account id for
 the same legacy local trust bootstrap that provides the decryption key. The paired-receiver alpha
 path should omit `--mock-key-source-db`: after `devices join -> approve-join -> complete`, the
 receiver DB already has a local device-key envelope created from the token-wrapped completion. The
-default path remains local/mock only and still derives the manifest object key locally. Hosted
-metadata handlers now support production-shaped account-session bearer auth, but these local sync
-commands still use the in-process mock-dev SQLite metadata mode for snapshot records and do not
-perform live OAuth-backed network auth. Managed object credential lease records and object-access
-grants now provide a hosted path for resolving an authenticated account/session/project prefix inside
-one shared R2/S3/MinIO-compatible bucket. Sync object bytes can use `--remote-kind hosted`, which
-proxies encrypted object put/get/head/list through the metadata API without returning raw bucket
-credentials to the client.
+default path remains local/mock only and still derives the manifest object key locally.
+
+External hosted alpha sync uses the live API instead:
+
+```text
+--metadata-mode hosted-api --metadata-api <URL> --metadata-project <PROJECT_ID>
+--metadata-session-token-env DEVBOX_SESSION_TOKEN
+```
+
+Hosted API mode calls the account-session routes for snapshot registration, latest discovery, and
+cursor compare-and-set. It does not accept `--metadata-account`; the server derives account scope
+from the authenticated bearer session and overwrites any client payload account id. Managed object
+credential lease records and object-access grants provide the companion hosted path for resolving an
+authenticated account/session/project prefix inside one shared R2/S3/MinIO-compatible bucket. Sync
+object bytes can use `--remote-kind hosted`, which proxies encrypted object put/get/head/list
+through the metadata API without returning raw bucket credentials to the client.
 
 The live daemon adds latest-snapshot discovery for the same account/project scope. Receivers can
 omit a pasted snapshot id and let `devbox-daemon sync --pull` resolve the latest published metadata
@@ -54,7 +63,7 @@ raw sync keys, device keys, R2 secrets, object credentials, or manifest contents
 
 Metadata-enabled import/materialize:
 
-- upserts the receiver mock-dev device
+- upserts the receiver device under the mock-dev store or authenticated hosted session
 - looks up the published snapshot metadata by hosted account, project, and snapshot id
 - or, in daemon live pull mode, first resolves the latest published snapshot for the hosted
   account/project
@@ -65,16 +74,16 @@ Metadata-enabled import/materialize:
 If hosted compare-and-set returns a stale cursor conflict, the local cursor is not advanced. This
 keeps a receiver from blindly overwriting newer server-side cursor state.
 
-The hosted cursor uses the hosted/publisher account scope and the receiving device id. The local
-cursor remains stored under the receiver DB's local account/device ids. For paired receivers, that
-local account id is the publisher account id because pairing completion installs the receiver device
-inside that account boundary.
+The hosted API cursor uses the authenticated session account scope and the receiving device id. The
+local cursor remains stored under the receiver DB's local account/device ids. For paired receivers,
+that local account id is the publisher account id because pairing completion installs the receiver
+device inside that account boundary.
 
 ## CLI Boundary
 
 `devbox metadata check` remains a no-network validation command. Sync commands can optionally accept
-`--metadata-endpoint <URL>` as a sanitized label for the mock-dev metadata boundary, but sync metadata
-mode remains in-process for this slice and does not perform a live endpoint call.
+`--metadata-endpoint <URL>` as a sanitized label for the mock-dev metadata boundary. Hosted alpha
+sync uses `--metadata-api <URL>` with account-session bearer auth and performs live endpoint calls.
 
 Output states whether hosted mock-dev metadata wiring is active or whether the command is using
 local/mock metadata only. It does not print raw mock header values, raw keys, object credentials, or
@@ -92,9 +101,11 @@ matches the grant. The grant is used as an authorization/prefix preflight; raw o
 are still loaded only from environment variable names for the current alpha transport.
 
 `devbox-daemon sync --remote-kind hosted` requires an object-access API, lease id, session token
-environment variable name, and `--metadata-project`. The daemon resolves the grant at startup and the
-hosted object provider enforces read/write/head/list capabilities, lease activity, account/project
-scope, and object-key safety on every transfer.
+environment variable name, `--metadata-mode hosted-api`, `--metadata-api`, and
+`--metadata-project` for external alpha use. The daemon resolves the grant at startup and the hosted
+object provider enforces read/write/head/list capabilities, lease activity, account/project scope,
+and object-key safety on every transfer. Local `mock-dev-sqlite` mode remains available for
+deterministic no-network smoke tests.
 
 ## Deferred
 

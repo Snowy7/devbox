@@ -410,6 +410,7 @@ dependencies = [
 name = "devbox-materialize"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "blake3",
  "devbox-auth",
  "devbox-conflict",
@@ -421,6 +422,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]

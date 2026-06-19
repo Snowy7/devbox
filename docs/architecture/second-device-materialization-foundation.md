@@ -123,8 +123,8 @@ devbox snapshot restore --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --to <TARGET
 
 ## Hosted Metadata Opt-In
 
-For dev/test wiring, add `--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>` to publish.
-For import/materialize, also pass `--metadata-project <PROJECT_ID>` and either
+For deterministic dev/test wiring, add `--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>` to publish.
+For local/mock import/materialize, also pass `--metadata-project <PROJECT_ID>` and either
 `--metadata-account <ACCOUNT_ID>` or the legacy `--mock-key-source-db <PUBLISHER_DB>` local/mock
 trust bootstrap. A completed paired receiver should pass `--metadata-account <ACCOUNT_ID>` and omit
 `--mock-key-source-db`; its local DB already has the decryptable account sync key envelope. That
@@ -132,6 +132,12 @@ account/project scope lets the manifest object key be looked up from publisher-s
 metadata instead of derived locally. Cursor advancement uses hosted
 compare-and-set first under the hosted account scope and receiver device id; if the hosted cursor is
 stale, the local cursor remains unchanged.
+
+For external hosted alpha testing, use `--metadata-mode hosted-api --metadata-api <URL>
+--metadata-project <PROJECT_ID> [--metadata-session-token-env DEVBOX_SESSION_TOKEN]` instead of a
+shared `--metadata-db`. Hosted API mode derives the account from the authenticated session on the
+server, so clients do not pass `--metadata-account`; `--remote-kind hosted` also avoids local R2/S3
+keys by proxying encrypted object bytes through the metadata API.
 
 ## Deferred
 
