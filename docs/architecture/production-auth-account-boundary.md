@@ -52,7 +52,8 @@ The local store supports:
 - account session lookup by id or hash
 - account session revocation
 - resolving a presented session token into an authenticated account/session context
-- resolving active managed object credential leases inside the authenticated account/session scope
+- resolving active managed object credential leases and object-access grants inside the
+  authenticated account/session scope
 
 Hosted metadata HTTP handlers now support two explicit modes. Local tests/dev can still use the
 local-only mock-dev headers:
@@ -78,6 +79,10 @@ account ids supplied in JSON request bodies. Public HTTP errors are sanitized an
 session tokens, token hashes, provider material, object credentials, SQLite internals, or key
 material.
 
+Hosted object-access grants are stricter than the general mock-dev metadata handlers. They require
+bearer account-session auth, derive the shared-bucket prefix from the authenticated account and
+requested project, and do not return raw object credentials to the client.
+
 ## CLI Smoke Surface
 
 The CLI surface is intentionally no-network and dev/bootstrap-only:
@@ -102,6 +107,7 @@ This is not production sign-in UI. Remaining Phase 1 work still includes:
 - live OAuth/OIDC provider integration
 - hosted login/callback handling
 - production pairing UX and live recovery/rotation flows
+- hosted object proxy or signed URL data transfer for managed object-access grants
 - live managed object-storage credential provisioning and rotation against Cloudflare/AWS APIs
 - production deployment hardening and abuse protection
 - Electron onboarding/status UI

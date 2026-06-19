@@ -31,7 +31,11 @@ This repository currently contains the product foundation and MVP planning artif
   header mode for tests/dev and also accept production-shaped `Authorization: Bearer <session-token>`
   account-session auth resolved through the hosted session store. Hosted metadata now also models
   managed object credential leases with account/session/project scoping, R2/S3/MinIO-shaped provider
-  references, redacted credential references, expiration, revocation, and rotation generation. Local
+  references, redacted credential references, expiration, revocation, and rotation generation.
+  Hosted object-access resolution now returns account-session-authorized, project-scoped shared
+  bucket prefixes such as `accounts/<account-id>/projects/<project-id>` through a server-mediated
+  broker boundary, and fails closed unless the metadata server has server-managed object credentials
+  configured. Local
   pairing now includes receiver-generated join/complete handoff, so a paired laptop can install its
   own local account key envelope and materialize without opening the publisher DB or sharing its
   local device key with the source. It also
@@ -40,7 +44,8 @@ This repository currently contains the product foundation and MVP planning artif
   alpha API with one-time invite login, bearer session status/logout, `/ready`, and mock-dev auth
   disabled by default in the server binary. The private-alpha desktop shell now provides a
   no-network Electron control surface for status, projects, sync activity, conflicts, devices,
-  secret policy, and settings. OAuth, live Cloudflare/AWS credential provisioning, Postgres-backed
+  secret policy, and settings. OAuth, live Cloudflare/AWS credential provisioning, hosted object
+  proxy/signed URL data transfer, Postgres-backed
   production deployment hardening, automatic conflict resolution, and paid/team/agent/Git-replacement
   work remain deferred.
 
@@ -57,6 +62,7 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox metadata credential-lease check --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox metadata credential-lease rotate --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox metadata credential-lease revoke --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
+- `devbox metadata object-access resolve --api <URL> --session-token-env DEVBOX_SESSION_TOKEN --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN>`
 - `devbox auth hosted-login --api <URL> --email <EMAIL> --invite-code-env <ENV>`
 - `devbox auth hosted-status --api <URL> [--session-token-env <ENV>]`
@@ -84,9 +90,11 @@ For import/materialize, the hosted metadata account scope is either passed expli
 `--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
 legacy local/mock trust bootstrap. New paired receiver flows should run `devices join`,
 `devices approve-join`, and `devices complete` first; after completion the receiver can decrypt with
-its own local key state and does not need `--mock-key-source-db`. Invite-based hosted alpha login
-and session-auth hosted metadata request handling exist, but OAuth, production credential brokering,
-production deployment hardening, and UI onboarding remain deferred.
+its own local key state and does not need `--mock-key-source-db`. Invite-based hosted alpha login,
+session-auth hosted metadata request handling, and server-mediated object-access prefix grants now
+exist. The grant is the authorization boundary for a shared bucket; raw R2/S3 credentials are still
+not returned to tester clients. OAuth, object proxy/signed URL transfer, production deployment
+hardening, and UI onboarding remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

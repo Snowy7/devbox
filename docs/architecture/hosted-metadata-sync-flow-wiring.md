@@ -28,9 +28,10 @@ receiver DB already has a local device-key envelope created from the token-wrapp
 default path remains local/mock only and still derives the manifest object key locally. Hosted
 metadata handlers now support production-shaped account-session bearer auth, but these local sync
 commands still use the in-process mock-dev SQLite metadata mode and do not perform live
-OAuth-backed network auth. Managed object credential lease records now provide a future path
-for resolving redacted hosted R2/S3/MinIO provider configuration by authenticated
-account/session/project scope, but sync commands do not yet fetch live managed cloud credentials.
+OAuth-backed network auth. Managed object credential lease records and object-access grants now
+provide a hosted path for resolving an authenticated account/session/project prefix inside one shared
+R2/S3/MinIO-compatible bucket, but sync commands do not yet transfer object bytes through the hosted
+grant.
 
 ## Publish Semantics
 
@@ -72,11 +73,17 @@ Output states whether hosted mock-dev metadata wiring is active or whether the c
 local/mock metadata only. It does not print raw mock header values, raw keys, object credentials, or
 unsafe endpoint material.
 
+`devbox metadata object-access resolve` is the hosted/API-side counterpart. It uses
+`DEVBOX_SESSION_TOKEN` by default, calls the metadata API, and returns a redacted server-mediated
+grant for `accounts/<account-id>/projects/<project-id>`. Direct S3-compatible sync flags remain a
+trusted-operator smoke path until sync has a hosted object proxy or signed URL transport.
+
 ## Deferred
 
 This is personal-alpha wiring, not a production SaaS backend. Deferred work remains:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
+- hosted object proxy or signed URL transport for encrypted object bytes
 - live managed object credential provisioning and rotation against provider APIs
 - production deployment hardening and observability
 - Electron tray/status UI

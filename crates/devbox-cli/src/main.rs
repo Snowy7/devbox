@@ -22,9 +22,9 @@ use devbox_materialize::{
 use devbox_metadata::{
     active_managed_object_credential_lease_for_session, authenticate_account_session,
     create_alpha_invite_request, redacted_managed_object_remote_config, AlphaLoginResponse,
-    AuthSessionResponse, ManagedObjectCapability, ManagedObjectCredentialLeaseRequest,
-    ManagedObjectProviderKind, MetadataAuthMode, MetadataServiceConfig, MetadataStore,
-    SqliteMetadataStore,
+    AuthSessionResponse, ManagedObjectAccessGrant, ManagedObjectAccessRequest,
+    ManagedObjectCapability, ManagedObjectCredentialLeaseRequest, ManagedObjectProviderKind,
+    MetadataAuthMode, MetadataServiceConfig, MetadataStore, SqliteMetadataStore,
 };
 use devbox_snapshot::{
     is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
@@ -807,6 +807,27 @@ impl std::fmt::Debug for MetadataCredentialLeaseMutateArgs {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct MetadataObjectAccessResolveArgs {
+    api: String,
+    session_token_env: String,
+    project_id: String,
+    lease_id: String,
+    required_capabilities: Vec<ManagedObjectCapability>,
+}
+
+impl std::fmt::Debug for MetadataObjectAccessResolveArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataObjectAccessResolveArgs")
+            .field("api", &self.api)
+            .field("session_token_env", &self.session_token_env)
+            .field("project_id", &self.project_id)
+            .field("lease_id", &self.lease_id)
+            .field("required_capabilities", &self.required_capabilities)
+            .finish()
+    }
+}
+
 fn run_init(args: &[String]) -> ExitCode {
     match parse_init_args(args)
         .and_then(|args| init_identity(&args).map_err(|error| error.to_string()))
@@ -1143,8 +1164,27 @@ fn run_metadata(args: &[String]) -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Some("object-access") => match args.get(1).map(String::as_str) {
+            Some("resolve") => {
+                match parse_metadata_object_access_resolve_args(&args[2..]).and_then(|args| {
+                    metadata_object_access_resolve(&args).map_err(|error| error.to_string())
+                }) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        eprintln!("devbox: {error}");
+                        print_metadata_usage();
+                        ExitCode::from(1)
+                    }
+                }
+            }
+            _ => {
+                eprintln!("devbox: metadata object-access requires resolve");
+                print_metadata_usage();
+                ExitCode::from(2)
+            }
+        },
         _ => {
-            eprintln!("devbox: metadata requires check or credential-lease");
+            eprintln!("devbox: metadata requires check, credential-lease, or object-access");
             print_metadata_usage();
             ExitCode::from(2)
         }
@@ -2581,6 +2621,71 @@ fn parse_metadata_credential_lease_mutate_args(
     })
 }
 
+fn parse_metadata_object_access_resolve_args(
+    args: &[String],
+) -> Result<MetadataObjectAccessResolveArgs, String> {
+    let mut api = None;
+    let mut session_token_env = "DEVBOX_SESSION_TOKEN".to_string();
+    let mut project_id = None;
+    let mut lease_id = None;
+    let mut required_capabilities = vec![
+        ManagedObjectCapability::Read,
+        ManagedObjectCapability::Write,
+        ManagedObjectCapability::List,
+        ManagedObjectCapability::Head,
+    ];
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--api" => {
+                index += 1;
+                api = args.get(index).cloned();
+            }
+            "--session-token-env" => {
+                index += 1;
+                session_token_env = args
+                    .get(index)
+                    .ok_or_else(|| "--session-token-env requires <ENV>".to_string())?
+                    .clone();
+            }
+            "--project" => {
+                index += 1;
+                project_id = Some(parse_managed_credential_project_arg(args.get(index))?);
+            }
+            "--lease" => {
+                index += 1;
+                lease_id = args.get(index).cloned();
+            }
+            "--require-capabilities" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    "--require-capabilities requires a comma-separated list".to_string()
+                })?;
+                required_capabilities = parse_managed_object_capabilities(value)?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown metadata object-access option '{value}'"));
+            }
+            _ => return Err("metadata object-access accepts only flags".to_string()),
+        }
+        index += 1;
+    }
+
+    Ok(MetadataObjectAccessResolveArgs {
+        api: api
+            .ok_or_else(|| "metadata object-access resolve requires --api <URL>".to_string())?,
+        session_token_env,
+        project_id: project_id.ok_or_else(|| {
+            "metadata object-access resolve requires --project <PROJECT_ID>".to_string()
+        })?,
+        lease_id: lease_id.ok_or_else(|| {
+            "metadata object-access resolve requires --lease <LEASE_ID>".to_string()
+        })?,
+        required_capabilities,
+    })
+}
+
 fn parse_managed_object_capabilities(value: &str) -> Result<Vec<ManagedObjectCapability>, String> {
     let mut capabilities = value
         .split(',')
@@ -3753,6 +3858,26 @@ fn auth_hosted_logout(args: &AuthHostedSessionArgs) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+fn metadata_object_access_resolve(
+    args: &MetadataObjectAccessResolveArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let token = session_token_from_env(&args.session_token_env)?;
+    let path = format!(
+        "/v1/projects/{}/object-access/{}",
+        api_path_segment(&args.project_id, "project id")?,
+        api_path_segment(&args.lease_id, "lease id")?
+    );
+    let grant: ManagedObjectAccessGrant = ureq::post(&api_url(&args.api, &path)?)
+        .set("authorization", &format!("Bearer {token}"))
+        .send_json(serde_json::to_value(ManagedObjectAccessRequest {
+            required_capabilities: args.required_capabilities.clone(),
+        })?)?
+        .into_json()?;
+
+    print_managed_object_access_grant(&grant);
+    Ok(())
+}
+
 fn session_token_from_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     secret_from_env(name, "session token")
 }
@@ -3784,6 +3909,26 @@ fn api_url(api: &str, path: &str) -> Result<String, Box<dyn std::error::Error>> 
     }
     .validate()?;
     Ok(format!("{}{}", check.endpoint.trim_end_matches('/'), path))
+}
+
+fn api_path_segment(
+    value: &str,
+    field: &'static str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed == "*"
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed
+            .chars()
+            .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
+    {
+        return Err(format!("{field} must be a safe hosted API path segment").into());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn devices_invite(args: &DeviceInviteArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -4897,6 +5042,32 @@ fn print_managed_object_credential_lease(
     println!("Credential reference: {}", lease.credential_reference);
     println!("Resolved remote config: {redacted}");
     Ok(())
+}
+
+fn print_managed_object_access_grant(grant: &ManagedObjectAccessGrant) {
+    println!("Managed object access grant: active");
+    println!("Account id: {}", grant.account_id);
+    println!("Project id: {}", grant.project_id);
+    println!("Lease id: {}", grant.lease_id);
+    println!("Provider kind: {}", grant.provider_kind);
+    println!("Endpoint: {}", grant.endpoint);
+    println!("Endpoint host: {}", grant.endpoint_host);
+    println!("Bucket: {}", grant.bucket);
+    println!("Region: {}", grant.region);
+    println!("Authorized prefix: {}", grant.prefix);
+    println!(
+        "Capabilities: {}",
+        cli_capabilities_to_string(&grant.capabilities)
+    );
+    println!("Generation: {}", grant.rotation_generation);
+    println!("Expires at unix: {}", grant.expires_at_unix);
+    println!("Credential delivery: {}", grant.credential_delivery);
+    println!("Credential reference: {}", grant.credential_reference);
+    println!("Client object credentials: not returned");
+    println!("Shared bucket rule: use only the authorized prefix for this account/project");
+    println!(
+        "Direct S3 smoke: trusted operators may pair this prefix with locally supplied --s3-* env names; external testers should use the server-mediated object path when enabled"
+    );
 }
 
 fn cli_capabilities_to_string(capabilities: &[ManagedObjectCapability]) -> String {
@@ -6067,7 +6238,10 @@ fn print_metadata_usage() {
         "  devbox metadata credential-lease revoke --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>"
     );
     eprintln!(
-        "  Credential-lease commands are no-network mock/dev smoke commands; live provider provisioning remains deferred."
+        "  devbox metadata object-access resolve --api <URL> [--session-token-env DEVBOX_SESSION_TOKEN] --project <PROJECT_ID> --lease <LEASE_ID> [--require-capabilities read,write,list,head]"
+    );
+    eprintln!(
+        "  Credential-lease commands are no-network mock/dev smoke commands. Object-access resolve calls the hosted API and returns a redacted server-mediated shared-bucket prefix grant."
     );
 }
 
@@ -6340,6 +6514,57 @@ mod tests {
         assert_eq!(
             error,
             "metadata alpha-invite create requires --email or --domain"
+        );
+    }
+
+    #[test]
+    fn metadata_object_access_resolve_args_are_hosted_and_redacted() {
+        let args = vec![
+            "--api".to_string(),
+            "https://metadata.example".to_string(),
+            "--session-token-env".to_string(),
+            "DEVBOX_SESSION_TOKEN".to_string(),
+            "--project".to_string(),
+            "project-devbox".to_string(),
+            "--lease".to_string(),
+            "lease-alpha".to_string(),
+            "--require-capabilities".to_string(),
+            "read,head".to_string(),
+        ];
+
+        let parsed =
+            parse_metadata_object_access_resolve_args(&args).expect("object access args parse");
+
+        assert_eq!(parsed.api, "https://metadata.example");
+        assert_eq!(parsed.session_token_env, "DEVBOX_SESSION_TOKEN");
+        assert_eq!(parsed.project_id, "project-devbox");
+        assert_eq!(parsed.lease_id, "lease-alpha");
+        assert_eq!(
+            parsed.required_capabilities,
+            vec![ManagedObjectCapability::Read, ManagedObjectCapability::Head]
+        );
+        assert!(!format!("{parsed:?}").contains("raw-hosted-session-token"));
+
+        let wildcard_project = vec![
+            "--api".to_string(),
+            "https://metadata.example".to_string(),
+            "--project".to_string(),
+            "*".to_string(),
+            "--lease".to_string(),
+            "lease-alpha".to_string(),
+        ];
+        let error = parse_metadata_object_access_resolve_args(&wildcard_project)
+            .expect_err("wildcard project is rejected");
+        assert_eq!(
+            error,
+            "project id '*' is reserved for account-wide managed object credential leases"
+        );
+
+        let path_escape =
+            api_path_segment("project/escape", "project id").expect_err("path escape is rejected");
+        assert_eq!(
+            path_escape.to_string(),
+            "project id must be a safe hosted API path segment"
         );
     }
 

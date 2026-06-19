@@ -13,9 +13,10 @@ Electron UI, or conflict resolution. Clients still need a trusted local identity
 before encrypted objects can be published or read. A hosted metadata API foundation now models
 metadata discovery and server-side compare-and-set cursors, and a production-shaped account/session
 boundary now models token-hash account sessions without live OAuth. A managed object credential
-lease foundation now models redacted R2/S3/MinIO-shaped provider references, account/session/project
-scope, capabilities, expiration, revocation, and rotation generation, but this object provider still
-does not make live Cloudflare/AWS provisioning calls or load managed credentials from the hosted
+lease and object-access grant foundation now models redacted R2/S3/MinIO-shaped provider
+references, account/session/project scope, canonical shared-bucket prefixes, capabilities,
+expiration, revocation, and rotation generation. This direct S3-compatible object provider still
+does not make live Cloudflare/AWS provisioning calls or load raw managed credentials from the hosted
 service.
 
 ## Provider Model
@@ -105,11 +106,18 @@ Hosted metadata sync wiring is separate from object transport. Sync commands can
 and import/materialize discover the manifest object key through metadata before reading from the
 configured local or S3-compatible object provider.
 
+For a multi-user shared bucket, the production-shaped authorization path is
+`devbox metadata object-access resolve`, which returns the allowed
+`accounts/<account-id>/projects/<project-id>` prefix through a server-mediated broker boundary.
+Supplying `--s3-access-key-env` and `--s3-secret-key-env` directly remains a trusted-operator smoke
+path, not the external-tester permission boundary.
+
 ## Deferred
 
 Remaining Phase 1 work includes:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
+- hosted object proxy or signed URL transport that consumes object-access grants
 - live managed R2/S3 credential provisioning and rotation against provider APIs
 - production pairing UX and recovery flows
 - conflict UI and automatic merge/apply resolution

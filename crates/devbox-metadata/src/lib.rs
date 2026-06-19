@@ -167,6 +167,7 @@ pub struct HostedApiConfig {
     pub storage_label: String,
     pub session_ttl_seconds: i64,
     pub proof_ttl_seconds: i64,
+    pub object_access_broker: ManagedObjectAccessBrokerConfig,
 }
 
 impl HostedApiConfig {
@@ -176,6 +177,7 @@ impl HostedApiConfig {
             storage_label: "sqlite-dev".to_string(),
             session_ttl_seconds: 60 * 60 * 24 * 30,
             proof_ttl_seconds: 60 * 60 * 24 * 90,
+            object_access_broker: ManagedObjectAccessBrokerConfig::disabled(),
         }
     }
 
@@ -185,6 +187,7 @@ impl HostedApiConfig {
             storage_label: "sqlite-hosted-alpha".to_string(),
             session_ttl_seconds: 60 * 60 * 24 * 30,
             proof_ttl_seconds: 60 * 60 * 24 * 90,
+            object_access_broker: ManagedObjectAccessBrokerConfig::disabled(),
         }
     }
 }
@@ -196,6 +199,7 @@ pub struct ReadyResponse {
     pub storage: String,
     pub auth_policy: HostedAuthPolicy,
     pub mock_auth_enabled: bool,
+    pub object_access_broker_enabled: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,6 +543,110 @@ pub struct RedactedManagedObjectRemoteConfig {
     pub revoked: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManagedObjectAccessDelivery {
+    ServerMediatedBroker,
+}
+
+impl fmt::Display for ManagedObjectAccessDelivery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ServerMediatedBroker => f.write_str("server-mediated-broker"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedObjectAccessBrokerConfig {
+    pub server_managed_credentials: bool,
+    pub server_access_key_env: Option<String>,
+    pub server_secret_key_env: Option<String>,
+    pub server_session_token_env: Option<String>,
+}
+
+impl ManagedObjectAccessBrokerConfig {
+    pub fn disabled() -> Self {
+        Self {
+            server_managed_credentials: false,
+            server_access_key_env: None,
+            server_secret_key_env: None,
+            server_session_token_env: None,
+        }
+    }
+
+    pub fn server_managed_env(
+        access_key_env: impl Into<String>,
+        secret_key_env: impl Into<String>,
+        session_token_env: Option<impl Into<String>>,
+    ) -> MetadataResult<Self> {
+        let access_key_env =
+            validate_env_reference_name(access_key_env.into(), "server access key env")?;
+        let secret_key_env =
+            validate_env_reference_name(secret_key_env.into(), "server secret key env")?;
+        let session_token_env = session_token_env
+            .map(Into::into)
+            .map(|value| validate_env_reference_name(value, "server session token env"))
+            .transpose()?;
+        Ok(Self {
+            server_managed_credentials: true,
+            server_access_key_env: Some(access_key_env),
+            server_secret_key_env: Some(secret_key_env),
+            server_session_token_env: session_token_env,
+        })
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.server_managed_credentials
+            && self.server_access_key_env.is_some()
+            && self.server_secret_key_env.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedObjectAccessRequest {
+    pub required_capabilities: Vec<ManagedObjectCapability>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedObjectAccessGrant {
+    pub account_id: String,
+    pub project_id: String,
+    pub lease_id: String,
+    pub provider_kind: ManagedObjectProviderKind,
+    pub endpoint: String,
+    pub endpoint_host: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: String,
+    pub capabilities: Vec<ManagedObjectCapability>,
+    pub expires_at_unix: i64,
+    pub rotation_generation: u64,
+    pub credential_reference: String,
+    pub credential_delivery: ManagedObjectAccessDelivery,
+}
+
+impl fmt::Debug for ManagedObjectAccessGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedObjectAccessGrant")
+            .field("account_id", &self.account_id)
+            .field("project_id", &self.project_id)
+            .field("lease_id", &self.lease_id)
+            .field("provider_kind", &self.provider_kind)
+            .field("endpoint", &self.endpoint)
+            .field("endpoint_host", &self.endpoint_host)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("capabilities", &self.capabilities)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("rotation_generation", &self.rotation_generation)
+            .field("credential_reference", &self.credential_reference)
+            .field("credential_delivery", &self.credential_delivery)
+            .finish()
+    }
+}
+
 impl fmt::Display for RedactedManagedObjectRemoteConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -710,6 +818,7 @@ pub trait MetadataStore {
     ) -> MetadataResult<ManagedObjectCredentialLeaseRecord>;
     fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord>;
     fn upsert_project(&mut self, request: UpsertProjectRequest) -> MetadataResult<ProjectRecord>;
+    fn project(&self, account_id: &str, project_id: &str) -> MetadataResult<Option<ProjectRecord>>;
     fn publish_snapshot(
         &mut self,
         request: PublishSnapshotRequest,
@@ -1105,6 +1214,13 @@ impl MetadataStore for InMemoryMetadataStore {
             record.clone(),
         );
         Ok(record)
+    }
+
+    fn project(&self, account_id: &str, project_id: &str) -> MetadataResult<Option<ProjectRecord>> {
+        Ok(self
+            .projects
+            .get(&(account_id.to_string(), project_id.to_string()))
+            .cloned())
     }
 
     fn publish_snapshot(
@@ -2017,6 +2133,10 @@ impl MetadataStore for SqliteMetadataStore {
             })
     }
 
+    fn project(&self, account_id: &str, project_id: &str) -> MetadataResult<Option<ProjectRecord>> {
+        SqliteMetadataStore::project(self, account_id, project_id)
+    }
+
     fn publish_snapshot(
         &mut self,
         request: PublishSnapshotRequest,
@@ -2373,6 +2493,10 @@ where
             "/v1/cursors/:project_id/:device_id",
             get(get_cursor::<S>).put(update_cursor::<S>),
         )
+        .route(
+            "/v1/projects/:project_id/object-access/:lease_id",
+            post(resolve_object_access::<S>),
+        )
         .with_state(AppState {
             store: Arc::new(Mutex::new(store)),
             config,
@@ -2418,6 +2542,7 @@ where
         storage: state.config.storage_label,
         auth_policy: state.config.auth_policy,
         mock_auth_enabled: state.config.auth_policy.allows_mock_dev_headers(),
+        object_access_broker_enabled: state.config.object_access_broker.is_enabled(),
     })
 }
 
@@ -2674,6 +2799,37 @@ where
     Ok(Json(store.compare_and_set_cursor(request)?))
 }
 
+async fn resolve_object_access<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path((project_id, lease_id)): Path<(String, String)>,
+    Json(request): Json<ManagedObjectAccessRequest>,
+) -> MetadataResult<Json<ManagedObjectAccessGrant>>
+where
+    S: MetadataStore,
+{
+    ensure_no_secret_material(&request)?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| MetadataError::PoisonedStore)?;
+    let context = request_context(&headers, &*store, state.config.auth_policy)?;
+    let HostedMetadataRequestContext::AccountSession(session) = context else {
+        return Err(MetadataError::InvalidAccountSession(
+            "account session bearer auth is required for managed object access".to_string(),
+        ));
+    };
+    Ok(Json(managed_object_access_grant_for_account_session(
+        &*store,
+        &session,
+        &project_id,
+        &lease_id,
+        &request.required_capabilities,
+        &state.config.object_access_broker,
+        devbox_auth::now_unix_seconds(),
+    )?))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedMetadataRequestContext {
     MockDev(MockDevIdentity),
@@ -2790,6 +2946,179 @@ pub fn active_managed_object_credential_lease_for_session<S: MetadataStore>(
     ensure_lease_active(&record, now_unix)?;
     ensure_required_capabilities(&record, required_capabilities)?;
     Ok(record)
+}
+
+pub fn managed_object_access_grant_for_session<S: MetadataStore>(
+    store: &S,
+    raw_session_token: &str,
+    project_id: &str,
+    lease_id: &str,
+    required_capabilities: &[ManagedObjectCapability],
+    broker_config: &ManagedObjectAccessBrokerConfig,
+    now_unix: i64,
+) -> MetadataResult<ManagedObjectAccessGrant> {
+    let session = authenticate_account_session(store, raw_session_token, now_unix)?;
+    managed_object_access_grant_for_account_session(
+        store,
+        &session,
+        project_id,
+        lease_id,
+        required_capabilities,
+        broker_config,
+        now_unix,
+    )
+}
+
+pub fn managed_object_access_grant_for_account_session<S: MetadataStore>(
+    store: &S,
+    session: &AuthenticatedAccountSession,
+    project_id: &str,
+    lease_id: &str,
+    required_capabilities: &[ManagedObjectCapability],
+    broker_config: &ManagedObjectAccessBrokerConfig,
+    now_unix: i64,
+) -> MetadataResult<ManagedObjectAccessGrant> {
+    if !broker_config.is_enabled() {
+        return Err(MetadataError::InvalidRequest(
+            "managed object access broker is not configured with server-managed object credentials"
+                .to_string(),
+        ));
+    }
+    let project_id = validate_managed_project_id(project_id)?;
+    let lease_id = public_metadata_identifier(lease_id, "lease id")?;
+    if store.project(&session.account_id, &project_id)?.is_none() {
+        return Err(MetadataError::NotFound {
+            entity: "project",
+            id: project_id,
+        });
+    }
+
+    let record = match store.managed_object_credential_lease(
+        &session.account_id,
+        Some(&project_id),
+        &lease_id,
+    )? {
+        Some(record) => record,
+        None => store
+            .managed_object_credential_lease(&session.account_id, None, &lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.clone(),
+            })?,
+    };
+    if let Some(scoped_project_id) = record.project_id.as_deref() {
+        if scoped_project_id != project_id {
+            return Err(MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id,
+            });
+        }
+    }
+    ensure_lease_active(&record, now_unix)?;
+    ensure_required_capabilities(&record, required_capabilities)?;
+
+    let prefix = project_scoped_object_prefix(&session.account_id, &project_id)?;
+    if let Some(lease_prefix) = record.prefix.as_deref() {
+        if lease_prefix != prefix {
+            return Err(MetadataError::InvalidRequest(
+                "managed object credential lease prefix must match derived account/project scope"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(ManagedObjectAccessGrant {
+        account_id: session.account_id.clone(),
+        project_id,
+        lease_id: record.lease_id,
+        provider_kind: record.provider_kind,
+        endpoint_host: endpoint_host(&record.endpoint)?,
+        endpoint: record.endpoint,
+        bucket: record.bucket,
+        region: record.region,
+        prefix,
+        capabilities: record.capabilities,
+        expires_at_unix: record.expires_at_unix,
+        rotation_generation: record.rotation_generation,
+        credential_reference: record.credential_reference,
+        credential_delivery: ManagedObjectAccessDelivery::ServerMediatedBroker,
+    })
+}
+
+pub fn project_scoped_object_prefix(account_id: &str, project_id: &str) -> MetadataResult<String> {
+    let account = object_namespace_segment(account_id, "account id")?;
+    let project = object_namespace_segment(project_id, "project id")?;
+    Ok(format!("accounts/{account}/projects/{project}"))
+}
+
+pub fn validate_managed_object_access_prefix(
+    prefix: &str,
+    account_id: &str,
+    project_id: &str,
+) -> MetadataResult<String> {
+    let prefix = validate_object_prefix(prefix)?;
+    let expected = project_scoped_object_prefix(account_id, project_id)?;
+    if prefix != expected {
+        return Err(MetadataError::InvalidRequest(
+            "managed object access prefix must match derived account/project scope".to_string(),
+        ));
+    }
+    Ok(prefix)
+}
+
+pub fn validate_env_reference_name(value: String, field: &'static str) -> MetadataResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(MetadataError::InvalidRequest(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    let mut chars = trimmed.chars();
+    let valid_env_name = chars
+        .next()
+        .map(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        .unwrap_or(false)
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    if !valid_env_name
+        || trimmed.chars().any(char::is_whitespace)
+        || trimmed.contains('=')
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("-----BEGIN ")
+        || lowered.contains("bearer ")
+        || trimmed.starts_with("AKIA")
+        || trimmed.starts_with("ASIA")
+        || trimmed.starts_with("sk-")
+        || trimmed.starts_with("sk_live_")
+        || trimmed.starts_with("sk_test_")
+        || is_hex_digest(trimmed)
+    {
+        return Err(MetadataError::InvalidRequest(format!(
+            "{field} must be an environment variable name, not a raw credential"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn object_namespace_segment(value: &str, field: &'static str) -> MetadataResult<String> {
+    let value = public_metadata_identifier(value, field)?;
+    if value == "." || value == ".." || value == "*" {
+        return Err(MetadataError::InvalidRequest(format!(
+            "{field} must be a safe object prefix segment"
+        )));
+    }
+    if value.contains('/')
+        || value.contains('\\')
+        || value
+            .chars()
+            .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
+    {
+        return Err(MetadataError::InvalidRequest(format!(
+            "{field} must be a safe object prefix segment"
+        )));
+    }
+    Ok(value)
 }
 
 pub fn redacted_managed_object_remote_config(
@@ -3593,7 +3922,7 @@ fn managed_object_credential_lease_from_row(
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{Method, Request};
+    use axum::http::{Method, Request, StatusCode};
     use tower::ServiceExt;
 
     const ACCOUNT: &str = "account-alpha";
@@ -4712,6 +5041,248 @@ mod tests {
     }
 
     #[test]
+    fn managed_object_access_grants_enforce_shared_bucket_prefix_scope() {
+        let mut store = InMemoryMetadataStore::default();
+        let raw_token = seed_verified_account_session_and_project(&mut store);
+        store
+            .upsert_managed_object_credential_lease(managed_lease_request())
+            .expect("lease upserts");
+        let broker = ManagedObjectAccessBrokerConfig::server_managed_env(
+            "DEVBOX_R2_ACCESS_KEY_ID",
+            "DEVBOX_R2_SECRET_ACCESS_KEY",
+            None::<&str>,
+        )
+        .expect("broker config validates");
+
+        let disabled = managed_object_access_grant_for_session(
+            &store,
+            raw_token,
+            PROJECT,
+            "lease-alpha",
+            &[ManagedObjectCapability::Read],
+            &ManagedObjectAccessBrokerConfig::disabled(),
+            101,
+        )
+        .expect_err("disabled broker fails closed");
+        assert_eq!(
+            disabled.to_string(),
+            "managed object access broker is not configured with server-managed object credentials"
+        );
+
+        let grant = managed_object_access_grant_for_session(
+            &store,
+            raw_token,
+            PROJECT,
+            "lease-alpha",
+            &[ManagedObjectCapability::Read, ManagedObjectCapability::Head],
+            &broker,
+            101,
+        )
+        .expect("grant resolves");
+        assert_eq!(grant.account_id, ACCOUNT);
+        assert_eq!(grant.project_id, PROJECT);
+        assert_eq!(
+            grant.prefix,
+            "accounts/account-alpha/projects/project-devbox"
+        );
+        assert_eq!(
+            grant.credential_delivery,
+            ManagedObjectAccessDelivery::ServerMediatedBroker
+        );
+        assert_eq!(grant.rotation_generation, 0);
+        assert!(!format!("{grant:?}").contains("DEVBOX_R2_SECRET_ACCESS_KEY"));
+        assert!(ManagedObjectAccessBrokerConfig::server_managed_env(
+            "AKIAIOSFODNN7EXAMPLE",
+            "DEVBOX_R2_SECRET_ACCESS_KEY",
+            None::<&str>,
+        )
+        .is_err());
+
+        let other_raw_token = "raw-hosted-session-token-other";
+        let other_proof =
+            account_proof_with_account_and_subject("account-other", "provider-subject-other");
+        store
+            .upsert_account_ownership_proof(other_proof.clone())
+            .expect("other proof upserts");
+        let other_session = devbox_auth::create_account_session(
+            &other_proof,
+            other_raw_token,
+            "2026-06-18T10:01:00Z",
+            101,
+            4_000_000_000,
+        )
+        .expect("other session creates");
+        store
+            .upsert_account_session(other_session)
+            .expect("other session upserts");
+        store
+            .upsert_project(UpsertProjectRequest {
+                account_id: "account-other".to_string(),
+                project_id: PROJECT.to_string(),
+                display_name: PROJECT.to_string(),
+                root_hint: "other-root".to_string(),
+                project_kind: "mock-dev".to_string(),
+                updated_at: "2026-06-18T10:02:00Z".to_string(),
+            })
+            .expect("other project upserts");
+        let cross_account = managed_object_access_grant_for_session(
+            &store,
+            other_raw_token,
+            PROJECT,
+            "lease-alpha",
+            &[ManagedObjectCapability::Read],
+            &broker,
+            101,
+        )
+        .expect_err("cross-account lease lookup is isolated");
+        assert_eq!(
+            cross_account.to_string(),
+            "managed object credential lease not found: lease-alpha"
+        );
+    }
+
+    #[test]
+    fn managed_object_access_rejects_prefix_escape_and_wildcard_scope() {
+        assert_eq!(
+            project_scoped_object_prefix(ACCOUNT, PROJECT).expect("prefix derives"),
+            "accounts/account-alpha/projects/project-devbox"
+        );
+        assert!(validate_managed_object_access_prefix(
+            "accounts/account-alpha/projects/project-devbox",
+            ACCOUNT,
+            PROJECT,
+        )
+        .is_ok());
+        for prefix in [
+            "accounts/account-alpha/projects/project-other",
+            "accounts/account-alpha/projects",
+            "accounts/account-alpha/projects/project-devbox/../project-other",
+            "*",
+        ] {
+            assert!(
+                validate_managed_object_access_prefix(prefix, ACCOUNT, PROJECT).is_err(),
+                "{prefix} should be rejected"
+            );
+        }
+
+        let mut store = InMemoryMetadataStore::default();
+        let raw_token = seed_verified_account_session_and_project(&mut store);
+        store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                prefix: Some("accounts/account-alpha/projects/project-other".to_string()),
+                ..managed_lease_request()
+            })
+            .expect("mismatched but syntactically safe prefix upserts");
+        let broker = ManagedObjectAccessBrokerConfig::server_managed_env(
+            "DEVBOX_R2_ACCESS_KEY_ID",
+            "DEVBOX_R2_SECRET_ACCESS_KEY",
+            None::<&str>,
+        )
+        .expect("broker config validates");
+        let error = managed_object_access_grant_for_session(
+            &store,
+            raw_token,
+            PROJECT,
+            "lease-alpha",
+            &[ManagedObjectCapability::Read],
+            &broker,
+            101,
+        )
+        .expect_err("mismatched prefix is refused at grant time");
+        assert_eq!(
+            error.to_string(),
+            "managed object credential lease prefix must match derived account/project scope"
+        );
+
+        let wildcard = managed_object_access_grant_for_session(
+            &store,
+            raw_token,
+            "*",
+            "lease-alpha",
+            &[ManagedObjectCapability::Read],
+            &broker,
+            101,
+        )
+        .expect_err("wildcard project is refused");
+        assert_eq!(
+            wildcard.to_string(),
+            "project id '*' is reserved for account-wide managed object credential leases"
+        );
+    }
+
+    #[tokio::test]
+    async fn object_access_handler_requires_session_and_returns_scoped_grant() {
+        let raw_token = "raw-hosted-session-token";
+        let mut store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut store);
+        store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 4_000_000_000,
+                ..managed_lease_request()
+            })
+            .expect("lease upserts");
+        let mut config = HostedApiConfig::local_dev();
+        config.object_access_broker = ManagedObjectAccessBrokerConfig::server_managed_env(
+            "DEVBOX_R2_ACCESS_KEY_ID",
+            "DEVBOX_R2_SECRET_ACCESS_KEY",
+            None::<&str>,
+        )
+        .expect("broker config validates");
+        let router = app_with_config(store, config);
+        let request = ManagedObjectAccessRequest {
+            required_capabilities: vec![ManagedObjectCapability::Read],
+        };
+
+        let mock_headers = router
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/v1/projects/project-devbox/object-access/lease-alpha",
+                &request,
+                true,
+            ))
+            .await
+            .expect("mock response returns");
+        assert_eq!(mock_headers.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .clone()
+            .oneshot(session_json_request(
+                Method::POST,
+                "/v1/projects/project-devbox/object-access/lease-alpha",
+                &request,
+                raw_token,
+            ))
+            .await
+            .expect("session response returns");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("\"prefix\":\"accounts/account-alpha/projects/project-devbox\""));
+        assert!(body.contains("\"credential_delivery\":\"server-mediated-broker\""));
+        assert!(!body.contains("DEVBOX_R2_SECRET_ACCESS_KEY"));
+
+        let mut disabled_store = InMemoryMetadataStore::default();
+        seed_verified_account_session_and_project(&mut disabled_store);
+        disabled_store
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                expires_at_unix: 4_000_000_000,
+                ..managed_lease_request()
+            })
+            .expect("disabled lease upserts");
+        let disabled_router = app_with_config(disabled_store, HostedApiConfig::local_dev());
+        let disabled = disabled_router
+            .oneshot(session_json_request(
+                Method::POST,
+                "/v1/projects/project-devbox/object-access/lease-alpha",
+                &request,
+                raw_token,
+            ))
+            .await
+            .expect("disabled response returns");
+        assert_eq!(disabled.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn managed_object_credential_lease_validation_rejects_raw_material_and_redacts_debug() {
         let mut store = InMemoryMetadataStore::default();
         seed_verified_account_session_and_project(&mut store);
@@ -5111,8 +5682,15 @@ mod tests {
     }
 
     fn account_proof_with_subject(provider_subject: &str) -> AccountOwnershipProof {
+        account_proof_with_account_and_subject(ACCOUNT, provider_subject)
+    }
+
+    fn account_proof_with_account_and_subject(
+        account_id: &str,
+        provider_subject: &str,
+    ) -> AccountOwnershipProof {
         devbox_auth::create_account_ownership_proof(devbox_auth::AccountOwnershipProofInput {
-            account_id: ACCOUNT,
+            account_id,
             provider_kind: "oidc-dev",
             provider_issuer: "https://issuer.devbox.local",
             provider_subject,

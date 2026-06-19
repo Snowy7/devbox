@@ -30,12 +30,14 @@ store, with handlers scoping devices/projects/snapshots/cursors to the authentic
 Hosted metadata can now run as a single-instance alpha API with `/ready`, one-time invite login,
 bearer session status/logout, and mock-dev auth disabled by default in the server binary.
 Hosted metadata now also models account/session/project-scoped managed object credential leases
-with redacted provider references, expiration, revocation, rotation generation, and no-network
+and server-mediated object-access grants with redacted provider references, canonical shared-bucket
+prefixes, expiration, revocation, rotation generation, hosted CLI resolution, and no-network
 mock/dev CLI smoke commands. Local pairing now includes no-network recovery grant references,
 receiver-generated join/complete handoff, revocation, device rotation intents, and key-envelope
 rotation generation. Paired receivers can now materialize with their own local key state instead of
 opening the publisher DB. The final private-alpha
 surface now adds a no-network Electron shell, explicit path-scoped secret policy records, and guarded
-manual conflict resolution records. OAuth/OIDC provider login, live Cloudflare/AWS credential
-provisioning, production pairing UX, automatic merge/apply resolution, paid/team/agent/Git
+manual conflict resolution records. OAuth/OIDC provider login, hosted object proxy/signed URL data
+transfer, live Cloudflare/AWS credential provisioning, production pairing UX, automatic merge/apply
+resolution, paid/team/agent/Git
 replacement work, and production deployment hardening remain deferred.
