@@ -292,11 +292,14 @@ impl PairingInvitationToken {
         {
             return Err(AuthError::MalformedInvitation);
         }
+        let id = pairing_join_identifier(fields[1], "invitation id", "pairing-")?;
+        let account_id = pairing_join_identifier(fields[2], "account id", "account-")?;
+        let inviter_device_id = pairing_join_identifier(fields[3], "inviter device id", "device-")?;
 
         Ok(Self {
-            id: fields[1].to_string(),
-            account_id: fields[2].to_string(),
-            inviter_device_id: fields[3].to_string(),
+            id,
+            account_id,
+            inviter_device_id,
             expires_at_unix,
             secret_hex: fields[5].to_string(),
         })
@@ -1558,6 +1561,22 @@ mod tests {
         assert_eq!(parsed.account_id, draft.invitation.account_id);
         assert_eq!(parsed.secret_hash_hex(), draft.invitation.secret_hash_hex);
         assert!(!encoded.contains(&draft.invitation.secret_hash_hex));
+        for poisoned in [
+            encoded.replace(&draft.token.id, "pairing-bad\nJoin request env: stolen"),
+            encoded.replace(
+                &draft.token.account_id,
+                "account-bad\nReceiver device id: stolen",
+            ),
+            encoded.replace(
+                &draft.token.inviter_device_id,
+                "device-bad\nCompletion env: stolen",
+            ),
+        ] {
+            assert!(matches!(
+                PairingInvitationToken::parse(&poisoned),
+                Err(AuthError::MalformedInvitation)
+            ));
+        }
     }
 
     #[test]
