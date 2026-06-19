@@ -105,14 +105,51 @@ crates without silently deleting the alpha behavior.
 Language note: many current commands still use `project` because the first alpha schema used that
 word for a scoped shared folder. New product language should say shared folder.
 
+### Quickstart: Prove the MVP Locally
+
+Run the smoke harness first. It builds the local binaries if needed, starts a temporary
+`devbox-api`, simulates two machines on one computer, and writes redacted evidence logs:
+
+```text
+scripts/mvp-two-device-smoke
+```
+
+The smoke proves the current MVP path end to end:
+
+- Loom local-only capture/checkpoint/status.
+- Loom local filesystem remote sync and clone.
+- Devbox hosted `login`, `share`, `clone`, source edit, and target sync through local `devbox-api`.
+- Git metadata protection, generated dependency suppression, plain folders, nested folders, conflict refusal, and secret blocking.
+
+To remove the generated workspace after a passing run:
+
+```text
+DEVBOX_CLEAN_SMOKE_DIR=true scripts/mvp-two-device-smoke
+```
+
+The script prints the evidence directory and writes `SUMMARY.txt` plus per-step logs with session
+tokens and Devbox clone URLs redacted.
+
 The product CLI keeps the normal path centered on folders and machines. For local development,
 run `devbox-api` and point the CLI at it with `--api` or `DEVBOX_API_URL`:
 
 ```text
+mkdir source
+printf 'hello from this machine\n' > source/README.md
+
 devbox-api --root .devbox-api --bind 127.0.0.1:3030
-devbox login --api http://127.0.0.1:3030
-devbox share ./source
-devbox clone source ./target
+devbox login --api http://127.0.0.1:3030 --account local-dev --device-name "Desktop"
+devbox share ./source --no-background-sync
+
+DEVBOX_CONFIG_DIR=.devbox-laptop \
+  devbox login --api http://127.0.0.1:3030 --account local-dev --device-name "Laptop"
+DEVBOX_CONFIG_DIR=.devbox-laptop \
+  devbox clone source ./target --no-background-sync
+
+printf 'hello from the edited source\n' > source/README.md
+devbox resume ./source --no-background-sync
+DEVBOX_CONFIG_DIR=.devbox-laptop \
+  devbox sync run-loop ./target --max-cycles 1
 devbox status
 devbox pause ./target
 devbox resume ./target
