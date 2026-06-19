@@ -1,10 +1,11 @@
 # Local Infrastructure
 
-Future local development services will live here.
+Optional local development services live here.
 
 Expected services:
 
-- Postgres for backend metadata integration tests once the hosted service exists.
+- Postgres for backend metadata integration tests. Run `scripts/test-postgres-metadata.sh` with
+  Docker/OrbStack, or set `DEVBOX_TEST_POSTGRES_URL` to an existing database.
 - MinIO for exercising the S3-compatible object storage boundary before wiring Cloudflare R2.
 
 Default tests do not require Docker, MinIO, R2, AWS, or network credentials.

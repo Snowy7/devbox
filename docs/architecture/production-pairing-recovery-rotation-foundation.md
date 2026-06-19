@@ -1,7 +1,7 @@
 # Production Pairing Recovery Rotation Foundation
 
 This Phase 1 slice adds production-shaped pairing recovery and device rotation primitives without
-building Electron UI, live OAuth login, provider-backed recovery, or hosted deployment hardening.
+building Electron UI, live OAuth login, provider-backed recovery, or multi-region hosted hardening.
 
 ## Scope
 
@@ -56,5 +56,5 @@ Remaining Phase 1 work still includes:
 - Electron pairing/recovery UX
 - live recovery-secret exchange and production device approval UX
 - live managed Cloudflare/AWS/MinIO credential provisioning
-- production deployment hardening and abuse protection
+- multi-region deployment hardening and abuse protection
 - automatic conflict merge/apply resolution and conflict UI

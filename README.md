@@ -55,10 +55,11 @@ This repository currently contains the product foundation and MVP planning artif
   shell now provides an Electron control surface for local DB/cache/project paths, hosted
   API/session/project config, R2/shared-bucket prefix state, pairing, live sync command state,
   conflicts, devices, secret policy, and settings. It reads redacted `DEVBOX_*` setup state and
-  does not start sync or mutate files directly. OAuth, live Cloudflare/AWS credential provisioning,
-  signed installers, Postgres-backed
-  production deployment hardening, automatic conflict resolution, and paid/team/agent/Git-replacement
-  work remain deferred.
+  does not start sync or mutate files directly. The hosted metadata server now has a
+  Railway-shaped Postgres backend selected by `DATABASE_URL`/`DEVBOX_METADATA_DATABASE_URL`, while
+  SQLite stays available for local/dev tests. OAuth, live Cloudflare/AWS credential provisioning,
+  signed installers, multi-region/observability hardening, automatic conflict resolution, and
+  paid/team/agent/Git-replacement work remain deferred.
 
 ## Local MVP Surface
 
@@ -68,11 +69,11 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>`
 - `devbox changes list --db <DB_PATH> [--project <PROJECT_ID>]`
 - `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]`
-- `devbox metadata alpha-invite create --db <METADATA_DB> --email <EMAIL>|--domain <DOMAIN>`
-- `devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET>`
-- `devbox metadata credential-lease check --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
-- `devbox metadata credential-lease rotate --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
-- `devbox metadata credential-lease revoke --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
+- `devbox metadata alpha-invite create (--db <METADATA_DB>|--postgres-url-env <ENV>) --email <EMAIL>|--domain <DOMAIN>`
+- `devbox metadata credential-lease mock-create (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET>`
+- `devbox metadata credential-lease check (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
+- `devbox metadata credential-lease rotate (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
+- `devbox metadata credential-lease revoke (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox metadata object-access resolve --api <URL> --session-token-env DEVBOX_SESSION_TOKEN --project <PROJECT_ID> --lease <LEASE_ID>`
 - `devbox auth mock-verified-bootstrap --db <DB_PATH> --verified-email <EMAIL>|--verified-domain <DOMAIN> --session-token <TOKEN>`
 - `devbox auth hosted-login --api <URL> --email <EMAIL> --invite-code-env <ENV>`
@@ -116,8 +117,9 @@ session-auth hosted metadata request handling, and server-mediated object-access
 exist. The grant is the authorization boundary for a shared bucket; raw R2/S3 credentials are not
 returned to tester clients. Live daemon sync with `--remote-kind hosted` transfers encrypted object
 bytes through the metadata API using only the tester's session token on the client. Trusted operators
-can still use `--remote-kind s3` for direct S3/R2 smoke tests with local bucket env keys. OAuth,
-Postgres/Railway deployment hardening, and UI onboarding remain deferred.
+can still use `--remote-kind s3` for direct S3/R2 smoke tests with local bucket env keys.
+Railway/Postgres deployment is wired for the hosted metadata backend; OAuth, UI onboarding, and
+multi-region/observability hardening remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

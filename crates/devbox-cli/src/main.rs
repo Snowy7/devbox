@@ -24,7 +24,8 @@ use devbox_metadata::{
     create_alpha_invite_request, redacted_managed_object_remote_config, AlphaLoginResponse,
     AuthSessionResponse, ManagedObjectAccessGrant, ManagedObjectAccessRequest,
     ManagedObjectCapability, ManagedObjectCredentialLeaseRequest, ManagedObjectProviderKind,
-    MetadataAuthMode, MetadataServiceConfig, MetadataStore, SqliteMetadataStore,
+    MetadataAuthMode, MetadataServiceConfig, MetadataStore, PostgresMetadataStore,
+    SqliteMetadataStore,
 };
 use devbox_snapshot::{
     is_secret_block_reason, preflight_cache_root, preflight_db_path, scan_local_change_feed,
@@ -715,8 +716,27 @@ struct MetadataCheckArgs {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+enum MetadataAdminStoreSelector {
+    Sqlite { db_path: String },
+    PostgresUrlEnv { env_name: String },
+}
+
+impl std::fmt::Debug for MetadataAdminStoreSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sqlite { db_path } => f.debug_struct("Sqlite").field("db_path", db_path).finish(),
+            Self::PostgresUrlEnv { env_name } => f
+                .debug_struct("PostgresUrlEnv")
+                .field("env_name", env_name)
+                .field("database_url", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct MetadataAlphaInviteCreateArgs {
-    db_path: String,
+    store: MetadataAdminStoreSelector,
     email: Option<String>,
     domain: Option<String>,
     invite_code: Option<String>,
@@ -726,7 +746,7 @@ struct MetadataAlphaInviteCreateArgs {
 impl std::fmt::Debug for MetadataAlphaInviteCreateArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetadataAlphaInviteCreateArgs")
-            .field("db_path", &self.db_path)
+            .field("store", &self.store)
             .field("email", &self.email)
             .field("domain", &self.domain)
             .field(
@@ -740,7 +760,7 @@ impl std::fmt::Debug for MetadataAlphaInviteCreateArgs {
 
 #[derive(Clone, PartialEq, Eq)]
 struct MetadataCredentialLeaseArgs {
-    db_path: String,
+    store: MetadataAdminStoreSelector,
     session_token: String,
     account_id: Option<String>,
     verified_email: Option<String>,
@@ -759,7 +779,7 @@ struct MetadataCredentialLeaseArgs {
 impl std::fmt::Debug for MetadataCredentialLeaseArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetadataCredentialLeaseArgs")
-            .field("db_path", &self.db_path)
+            .field("store", &self.store)
             .field("session_token", &"<redacted>")
             .field("account_id", &self.account_id)
             .field("verified_email", &self.verified_email)
@@ -779,7 +799,7 @@ impl std::fmt::Debug for MetadataCredentialLeaseArgs {
 
 #[derive(Clone, PartialEq, Eq)]
 struct MetadataCredentialLeaseLookupArgs {
-    db_path: String,
+    store: MetadataAdminStoreSelector,
     session_token: String,
     project_id: Option<String>,
     lease_id: String,
@@ -789,7 +809,7 @@ struct MetadataCredentialLeaseLookupArgs {
 impl std::fmt::Debug for MetadataCredentialLeaseLookupArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetadataCredentialLeaseLookupArgs")
-            .field("db_path", &self.db_path)
+            .field("store", &self.store)
             .field("session_token", &"<redacted>")
             .field("project_id", &self.project_id)
             .field("lease_id", &self.lease_id)
@@ -800,7 +820,7 @@ impl std::fmt::Debug for MetadataCredentialLeaseLookupArgs {
 
 #[derive(Clone, PartialEq, Eq)]
 struct MetadataCredentialLeaseMutateArgs {
-    db_path: String,
+    store: MetadataAdminStoreSelector,
     session_token: String,
     project_id: Option<String>,
     lease_id: String,
@@ -809,7 +829,7 @@ struct MetadataCredentialLeaseMutateArgs {
 impl std::fmt::Debug for MetadataCredentialLeaseMutateArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetadataCredentialLeaseMutateArgs")
-            .field("db_path", &self.db_path)
+            .field("store", &self.store)
             .field("session_token", &"<redacted>")
             .field("project_id", &self.project_id)
             .field("lease_id", &self.lease_id)
@@ -2352,6 +2372,7 @@ fn parse_metadata_alpha_invite_create_args(
     args: &[String],
 ) -> Result<MetadataAlphaInviteCreateArgs, String> {
     let mut db_path = None;
+    let mut postgres_url_env = None;
     let mut email = None;
     let mut domain = None;
     let mut invite_code = None;
@@ -2363,6 +2384,10 @@ fn parse_metadata_alpha_invite_create_args(
             "--db" => {
                 index += 1;
                 db_path = args.get(index).cloned();
+            }
+            "--postgres-url-env" => {
+                index += 1;
+                postgres_url_env = args.get(index).cloned();
             }
             "--email" => {
                 index += 1;
@@ -2403,9 +2428,11 @@ fn parse_metadata_alpha_invite_create_args(
     }
 
     Ok(MetadataAlphaInviteCreateArgs {
-        db_path: db_path.ok_or_else(|| {
-            "metadata alpha-invite create requires --db <METADATA_DB>".to_string()
-        })?,
+        store: parse_metadata_admin_store_selector(
+            db_path,
+            postgres_url_env,
+            "metadata alpha-invite create",
+        )?,
         email,
         domain,
         invite_code,
@@ -2417,6 +2444,7 @@ fn parse_metadata_credential_lease_create_args(
     args: &[String],
 ) -> Result<MetadataCredentialLeaseArgs, String> {
     let mut db_path = None;
+    let mut postgres_url_env = None;
     let mut session_token = None;
     let mut account_id = None;
     let mut verified_email = None;
@@ -2442,6 +2470,10 @@ fn parse_metadata_credential_lease_create_args(
             "--db" => {
                 index += 1;
                 db_path = args.get(index).cloned();
+            }
+            "--postgres-url-env" => {
+                index += 1;
+                postgres_url_env = args.get(index).cloned();
             }
             "--session-token" => {
                 index += 1;
@@ -2527,8 +2559,11 @@ fn parse_metadata_credential_lease_create_args(
     }
 
     Ok(MetadataCredentialLeaseArgs {
-        db_path: db_path
-            .ok_or_else(|| "metadata credential-lease requires --db <DB_PATH>".to_string())?,
+        store: parse_metadata_admin_store_selector(
+            db_path,
+            postgres_url_env,
+            "metadata credential-lease",
+        )?,
         session_token: session_token.ok_or_else(|| {
             "metadata credential-lease requires --session-token <TOKEN>".to_string()
         })?,
@@ -2566,7 +2601,7 @@ fn parse_metadata_credential_lease_lookup_args(
         index += 1;
     }
     Ok(MetadataCredentialLeaseLookupArgs {
-        db_path: base.db_path,
+        store: base.store,
         session_token: base.session_token,
         project_id: base.project_id.take(),
         lease_id: base.lease_id,
@@ -2578,6 +2613,7 @@ fn parse_metadata_credential_lease_mutate_args(
     args: &[String],
 ) -> Result<MetadataCredentialLeaseMutateArgs, String> {
     let mut db_path = None;
+    let mut postgres_url_env = None;
     let mut session_token = None;
     let mut project_id = None;
     let mut lease_id = None;
@@ -2588,6 +2624,10 @@ fn parse_metadata_credential_lease_mutate_args(
             "--db" => {
                 index += 1;
                 db_path = args.get(index).cloned();
+            }
+            "--postgres-url-env" => {
+                index += 1;
+                postgres_url_env = args.get(index).cloned();
             }
             "--session-token" => {
                 index += 1;
@@ -2620,8 +2660,11 @@ fn parse_metadata_credential_lease_mutate_args(
     }
 
     Ok(MetadataCredentialLeaseMutateArgs {
-        db_path: db_path
-            .ok_or_else(|| "metadata credential-lease requires --db <DB_PATH>".to_string())?,
+        store: parse_metadata_admin_store_selector(
+            db_path,
+            postgres_url_env,
+            "metadata credential-lease",
+        )?,
         session_token: session_token.ok_or_else(|| {
             "metadata credential-lease requires --session-token <TOKEN>".to_string()
         })?,
@@ -2629,6 +2672,41 @@ fn parse_metadata_credential_lease_mutate_args(
         lease_id: lease_id
             .ok_or_else(|| "metadata credential-lease requires --lease <LEASE_ID>".to_string())?,
     })
+}
+
+fn parse_metadata_admin_store_selector(
+    db_path: Option<String>,
+    postgres_url_env: Option<String>,
+    command: &'static str,
+) -> Result<MetadataAdminStoreSelector, String> {
+    match (db_path, postgres_url_env) {
+        (Some(_), Some(_)) => Err(format!(
+            "{command} accepts only one of --db <METADATA_DB> or --postgres-url-env <ENV>"
+        )),
+        (Some(db_path), None) => Ok(MetadataAdminStoreSelector::Sqlite { db_path }),
+        (None, Some(env_name)) => {
+            devbox_metadata::validate_env_reference_name(env_name, "postgres url env")
+                .map(|env_name| MetadataAdminStoreSelector::PostgresUrlEnv { env_name })
+                .map_err(|error| error.to_string())
+        }
+        (None, None) => Err(format!(
+            "{command} requires --db <METADATA_DB> or --postgres-url-env <ENV>"
+        )),
+    }
+}
+
+fn open_metadata_admin_store(
+    selector: &MetadataAdminStoreSelector,
+) -> Result<Box<dyn MetadataStore>, Box<dyn std::error::Error>> {
+    match selector {
+        MetadataAdminStoreSelector::Sqlite { db_path } => {
+            Ok(Box::new(SqliteMetadataStore::open_file(db_path)?))
+        }
+        MetadataAdminStoreSelector::PostgresUrlEnv { env_name } => {
+            let database_url = secret_from_env(env_name, "postgres database url")?;
+            Ok(Box::new(PostgresMetadataStore::connect(&database_url)?))
+        }
+    }
 }
 
 fn parse_metadata_object_access_resolve_args(
@@ -4981,7 +5059,7 @@ fn metadata_check(args: &MetadataCheckArgs) -> Result<(), Box<dyn std::error::Er
 fn metadata_alpha_invite_create(
     args: &MetadataAlphaInviteCreateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let mut store = open_metadata_admin_store(&args.store)?;
     let now_unix = now_unix_seconds();
     let now = format!("unix:{now_unix}");
     let invite_code = match &args.invite_code {
@@ -5019,33 +5097,61 @@ fn metadata_alpha_invite_create(
 fn metadata_credential_lease_mock_create(
     args: &MetadataCredentialLeaseArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let mut store = open_metadata_admin_store(&args.store)?;
     let now_unix = now_unix_seconds();
     let now = format!("unix:{now_unix}");
-    let account_id = args.account_id.clone().unwrap_or_else(|| {
-        dev_mock_account_id(
+    let session_hash = devbox_auth::hash_session_token_hex(&args.session_token);
+    let existing_session = store.account_session_by_hash(&session_hash)?;
+    let existing_context = if existing_session.is_some() {
+        Some(authenticate_account_session(
+            &*store,
+            &args.session_token,
+            now_unix,
+        )?)
+    } else {
+        None
+    };
+    if existing_context.is_none()
+        && matches!(
+            args.store,
+            MetadataAdminStoreSelector::PostgresUrlEnv { .. }
+        )
+    {
+        return Err(
+            "metadata credential-lease mock-create with --postgres-url-env requires an existing authenticated session for --session-token"
+                .into(),
+        );
+    }
+    let account_id = match (&args.account_id, &existing_context) {
+        (Some(account_id), Some(session)) if account_id != &session.account_id => {
+            return Err(format!(
+                "metadata credential-lease account mismatch: --account {account_id} does not match authenticated session account {}",
+                session.account_id
+            )
+            .into());
+        }
+        (Some(account_id), _) => account_id.clone(),
+        (None, Some(session)) => session.account_id.clone(),
+        (None, None) => dev_mock_account_id(
             args.verified_email
                 .as_deref()
                 .or(args.verified_domain.as_deref())
                 .unwrap_or("dev-account"),
-        )
-    });
-    let provider_subject = format!("managed-object-dev:{account_id}");
-    let proof = create_account_ownership_proof(AccountOwnershipProofInput {
-        account_id: &account_id,
-        provider_kind: "oidc-dev",
-        provider_issuer: "https://devbox.local/mock-managed-object-lease",
-        provider_subject: &provider_subject,
-        verified_email: args.verified_email.as_deref(),
-        verified_domain: args.verified_domain.as_deref(),
-        proof_issued_at: &now,
-        proof_expires_at_unix: now_unix + 86_400,
-    })?;
-    store.upsert_account_ownership_proof(proof.clone())?;
-    if store
-        .account_session_by_hash(&devbox_auth::hash_session_token_hex(&args.session_token))?
-        .is_none()
-    {
+        ),
+    };
+    if existing_context.is_none() {
+        let provider_subject = format!("managed-object-dev:{account_id}");
+        let proof = create_account_ownership_proof(AccountOwnershipProofInput {
+            account_id: &account_id,
+            provider_kind: "oidc-dev",
+            provider_issuer: "https://devbox.local/mock-managed-object-lease",
+            provider_subject: &provider_subject,
+            verified_email: args.verified_email.as_deref(),
+            verified_domain: args.verified_domain.as_deref(),
+            proof_issued_at: &now,
+            proof_expires_at_unix: now_unix + 86_400,
+        })?;
+        store.upsert_account_ownership_proof(proof.clone())?;
         let session = create_account_session(
             &proof,
             &args.session_token,
@@ -5095,9 +5201,9 @@ fn metadata_credential_lease_mock_create(
 fn metadata_credential_lease_check(
     args: &MetadataCredentialLeaseLookupArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let store = open_metadata_admin_store(&args.store)?;
     let lease = active_managed_object_credential_lease_for_session(
-        &store,
+        &*store,
         &args.session_token,
         args.project_id.as_deref(),
         &args.lease_id,
@@ -5115,9 +5221,9 @@ fn metadata_credential_lease_check(
 fn metadata_credential_lease_revoke(
     args: &MetadataCredentialLeaseMutateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let mut store = open_metadata_admin_store(&args.store)?;
     let now_unix = now_unix_seconds();
-    let session = authenticate_account_session(&store, &args.session_token, now_unix)?;
+    let session = authenticate_account_session(&*store, &args.session_token, now_unix)?;
     let revoked = store.revoke_managed_object_credential_lease(
         &session.account_id,
         args.project_id.as_deref(),
@@ -5134,10 +5240,10 @@ fn metadata_credential_lease_revoke(
 fn metadata_credential_lease_rotate(
     args: &MetadataCredentialLeaseMutateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut store = SqliteMetadataStore::open_file(&args.db_path)?;
+    let mut store = open_metadata_admin_store(&args.store)?;
     let now_unix = now_unix_seconds();
     let current = active_managed_object_credential_lease_for_session(
-        &store,
+        &*store,
         &args.session_token,
         args.project_id.as_deref(),
         &args.lease_id,
@@ -6377,25 +6483,25 @@ fn print_metadata_usage() {
         "  devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]"
     );
     eprintln!(
-        "  devbox metadata alpha-invite create --db <METADATA_DB> --email <EMAIL>|--domain <DOMAIN> [--invite-code <CODE>] [--ttl-seconds <SECONDS>]"
+        "  devbox metadata alpha-invite create (--db <METADATA_DB>|--postgres-url-env <ENV>) --email <EMAIL>|--domain <DOMAIN> [--invite-code <CODE>] [--ttl-seconds <SECONDS>]"
     );
     eprintln!(
-        "  devbox metadata credential-lease mock-create --db <METADATA_DB> --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET> [--provider-kind r2|s3|minio-compatible] [--region <REGION>] [--prefix <PREFIX>] [--capabilities read,write,list,head] [--ttl-seconds <SECONDS>]"
+        "  devbox metadata credential-lease mock-create (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --verified-email <EMAIL>|--verified-domain <DOMAIN> --project <PROJECT_ID> --lease <LEASE_ID> --endpoint <URL> --bucket <BUCKET> [--provider-kind r2|s3|minio-compatible] [--region <REGION>] [--prefix <PREFIX>] [--capabilities read,write,list,head] [--ttl-seconds <SECONDS>]"
     );
     eprintln!(
-        "  devbox metadata credential-lease check --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID> [--require-capabilities read,head]"
+        "  devbox metadata credential-lease check (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID> [--require-capabilities read,head]"
     );
     eprintln!(
-        "  devbox metadata credential-lease rotate --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>"
+        "  devbox metadata credential-lease rotate (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>"
     );
     eprintln!(
-        "  devbox metadata credential-lease revoke --db <METADATA_DB> --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>"
+        "  devbox metadata credential-lease revoke (--db <METADATA_DB>|--postgres-url-env <ENV>) --session-token <TOKEN> --project <PROJECT_ID> --lease <LEASE_ID>"
     );
     eprintln!(
         "  devbox metadata object-access resolve --api <URL> [--session-token-env DEVBOX_SESSION_TOKEN] --project <PROJECT_ID> --lease <LEASE_ID> [--require-capabilities read,write,list,head]"
     );
     eprintln!(
-        "  Credential-lease commands are no-network mock/dev smoke commands. Object-access resolve calls the hosted API and returns a redacted server-mediated shared-bucket prefix grant."
+        "  Use --postgres-url-env DATABASE_URL for Railway/Postgres admin seeding; raw database URLs are intentionally not accepted on argv. Credential-lease commands are no-network mock/dev smoke commands. Object-access resolve calls the hosted API and returns a redacted server-mediated shared-bucket prefix grant."
     );
 }
 
@@ -6520,7 +6626,7 @@ fn print_help() {
     println!("  init       Initialize local account and current-device identity");
     println!("  auth       Manage local/mock auth and dev account/session proof status");
     println!("  devices    List, invite, approve, and revoke local/mock trusted devices");
-    println!("  metadata   Validate hosted metadata service config without a network request");
+    println!("  metadata   Validate hosted metadata config and administer alpha invites/leases");
     println!("  sync       Upload/download encrypted blobs and manage local cursors");
     println!("  snapshot   Build, persist, list, show, and restore local snapshot manifests");
     println!("  changes    Scan, list, and clear the pending local change feed");
@@ -6647,6 +6753,10 @@ mod tests {
         ];
         let parsed =
             parse_metadata_alpha_invite_create_args(&email_args).expect("email invite args parse");
+        assert!(matches!(
+            parsed.store,
+            MetadataAdminStoreSelector::Sqlite { ref db_path } if db_path == "metadata.sqlite3"
+        ));
         assert_eq!(parsed.email.as_deref(), Some("dev@example.com"));
         assert_eq!(parsed.domain, None);
         assert_eq!(parsed.ttl_seconds, 600);
@@ -6669,6 +6779,86 @@ mod tests {
             error,
             "metadata alpha-invite create requires --email or --domain"
         );
+
+        let postgres_args = vec![
+            "--postgres-url-env".to_string(),
+            "DATABASE_URL".to_string(),
+            "--email".to_string(),
+            "dev@example.com".to_string(),
+        ];
+        let parsed = parse_metadata_alpha_invite_create_args(&postgres_args)
+            .expect("postgres invite args parse");
+        assert!(matches!(
+            parsed.store,
+            MetadataAdminStoreSelector::PostgresUrlEnv { ref env_name } if env_name == "DATABASE_URL"
+        ));
+        assert!(!format!("{parsed:?}").contains("postgres://"));
+
+        let ambiguous = vec![
+            "--db".to_string(),
+            "metadata.sqlite3".to_string(),
+            "--postgres-url-env".to_string(),
+            "DATABASE_URL".to_string(),
+            "--email".to_string(),
+            "dev@example.com".to_string(),
+        ];
+        let error = parse_metadata_alpha_invite_create_args(&ambiguous)
+            .expect_err("ambiguous admin store is rejected");
+        assert_eq!(
+            error,
+            "metadata alpha-invite create accepts only one of --db <METADATA_DB> or --postgres-url-env <ENV>"
+        );
+    }
+
+    #[test]
+    fn metadata_credential_lease_args_accept_postgres_admin_store_selector() {
+        let args = vec![
+            "--postgres-url-env".to_string(),
+            "DATABASE_URL".to_string(),
+            "--session-token".to_string(),
+            "raw-session-token".to_string(),
+            "--verified-email".to_string(),
+            "dev@example.com".to_string(),
+            "--project".to_string(),
+            "project-devbox".to_string(),
+            "--lease".to_string(),
+            "lease-alpha".to_string(),
+            "--endpoint".to_string(),
+            "https://example.r2.cloudflarestorage.com".to_string(),
+            "--bucket".to_string(),
+            "devbox".to_string(),
+        ];
+
+        let parsed = parse_metadata_credential_lease_create_args(&args).expect("lease args parse");
+
+        assert!(matches!(
+            parsed.store,
+            MetadataAdminStoreSelector::PostgresUrlEnv { ref env_name } if env_name == "DATABASE_URL"
+        ));
+        assert!(!format!("{parsed:?}").contains("raw-session-token"));
+
+        let lookup_args = vec![
+            "--postgres-url-env".to_string(),
+            "DATABASE_URL".to_string(),
+            "--session-token".to_string(),
+            "raw-session-token".to_string(),
+            "--project".to_string(),
+            "project-devbox".to_string(),
+            "--lease".to_string(),
+            "lease-alpha".to_string(),
+            "--require-capabilities".to_string(),
+            "read,head".to_string(),
+        ];
+        let parsed = parse_metadata_credential_lease_lookup_args(&lookup_args)
+            .expect("lease lookup args parse");
+        assert_eq!(
+            parsed.required_capabilities,
+            vec![ManagedObjectCapability::Read, ManagedObjectCapability::Head]
+        );
+        assert!(matches!(
+            parsed.store,
+            MetadataAdminStoreSelector::PostgresUrlEnv { ref env_name } if env_name == "DATABASE_URL"
+        ));
     }
 
     #[test]

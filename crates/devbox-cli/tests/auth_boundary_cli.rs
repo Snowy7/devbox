@@ -491,6 +491,102 @@ fn managed_object_credential_lease_cli_rejects_project_scope_sentinel() {
     assert!(!check_stdout.contains(session_token));
 }
 
+#[test]
+fn managed_object_credential_lease_cli_reuses_existing_session_account() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("metadata.sqlite3");
+    let session_token = "raw-managed-session-token-existing-account";
+    let devbox = env!("CARGO_BIN_EXE_devbox");
+
+    let create_session = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "mock-create",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--account",
+            "account-hosted-session",
+            "--verified-email",
+            "hosted@example.com",
+            "--lease",
+            "lease-bootstrap",
+            "--endpoint",
+            "https://account.r2.cloudflarestorage.com",
+            "--bucket",
+            "devbox-alpha",
+        ])
+        .output()
+        .expect("session bootstrap lease create runs");
+    assert!(
+        create_session.status.success(),
+        "{}",
+        stderr(&create_session)
+    );
+
+    let create_with_existing_session = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "mock-create",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--verified-email",
+            "different@example.com",
+            "--project",
+            "project-devbox",
+            "--lease",
+            "lease-alpha",
+            "--endpoint",
+            "https://account.r2.cloudflarestorage.com",
+            "--bucket",
+            "devbox-alpha",
+            "--prefix",
+            "accounts/account-hosted-session/projects/project-devbox",
+        ])
+        .output()
+        .expect("lease create with existing session runs");
+    assert!(
+        create_with_existing_session.status.success(),
+        "{}",
+        stderr(&create_with_existing_session)
+    );
+    let create_stdout = stdout(&create_with_existing_session);
+    assert!(create_stdout.contains("Account id: account-hosted-session"));
+    assert!(!create_stdout.contains("account-managed-different-example-com"));
+
+    let mismatch = Command::new(devbox)
+        .args([
+            "metadata",
+            "credential-lease",
+            "mock-create",
+            "--db",
+            db_path.to_str().expect("db path is utf8"),
+            "--session-token",
+            session_token,
+            "--account",
+            "account-other",
+            "--verified-email",
+            "hosted@example.com",
+            "--lease",
+            "lease-mismatch",
+            "--endpoint",
+            "https://account.r2.cloudflarestorage.com",
+            "--bucket",
+            "devbox-alpha",
+        ])
+        .output()
+        .expect("lease create mismatch runs");
+    assert!(!mismatch.status.success(), "{}", stdout(&mismatch));
+    assert!(stderr(&mismatch).contains(
+        "metadata credential-lease account mismatch: --account account-other does not match authenticated session account account-hosted-session"
+    ));
+}
+
 fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }

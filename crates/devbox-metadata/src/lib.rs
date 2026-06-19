@@ -22,6 +22,8 @@ use devbox_sync::{
     LocalFilesystemBlobProvider, ObjectKey, ObjectMetadata, PutOutcome, RemoteBlobProvider,
     S3CompatibleBlobProvider, S3CompatibleConfig, S3CredentialsSource, SyncError, SyncResult,
 };
+use postgres::error::SqlState;
+use postgres::{Client as PostgresClient, NoTls};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -52,6 +54,7 @@ pub type MetadataResult<T> = Result<T, MetadataError>;
 #[derive(Debug)]
 pub enum MetadataError {
     Sqlite(rusqlite::Error),
+    Postgres(postgres::Error),
     PoisonedStore,
     MissingMockDevIdentity,
     IdentityMismatch,
@@ -66,6 +69,7 @@ impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sqlite(error) => write!(f, "{error}"),
+            Self::Postgres(error) => write!(f, "{error}"),
             Self::PoisonedStore => f.write_str("metadata store lock is poisoned"),
             Self::MissingMockDevIdentity => {
                 write!(
@@ -91,6 +95,7 @@ impl std::error::Error for MetadataError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(error) => Some(error),
+            Self::Postgres(error) => Some(error),
             Self::PoisonedStore
             | Self::MissingMockDevIdentity
             | Self::IdentityMismatch
@@ -109,6 +114,12 @@ impl From<rusqlite::Error> for MetadataError {
     }
 }
 
+impl From<postgres::Error> for MetadataError {
+    fn from(error: postgres::Error) -> Self {
+        Self::Postgres(error)
+    }
+}
+
 impl IntoResponse for MetadataError {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -118,8 +129,11 @@ impl IntoResponse for MetadataError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::CursorPreconditionFailed { .. } => StatusCode::CONFLICT,
             Self::Sqlite(error) if is_sqlite_constraint(error) => StatusCode::BAD_REQUEST,
+            Self::Postgres(error) if is_postgres_constraint(error) => StatusCode::BAD_REQUEST,
             Self::InvalidAccountProof(_) | Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Sqlite(_) | Self::PoisonedStore => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Sqlite(_) | Self::Postgres(_) | Self::PoisonedStore => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         let body = ErrorResponse {
             error: self.public_message(),
@@ -134,7 +148,11 @@ impl MetadataError {
             Self::Sqlite(error) if is_sqlite_constraint(error) => {
                 "metadata relationship precondition failed".to_string()
             }
+            Self::Postgres(error) if is_postgres_constraint(error) => {
+                "metadata relationship precondition failed".to_string()
+            }
             Self::Sqlite(_) => "metadata storage error".to_string(),
+            Self::Postgres(_) => "metadata storage error".to_string(),
             Self::PoisonedStore => "metadata storage error".to_string(),
             Self::InvalidAccountSession(_) => "account session authentication failed".to_string(),
             _ => self.to_string(),
@@ -2554,6 +2572,1258 @@ impl SqliteMetadataStore {
     }
 }
 
+pub const POSTGRES_METADATA_SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS metadata_schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS metadata_accounts (
+    account_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS metadata_alpha_invites (
+    invite_id TEXT PRIMARY KEY,
+    invite_code_hash_hex TEXT NOT NULL CHECK (char_length(invite_code_hash_hex) = 64),
+    allowed_email TEXT,
+    allowed_domain TEXT,
+    invite_state TEXT NOT NULL CHECK (invite_state IN ('active', 'consumed', 'revoked')),
+    created_at TEXT NOT NULL,
+    expires_at_unix BIGINT NOT NULL CHECK (expires_at_unix > 0),
+    consumed_at TEXT,
+    consumed_by_account_id TEXT,
+    CHECK (allowed_email IS NOT NULL OR allowed_domain IS NOT NULL),
+    UNIQUE (invite_code_hash_hex),
+    FOREIGN KEY (consumed_by_account_id) REFERENCES metadata_accounts(account_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS metadata_account_ownership_proofs (
+    account_id TEXT PRIMARY KEY,
+    provider_kind TEXT NOT NULL,
+    provider_issuer TEXT NOT NULL,
+    provider_subject TEXT NOT NULL,
+    verified_email TEXT,
+    verified_domain TEXT,
+    proof_state TEXT NOT NULL CHECK (proof_state = 'verified'),
+    proof_issued_at TEXT NOT NULL,
+    proof_expires_at_unix BIGINT NOT NULL CHECK (proof_expires_at_unix > 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (verified_email IS NOT NULL OR verified_domain IS NOT NULL),
+    UNIQUE (account_id, provider_kind, provider_issuer, provider_subject),
+    UNIQUE (provider_kind, provider_issuer, provider_subject),
+    FOREIGN KEY (account_id) REFERENCES metadata_accounts(account_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS metadata_account_sessions (
+    session_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    provider_kind TEXT NOT NULL,
+    provider_issuer TEXT NOT NULL,
+    provider_subject TEXT NOT NULL,
+    session_token_hash_hex TEXT NOT NULL CHECK (char_length(session_token_hash_hex) = 64),
+    session_state TEXT NOT NULL CHECK (session_state IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    expires_at_unix BIGINT NOT NULL CHECK (expires_at_unix > 0),
+    revoked_at TEXT,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE (session_token_hash_hex),
+    FOREIGN KEY (account_id, provider_kind, provider_issuer, provider_subject)
+        REFERENCES metadata_account_ownership_proofs(account_id, provider_kind, provider_issuer, provider_subject)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS metadata_managed_object_credential_leases (
+    account_id TEXT NOT NULL,
+    project_scope TEXT NOT NULL,
+    project_id TEXT,
+    lease_id TEXT NOT NULL,
+    provider_kind TEXT NOT NULL CHECK (provider_kind IN ('r2', 's3', 'minio-compatible')),
+    endpoint TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    region TEXT NOT NULL,
+    prefix TEXT,
+    credential_reference TEXT NOT NULL,
+    credential_fingerprint TEXT,
+    capabilities TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at_unix BIGINT NOT NULL CHECK (expires_at_unix > 0),
+    revoked_at TEXT,
+    rotation_generation BIGINT NOT NULL CHECK (rotation_generation >= 0),
+    last_rotated_at TEXT,
+    PRIMARY KEY (account_id, project_scope, lease_id),
+    FOREIGN KEY (account_id) REFERENCES metadata_accounts(account_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS metadata_devices (
+    account_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    trust_state TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, device_id),
+    FOREIGN KEY (account_id) REFERENCES metadata_accounts(account_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS metadata_projects (
+    account_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    root_hint TEXT NOT NULL,
+    project_kind TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, project_id),
+    FOREIGN KEY (account_id) REFERENCES metadata_accounts(account_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS metadata_snapshots (
+    account_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    parent_snapshot_id TEXT,
+    manifest_object_key TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    manifest_entry_count BIGINT NOT NULL CHECK (manifest_entry_count >= 0),
+    total_size_bytes BIGINT NOT NULL CHECK (total_size_bytes >= 0),
+    published_by_device_id TEXT NOT NULL,
+    published_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, project_id, snapshot_id),
+    FOREIGN KEY (account_id, project_id) REFERENCES metadata_projects(account_id, project_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id, published_by_device_id) REFERENCES metadata_devices(account_id, device_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS metadata_device_project_cursors (
+    account_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    cursor_value TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, device_id, project_id),
+    FOREIGN KEY (account_id, device_id) REFERENCES metadata_devices(account_id, device_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id, project_id) REFERENCES metadata_projects(account_id, project_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_account_ownership_provider_subject
+    ON metadata_account_ownership_proofs(provider_kind, provider_issuer, provider_subject);
+CREATE INDEX IF NOT EXISTS idx_metadata_alpha_invites_hash_state
+    ON metadata_alpha_invites(invite_code_hash_hex, invite_state, expires_at_unix);
+CREATE INDEX IF NOT EXISTS idx_metadata_account_sessions_account_state
+    ON metadata_account_sessions(account_id, session_state, expires_at_unix);
+CREATE INDEX IF NOT EXISTS idx_metadata_account_sessions_hash
+    ON metadata_account_sessions(session_token_hash_hex);
+CREATE INDEX IF NOT EXISTS idx_metadata_managed_object_leases_account_project
+    ON metadata_managed_object_credential_leases(account_id, project_scope, expires_at_unix);
+
+INSERT INTO metadata_schema_migrations(version, applied_at)
+VALUES (1, 'devbox-metadata-postgres-v1')
+ON CONFLICT (version) DO NOTHING;
+"#;
+
+pub struct PostgresMetadataStore {
+    client: Mutex<PostgresClient>,
+}
+
+impl fmt::Debug for PostgresMetadataStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PostgresMetadataStore")
+            .field("client", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PostgresMetadataStore {
+    pub fn connect(database_url: &str) -> MetadataResult<Self> {
+        let client = PostgresClient::connect(database_url, NoTls)?;
+        Self::from_client(client)
+    }
+
+    fn from_client(client: PostgresClient) -> MetadataResult<Self> {
+        let store = Self {
+            client: Mutex::new(client),
+        };
+        store.apply_migrations()?;
+        Ok(store)
+    }
+
+    pub fn apply_migrations(&self) -> MetadataResult<()> {
+        self.client()?.batch_execute(POSTGRES_METADATA_SCHEMA_SQL)?;
+        Ok(())
+    }
+
+    fn client(&self) -> MetadataResult<std::sync::MutexGuard<'_, PostgresClient>> {
+        self.client.lock().map_err(|_| MetadataError::PoisonedStore)
+    }
+
+    fn account(&self, account_id: &str) -> MetadataResult<Option<AccountRecord>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT account_id, display_name, created_at, updated_at
+                FROM metadata_accounts
+                WHERE account_id = $1
+                "#,
+                &[&account_id],
+            )?
+            .map(|row| pg_account_from_row(&row))
+            .transpose()
+    }
+
+    fn account_proof(&self, account_id: &str) -> MetadataResult<Option<AccountOwnershipProof>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    verified_email,
+                    verified_domain,
+                    proof_state,
+                    proof_issued_at,
+                    proof_expires_at_unix
+                FROM metadata_account_ownership_proofs
+                WHERE account_id = $1
+                "#,
+                &[&account_id],
+            )?
+            .map(|row| pg_account_proof_from_row(&row))
+            .transpose()
+    }
+
+    fn proof_sessions_exist(&self, proof: &AccountOwnershipProof) -> MetadataResult<bool> {
+        let row = self.client()?.query_one(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM metadata_account_sessions
+                WHERE account_id = $1
+                    AND provider_kind = $2
+                    AND provider_issuer = $3
+                    AND provider_subject = $4
+            )
+            "#,
+            &[
+                &proof.account_id,
+                &proof.provider_kind,
+                &proof.provider_issuer,
+                &proof.provider_subject,
+            ],
+        )?;
+        Ok(row.get(0))
+    }
+
+    fn device(&self, account_id: &str, device_id: &str) -> MetadataResult<Option<DeviceRecord>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT account_id, device_id, display_name, trust_state, last_seen_at, updated_at
+                FROM metadata_devices
+                WHERE account_id = $1 AND device_id = $2
+                "#,
+                &[&account_id, &device_id],
+            )?
+            .map(|row| pg_device_from_row(&row))
+            .transpose()
+    }
+
+    fn ensure_account_exists(&self, account_id: &str) -> MetadataResult<()> {
+        let exists: bool = self
+            .client()?
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM metadata_accounts WHERE account_id = $1)",
+                &[&account_id],
+            )?
+            .get(0);
+        if exists {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "account must be registered before project".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_account_exists_for_metadata(&self, account_id: &str) -> MetadataResult<()> {
+        if self.account(account_id)?.is_some() {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "account must be registered before managed object credential lease".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_account_proof_exists(
+        &self,
+        account_id: &str,
+        provider_kind: &str,
+        provider_issuer: &str,
+        provider_subject: &str,
+    ) -> MetadataResult<()> {
+        let exists: bool = self
+            .client()?
+            .query_one(
+                r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM metadata_account_ownership_proofs
+                WHERE account_id = $1
+                    AND provider_kind = $2
+                    AND provider_issuer = $3
+                    AND provider_subject = $4
+            )
+            "#,
+                &[
+                    &account_id,
+                    &provider_kind,
+                    &provider_issuer,
+                    &provider_subject,
+                ],
+            )?
+            .get(0);
+        if exists {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "account ownership proof must be registered before session".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_device_exists(&self, account_id: &str, device_id: &str) -> MetadataResult<()> {
+        if self.device(account_id, device_id)?.is_some() {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "device must be registered before this metadata write".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_project_exists(&self, account_id: &str, project_id: &str) -> MetadataResult<()> {
+        if self.project(account_id, project_id)?.is_some() {
+            Ok(())
+        } else {
+            Err(MetadataError::InvalidRequest(
+                "project must be registered before this metadata write".to_string(),
+            ))
+        }
+    }
+}
+
+impl MetadataStore for PostgresMetadataStore {
+    fn create_alpha_invite(
+        &mut self,
+        request: AlphaInviteCreateRequest,
+    ) -> MetadataResult<AlphaInviteRecord> {
+        let record = alpha_invite_record_from_request(request)?;
+        self.client()?.execute(
+            r#"
+            INSERT INTO metadata_alpha_invites (
+                invite_id,
+                invite_code_hash_hex,
+                allowed_email,
+                allowed_domain,
+                invite_state,
+                created_at,
+                expires_at_unix,
+                consumed_at,
+                consumed_by_account_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT(invite_id) DO UPDATE SET
+                invite_code_hash_hex = EXCLUDED.invite_code_hash_hex,
+                allowed_email = EXCLUDED.allowed_email,
+                allowed_domain = EXCLUDED.allowed_domain,
+                invite_state = EXCLUDED.invite_state,
+                expires_at_unix = EXCLUDED.expires_at_unix,
+                consumed_at = EXCLUDED.consumed_at,
+                consumed_by_account_id = EXCLUDED.consumed_by_account_id
+            "#,
+            &[
+                &record.invite_id,
+                &record.invite_code_hash_hex,
+                &record.allowed_email,
+                &record.allowed_domain,
+                &record.invite_state,
+                &record.created_at,
+                &record.expires_at_unix,
+                &record.consumed_at,
+                &record.consumed_by_account_id,
+            ],
+        )?;
+        self.alpha_invite_by_code_hash(&record.invite_code_hash_hex)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "alpha invite",
+                id: record.invite_id,
+            })
+    }
+
+    fn alpha_invite_by_code_hash(
+        &self,
+        invite_code_hash_hex: &str,
+    ) -> MetadataResult<Option<AlphaInviteRecord>> {
+        validate_hash_hex(invite_code_hash_hex, "alpha invite code hash")?;
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    invite_id,
+                    invite_code_hash_hex,
+                    allowed_email,
+                    allowed_domain,
+                    invite_state,
+                    created_at,
+                    expires_at_unix,
+                    consumed_at,
+                    consumed_by_account_id
+                FROM metadata_alpha_invites
+                WHERE invite_code_hash_hex = $1
+                "#,
+                &[&invite_code_hash_hex],
+            )?
+            .map(|row| pg_alpha_invite_from_row(&row))
+            .transpose()
+    }
+
+    fn consume_alpha_invite(
+        &mut self,
+        invite_id: &str,
+        account_id: &str,
+        consumed_at: &str,
+    ) -> MetadataResult<AlphaInviteRecord> {
+        validate_public_identifier(invite_id, "alpha invite id")?;
+        validate_public_identifier(account_id, "account id")?;
+        validate_non_empty_public(consumed_at, "consumed at")?;
+        let current = self
+            .client()?
+            .query_opt(
+                r#"
+                SELECT
+                    invite_id,
+                    invite_code_hash_hex,
+                    allowed_email,
+                    allowed_domain,
+                    invite_state,
+                    created_at,
+                    expires_at_unix,
+                    consumed_at,
+                    consumed_by_account_id
+                FROM metadata_alpha_invites
+                WHERE invite_id = $1
+                "#,
+                &[&invite_id],
+            )?
+            .map(|row| pg_alpha_invite_from_row(&row))
+            .transpose()?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "alpha invite",
+                id: invite_id.to_string(),
+            })?;
+        if current.invite_state != "active" || current.consumed_at.is_some() {
+            return Err(MetadataError::InvalidRequest(
+                "alpha invite is not active".to_string(),
+            ));
+        }
+        self.client()?.execute(
+            r#"
+            UPDATE metadata_alpha_invites
+            SET invite_state = 'consumed',
+                consumed_at = $2,
+                consumed_by_account_id = $3
+            WHERE invite_id = $1
+            "#,
+            &[&invite_id, &consumed_at, &account_id],
+        )?;
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    invite_id,
+                    invite_code_hash_hex,
+                    allowed_email,
+                    allowed_domain,
+                    invite_state,
+                    created_at,
+                    expires_at_unix,
+                    consumed_at,
+                    consumed_by_account_id
+                FROM metadata_alpha_invites
+                WHERE invite_id = $1
+                "#,
+                &[&invite_id],
+            )?
+            .map(|row| pg_alpha_invite_from_row(&row))
+            .transpose()?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "alpha invite",
+                id: invite_id.to_string(),
+            })
+    }
+
+    fn upsert_account_ownership_proof(
+        &mut self,
+        proof: AccountOwnershipProof,
+    ) -> MetadataResult<AccountRecord> {
+        validate_account_ownership_proof(&proof, 0).map_err(auth_proof_error)?;
+        if let Some(existing_account) = self.account_for_provider_subject(
+            &proof.provider_kind,
+            &proof.provider_issuer,
+            &proof.provider_subject,
+        )? {
+            if existing_account.account_id != proof.account_id {
+                return Err(MetadataError::InvalidRequest(
+                    "provider subject is already linked to another account".to_string(),
+                ));
+            }
+        }
+        if let Some(previous) = self.account_proof(&proof.account_id)? {
+            let previous_key = provider_tuple_key(
+                &previous.provider_kind,
+                &previous.provider_issuer,
+                &previous.provider_subject,
+            );
+            let next_key = provider_tuple_key(
+                &proof.provider_kind,
+                &proof.provider_issuer,
+                &proof.provider_subject,
+            );
+            if previous_key != next_key && self.proof_sessions_exist(&previous)? {
+                return Err(MetadataError::InvalidRequest(
+                    "account ownership proof cannot change provider tuple while sessions reference the previous proof".to_string(),
+                ));
+            }
+        }
+        let display_name = proof
+            .verified_email
+            .as_deref()
+            .or(proof.verified_domain.as_deref())
+            .unwrap_or("verified account");
+        {
+            let mut client = self.client()?;
+            let mut tx = client.transaction()?;
+            tx.execute(
+                r#"
+                INSERT INTO metadata_accounts (account_id, display_name, created_at, updated_at)
+                VALUES ($1, $2, $3, $3)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+                &[&proof.account_id, &display_name, &proof.proof_issued_at],
+            )?;
+            tx.execute(
+                r#"
+                INSERT INTO metadata_account_ownership_proofs (
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    verified_email,
+                    verified_domain,
+                    proof_state,
+                    proof_issued_at,
+                    proof_expires_at_unix,
+                    created_at,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $8)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    provider_kind = EXCLUDED.provider_kind,
+                    provider_issuer = EXCLUDED.provider_issuer,
+                    provider_subject = EXCLUDED.provider_subject,
+                    verified_email = EXCLUDED.verified_email,
+                    verified_domain = EXCLUDED.verified_domain,
+                    proof_state = EXCLUDED.proof_state,
+                    proof_issued_at = EXCLUDED.proof_issued_at,
+                    proof_expires_at_unix = EXCLUDED.proof_expires_at_unix,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+                &[
+                    &proof.account_id,
+                    &proof.provider_kind,
+                    &proof.provider_issuer,
+                    &proof.provider_subject,
+                    &proof.verified_email,
+                    &proof.verified_domain,
+                    &proof.proof_state,
+                    &proof.proof_issued_at,
+                    &proof.proof_expires_at_unix,
+                ],
+            )?;
+            tx.commit()?;
+        }
+        self.account(&proof.account_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "account",
+                id: proof.account_id,
+            })
+    }
+
+    fn account_for_provider_subject(
+        &self,
+        provider_kind: &str,
+        provider_issuer: &str,
+        provider_subject: &str,
+    ) -> MetadataResult<Option<AccountRecord>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    a.account_id,
+                    a.display_name,
+                    a.created_at,
+                    a.updated_at
+                FROM metadata_accounts a
+                JOIN metadata_account_ownership_proofs p
+                    ON p.account_id = a.account_id
+                WHERE p.provider_kind = $1
+                    AND p.provider_issuer = $2
+                    AND p.provider_subject = $3
+                "#,
+                &[&provider_kind, &provider_issuer, &provider_subject],
+            )?
+            .map(|row| pg_account_from_row(&row))
+            .transpose()
+    }
+
+    fn upsert_account_session(
+        &mut self,
+        session: AccountSession,
+    ) -> MetadataResult<AccountSession> {
+        ensure_session_hash(&session)?;
+        self.ensure_account_proof_exists(
+            &session.account_id,
+            &session.provider_kind,
+            &session.provider_issuer,
+            &session.provider_subject,
+        )?;
+        if let Some(existing_session) =
+            self.account_session_by_hash(&session.session_token_hash_hex)?
+        {
+            if existing_session.session_id != session.session_id {
+                return Err(MetadataError::InvalidRequest(
+                    "account session token hash is already registered".to_string(),
+                ));
+            }
+        }
+        self.client()?.execute(
+            r#"
+            INSERT INTO metadata_account_sessions (
+                session_id,
+                account_id,
+                provider_kind,
+                provider_issuer,
+                provider_subject,
+                session_token_hash_hex,
+                session_state,
+                created_at,
+                expires_at_unix,
+                revoked_at,
+                last_seen_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT(session_id) DO UPDATE SET
+                provider_kind = EXCLUDED.provider_kind,
+                provider_issuer = EXCLUDED.provider_issuer,
+                provider_subject = EXCLUDED.provider_subject,
+                session_token_hash_hex = EXCLUDED.session_token_hash_hex,
+                session_state = EXCLUDED.session_state,
+                expires_at_unix = EXCLUDED.expires_at_unix,
+                revoked_at = EXCLUDED.revoked_at,
+                last_seen_at = EXCLUDED.last_seen_at
+            "#,
+            &[
+                &session.session_id,
+                &session.account_id,
+                &session.provider_kind,
+                &session.provider_issuer,
+                &session.provider_subject,
+                &session.session_token_hash_hex,
+                &session.session_state,
+                &session.created_at,
+                &session.expires_at_unix,
+                &session.revoked_at,
+                &session.last_seen_at,
+            ],
+        )?;
+        self.account_session(&session.session_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "account session",
+                id: session.session_id,
+            })
+    }
+
+    fn account_session(&self, session_id: &str) -> MetadataResult<Option<AccountSession>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    session_id,
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    session_token_hash_hex,
+                    session_state,
+                    created_at,
+                    expires_at_unix,
+                    revoked_at,
+                    last_seen_at
+                FROM metadata_account_sessions
+                WHERE session_id = $1
+                "#,
+                &[&session_id],
+            )?
+            .map(|row| pg_account_session_from_row(&row))
+            .transpose()
+    }
+
+    fn account_session_by_hash(
+        &self,
+        session_token_hash_hex: &str,
+    ) -> MetadataResult<Option<AccountSession>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    session_id,
+                    account_id,
+                    provider_kind,
+                    provider_issuer,
+                    provider_subject,
+                    session_token_hash_hex,
+                    session_state,
+                    created_at,
+                    expires_at_unix,
+                    revoked_at,
+                    last_seen_at
+                FROM metadata_account_sessions
+                WHERE session_token_hash_hex = $1
+                "#,
+                &[&session_token_hash_hex],
+            )?
+            .map(|row| pg_account_session_from_row(&row))
+            .transpose()
+    }
+
+    fn revoke_account_session(
+        &mut self,
+        session_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<AccountSession> {
+        let session = self
+            .account_session(session_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "account session",
+                id: session_id.to_string(),
+            })?;
+        let revoked = revoke_auth_account_session(&session, revoked_at).map_err(auth_error)?;
+        self.upsert_account_session(revoked)
+    }
+
+    fn upsert_managed_object_credential_lease(
+        &mut self,
+        request: ManagedObjectCredentialLeaseRequest,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        let record = managed_lease_record_from_request(request)?;
+        self.ensure_account_exists_for_metadata(&record.account_id)?;
+        if let Some(project_id) = &record.project_id {
+            self.ensure_project_exists(&record.account_id, project_id)?;
+        }
+        let rotation_generation = u64_to_i64(
+            record.rotation_generation,
+            "managed object credential lease generation",
+        )?;
+        self.client()?.execute(
+            r#"
+            INSERT INTO metadata_managed_object_credential_leases (
+                account_id,
+                project_scope,
+                project_id,
+                lease_id,
+                provider_kind,
+                endpoint,
+                bucket,
+                region,
+                prefix,
+                credential_reference,
+                credential_fingerprint,
+                capabilities,
+                issued_at,
+                expires_at_unix,
+                revoked_at,
+                rotation_generation,
+                last_rotated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ON CONFLICT(account_id, project_scope, lease_id) DO UPDATE SET
+                provider_kind = EXCLUDED.provider_kind,
+                endpoint = EXCLUDED.endpoint,
+                bucket = EXCLUDED.bucket,
+                region = EXCLUDED.region,
+                prefix = EXCLUDED.prefix,
+                credential_reference = EXCLUDED.credential_reference,
+                credential_fingerprint = EXCLUDED.credential_fingerprint,
+                capabilities = EXCLUDED.capabilities,
+                issued_at = EXCLUDED.issued_at,
+                expires_at_unix = EXCLUDED.expires_at_unix,
+                revoked_at = EXCLUDED.revoked_at,
+                rotation_generation = EXCLUDED.rotation_generation,
+                last_rotated_at = EXCLUDED.last_rotated_at
+            "#,
+            &[
+                &record.account_id,
+                &managed_project_scope(record.project_id.as_deref()),
+                &record.project_id,
+                &record.lease_id,
+                &record.provider_kind.to_string(),
+                &record.endpoint,
+                &record.bucket,
+                &record.region,
+                &record.prefix,
+                &record.credential_reference,
+                &record.credential_fingerprint,
+                &capabilities_to_string(&record.capabilities),
+                &record.issued_at,
+                &record.expires_at_unix,
+                &record.revoked_at,
+                &rotation_generation,
+                &record.last_rotated_at,
+            ],
+        )?;
+        self.managed_object_credential_lease(
+            &record.account_id,
+            record.project_id.as_deref(),
+            &record.lease_id,
+        )?
+        .ok_or_else(|| MetadataError::NotFound {
+            entity: "managed object credential lease",
+            id: record.lease_id,
+        })
+    }
+
+    fn managed_object_credential_lease(
+        &self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+    ) -> MetadataResult<Option<ManagedObjectCredentialLeaseRecord>> {
+        validate_managed_project_scope(project_id)?;
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    account_id,
+                    project_id,
+                    lease_id,
+                    provider_kind,
+                    endpoint,
+                    bucket,
+                    region,
+                    prefix,
+                    credential_reference,
+                    credential_fingerprint,
+                    capabilities,
+                    issued_at,
+                    expires_at_unix,
+                    revoked_at,
+                    rotation_generation,
+                    last_rotated_at
+                FROM metadata_managed_object_credential_leases
+                WHERE account_id = $1 AND project_scope = $2 AND lease_id = $3
+                "#,
+                &[&account_id, &managed_project_scope(project_id), &lease_id],
+            )?
+            .map(|row| pg_managed_object_credential_lease_from_row(&row))
+            .transpose()
+    }
+
+    fn revoke_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        revoked_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        validate_managed_project_scope(project_id)?;
+        let existing = self
+            .managed_object_credential_lease(account_id, project_id, lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })?;
+        self.client()?.execute(
+            r#"
+            UPDATE metadata_managed_object_credential_leases
+            SET revoked_at = COALESCE(revoked_at, $4)
+            WHERE account_id = $1 AND project_scope = $2 AND lease_id = $3
+            "#,
+            &[
+                &account_id,
+                &managed_project_scope(project_id),
+                &lease_id,
+                &revoked_at,
+            ],
+        )?;
+        self.managed_object_credential_lease(account_id, existing.project_id.as_deref(), lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })
+    }
+
+    fn rotate_managed_object_credential_lease(
+        &mut self,
+        account_id: &str,
+        project_id: Option<&str>,
+        lease_id: &str,
+        credential_reference: String,
+        credential_fingerprint: Option<String>,
+        rotated_at: &str,
+    ) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+        validate_managed_project_scope(project_id)?;
+        validate_credential_reference(&credential_reference)?;
+        validate_credential_fingerprint(credential_fingerprint.as_deref())?;
+        let existing = self
+            .managed_object_credential_lease(account_id, project_id, lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })?;
+        ensure_lease_active(&existing, i64::MIN)?;
+        self.client()?.execute(
+            r#"
+            UPDATE metadata_managed_object_credential_leases
+            SET
+                credential_reference = $4,
+                credential_fingerprint = $5,
+                rotation_generation = rotation_generation + 1,
+                last_rotated_at = $6
+            WHERE account_id = $1 AND project_scope = $2 AND lease_id = $3
+            "#,
+            &[
+                &account_id,
+                &managed_project_scope(project_id),
+                &lease_id,
+                &credential_reference,
+                &credential_fingerprint,
+                &rotated_at,
+            ],
+        )?;
+        self.managed_object_credential_lease(account_id, existing.project_id.as_deref(), lease_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "managed object credential lease",
+                id: lease_id.to_string(),
+            })
+    }
+
+    fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MetadataResult<DeviceRecord> {
+        ensure_no_secret_material(&request)?;
+        {
+            let mut client = self.client()?;
+            let mut tx = client.transaction()?;
+            tx.execute(
+                r#"
+                INSERT INTO metadata_accounts (account_id, display_name, created_at, updated_at)
+                VALUES ($1, 'mock-dev account', $2, $2)
+                ON CONFLICT(account_id) DO UPDATE SET updated_at = EXCLUDED.updated_at
+                "#,
+                &[&request.account_id, &request.last_seen_at],
+            )?;
+            tx.execute(
+                r#"
+                INSERT INTO metadata_devices (
+                    account_id,
+                    device_id,
+                    display_name,
+                    trust_state,
+                    last_seen_at,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, 'mock-dev-trusted', $4, $4)
+                ON CONFLICT(account_id, device_id) DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    trust_state = EXCLUDED.trust_state,
+                    last_seen_at = EXCLUDED.last_seen_at,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+                &[
+                    &request.account_id,
+                    &request.device_id,
+                    &request.display_name,
+                    &request.last_seen_at,
+                ],
+            )?;
+            tx.commit()?;
+        }
+        self.device(&request.account_id, &request.device_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "device",
+                id: request.device_id,
+            })
+    }
+
+    fn upsert_project(&mut self, request: UpsertProjectRequest) -> MetadataResult<ProjectRecord> {
+        ensure_no_secret_material(&request)?;
+        self.ensure_account_exists(&request.account_id)?;
+        self.client()?.execute(
+            r#"
+            INSERT INTO metadata_projects (
+                account_id,
+                project_id,
+                display_name,
+                root_hint,
+                project_kind,
+                updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT(account_id, project_id) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                root_hint = EXCLUDED.root_hint,
+                project_kind = EXCLUDED.project_kind,
+                updated_at = EXCLUDED.updated_at
+            "#,
+            &[
+                &request.account_id,
+                &request.project_id,
+                &request.display_name,
+                &request.root_hint,
+                &request.project_kind,
+                &request.updated_at,
+            ],
+        )?;
+        self.project(&request.account_id, &request.project_id)?
+            .ok_or_else(|| MetadataError::NotFound {
+                entity: "project",
+                id: request.project_id,
+            })
+    }
+
+    fn project(&self, account_id: &str, project_id: &str) -> MetadataResult<Option<ProjectRecord>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT account_id, project_id, display_name, root_hint, project_kind, updated_at
+                FROM metadata_projects
+                WHERE account_id = $1 AND project_id = $2
+                "#,
+                &[&account_id, &project_id],
+            )?
+            .map(|row| pg_project_from_row(&row))
+            .transpose()
+    }
+
+    fn publish_snapshot(
+        &mut self,
+        request: PublishSnapshotRequest,
+    ) -> MetadataResult<PublishedSnapshotRecord> {
+        ensure_no_secret_material(&request)?;
+        self.ensure_project_exists(&request.account_id, &request.project_id)?;
+        self.ensure_device_exists(&request.account_id, &request.published_by_device_id)?;
+        let manifest_entry_count =
+            u64_to_i64(request.manifest_entry_count, "manifest entry count")?;
+        let total_size_bytes = u64_to_i64(request.total_size_bytes, "total size bytes")?;
+        self.client()?.execute(
+            r#"
+            INSERT INTO metadata_snapshots (
+                account_id,
+                project_id,
+                snapshot_id,
+                parent_snapshot_id,
+                manifest_object_key,
+                manifest_hash,
+                manifest_entry_count,
+                total_size_bytes,
+                published_by_device_id,
+                published_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT(account_id, project_id, snapshot_id) DO UPDATE SET
+                parent_snapshot_id = EXCLUDED.parent_snapshot_id,
+                manifest_object_key = EXCLUDED.manifest_object_key,
+                manifest_hash = EXCLUDED.manifest_hash,
+                manifest_entry_count = EXCLUDED.manifest_entry_count,
+                total_size_bytes = EXCLUDED.total_size_bytes,
+                published_by_device_id = EXCLUDED.published_by_device_id,
+                published_at = EXCLUDED.published_at
+            "#,
+            &[
+                &request.account_id,
+                &request.project_id,
+                &request.snapshot_id,
+                &request.parent_snapshot_id,
+                &request.manifest_object_key,
+                &request.manifest_hash,
+                &manifest_entry_count,
+                &total_size_bytes,
+                &request.published_by_device_id,
+                &request.published_at,
+            ],
+        )?;
+        self.snapshot(
+            &request.account_id,
+            &request.project_id,
+            &request.snapshot_id,
+        )?
+        .ok_or_else(|| MetadataError::NotFound {
+            entity: "snapshot",
+            id: request.snapshot_id,
+        })
+    }
+
+    fn snapshot(
+        &self,
+        account_id: &str,
+        project_id: &str,
+        snapshot_id: &str,
+    ) -> MetadataResult<Option<PublishedSnapshotRecord>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    account_id,
+                    project_id,
+                    snapshot_id,
+                    parent_snapshot_id,
+                    manifest_object_key,
+                    manifest_hash,
+                    manifest_entry_count,
+                    total_size_bytes,
+                    published_by_device_id,
+                    published_at
+                FROM metadata_snapshots
+                WHERE account_id = $1 AND project_id = $2 AND snapshot_id = $3
+                "#,
+                &[&account_id, &project_id, &snapshot_id],
+            )?
+            .map(|row| pg_snapshot_from_row(&row))
+            .transpose()
+    }
+
+    fn latest_snapshot(
+        &self,
+        account_id: &str,
+        project_id: &str,
+    ) -> MetadataResult<Option<PublishedSnapshotRecord>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT
+                    account_id,
+                    project_id,
+                    snapshot_id,
+                    parent_snapshot_id,
+                    manifest_object_key,
+                    manifest_hash,
+                    manifest_entry_count,
+                    total_size_bytes,
+                    published_by_device_id,
+                    published_at
+                FROM metadata_snapshots
+                WHERE account_id = $1 AND project_id = $2
+                ORDER BY published_at DESC, snapshot_id DESC
+                LIMIT 1
+                "#,
+                &[&account_id, &project_id],
+            )?
+            .map(|row| pg_snapshot_from_row(&row))
+            .transpose()
+    }
+
+    fn cursor(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        project_id: &str,
+    ) -> MetadataResult<Option<DeviceProjectCursorRecord>> {
+        self.client()?
+            .query_opt(
+                r#"
+                SELECT account_id, device_id, project_id, cursor_value, updated_at
+                FROM metadata_device_project_cursors
+                WHERE account_id = $1 AND device_id = $2 AND project_id = $3
+                "#,
+                &[&account_id, &device_id, &project_id],
+            )?
+            .map(|row| pg_cursor_from_row(&row))
+            .transpose()
+    }
+
+    fn compare_and_set_cursor(
+        &mut self,
+        request: UpdateCursorRequest,
+    ) -> MetadataResult<DeviceProjectCursorRecord> {
+        ensure_no_secret_material(&request)?;
+        self.ensure_device_exists(&request.account_id, &request.device_id)?;
+        self.ensure_project_exists(&request.account_id, &request.project_id)?;
+        let updated = if request.expected_cursor.is_some() {
+            self.client()?.query_opt(
+                r#"
+                UPDATE metadata_device_project_cursors
+                SET
+                    cursor_value = $4,
+                    updated_at = $5
+                WHERE account_id = $1
+                    AND device_id = $2
+                    AND project_id = $3
+                    AND cursor_value IS NOT DISTINCT FROM $6
+                RETURNING account_id, device_id, project_id, cursor_value, updated_at
+                "#,
+                &[
+                    &request.account_id,
+                    &request.device_id,
+                    &request.project_id,
+                    &request.next_cursor,
+                    &request.updated_at,
+                    &request.expected_cursor,
+                ],
+            )?
+        } else {
+            self.client()?.query_opt(
+                r#"
+                INSERT INTO metadata_device_project_cursors (
+                    account_id,
+                    device_id,
+                    project_id,
+                    cursor_value,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT(account_id, device_id, project_id) DO UPDATE SET
+                    cursor_value = EXCLUDED.cursor_value,
+                    updated_at = EXCLUDED.updated_at
+                WHERE metadata_device_project_cursors.cursor_value IS NULL
+                RETURNING account_id, device_id, project_id, cursor_value, updated_at
+                "#,
+                &[
+                    &request.account_id,
+                    &request.device_id,
+                    &request.project_id,
+                    &request.next_cursor,
+                    &request.updated_at,
+                ],
+            )?
+        }
+        .map(|row| pg_cursor_from_row(&row))
+        .transpose()?;
+        if let Some(updated) = updated {
+            return Ok(updated);
+        }
+        let current = self
+            .cursor(&request.account_id, &request.device_id, &request.project_id)?
+            .and_then(|record| record.cursor_value);
+        Err(MetadataError::CursorPreconditionFailed {
+            current_cursor: current,
+        })
+    }
+}
+
 pub type SharedMetadataStore<S> = Arc<Mutex<S>>;
 
 #[derive(Debug)]
@@ -2639,6 +3909,20 @@ pub async fn serve_sqlite_with_config(
     config: HostedApiConfig,
 ) -> MetadataResult<()> {
     let store = SqliteMetadataStore::open_file(path)?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|error| MetadataError::InvalidRequest(error.to_string()))?;
+    axum::serve(listener, app_with_config(store, config))
+        .await
+        .map_err(|error| MetadataError::InvalidRequest(error.to_string()))
+}
+
+pub async fn serve_postgres_with_config(
+    database_url: &str,
+    addr: SocketAddr,
+    config: HostedApiConfig,
+) -> MetadataResult<()> {
+    let store = PostgresMetadataStore::connect(database_url)?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|error| MetadataError::InvalidRequest(error.to_string()))?;
@@ -3181,7 +4465,7 @@ fn bearer_session_token(headers: &HeaderMap) -> MetadataResult<Option<String>> {
     Ok(Some(token.trim().to_string()))
 }
 
-pub fn authenticate_account_session<S: MetadataStore>(
+pub fn authenticate_account_session<S: MetadataStore + ?Sized>(
     store: &S,
     raw_session_token: &str,
     now_unix: i64,
@@ -3195,7 +4479,7 @@ pub fn authenticate_account_session<S: MetadataStore>(
     validate_account_session_hash(&session, &session_hash, now_unix).map_err(auth_error)
 }
 
-pub fn active_managed_object_credential_lease_for_session<S: MetadataStore>(
+pub fn active_managed_object_credential_lease_for_session<S: MetadataStore + ?Sized>(
     store: &S,
     raw_session_token: &str,
     project_id: Option<&str>,
@@ -3216,7 +4500,7 @@ pub fn active_managed_object_credential_lease_for_session<S: MetadataStore>(
     Ok(record)
 }
 
-pub fn managed_object_access_grant_for_session<S: MetadataStore>(
+pub fn managed_object_access_grant_for_session<S: MetadataStore + ?Sized>(
     store: &S,
     raw_session_token: &str,
     project_id: &str,
@@ -3237,7 +4521,7 @@ pub fn managed_object_access_grant_for_session<S: MetadataStore>(
     )
 }
 
-pub fn managed_object_access_grant_for_account_session<S: MetadataStore>(
+pub fn managed_object_access_grant_for_account_session<S: MetadataStore + ?Sized>(
     store: &S,
     session: &AuthenticatedAccountSession,
     project_id: &str,
@@ -4309,6 +5593,23 @@ fn is_sqlite_constraint(error: &rusqlite::Error) -> bool {
     )
 }
 
+fn is_postgres_constraint(error: &postgres::Error) -> bool {
+    matches!(
+        error.code(),
+        Some(&SqlState::CHECK_VIOLATION)
+            | Some(&SqlState::FOREIGN_KEY_VIOLATION)
+            | Some(&SqlState::NOT_NULL_VIOLATION)
+            | Some(&SqlState::UNIQUE_VIOLATION)
+            | Some(&SqlState::EXCLUSION_VIOLATION)
+    )
+}
+
+fn u64_to_i64(value: u64, field: &'static str) -> MetadataResult<i64> {
+    i64::try_from(value).map_err(|_| {
+        MetadataError::InvalidRequest(format!("{field} must fit in a signed 64-bit integer"))
+    })
+}
+
 fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
     Ok(AccountRecord {
         account_id: row.get(0)?,
@@ -4408,6 +5709,145 @@ fn managed_object_credential_lease_from_row(
     })
 }
 
+fn pg_account_from_row(row: &postgres::Row) -> MetadataResult<AccountRecord> {
+    Ok(AccountRecord {
+        account_id: row.try_get(0)?,
+        display_name: row.try_get(1)?,
+        created_at: row.try_get(2)?,
+        updated_at: row.try_get(3)?,
+    })
+}
+
+fn pg_alpha_invite_from_row(row: &postgres::Row) -> MetadataResult<AlphaInviteRecord> {
+    Ok(AlphaInviteRecord {
+        invite_id: row.try_get(0)?,
+        invite_code_hash_hex: row.try_get(1)?,
+        allowed_email: row.try_get(2)?,
+        allowed_domain: row.try_get(3)?,
+        invite_state: row.try_get(4)?,
+        created_at: row.try_get(5)?,
+        expires_at_unix: row.try_get(6)?,
+        consumed_at: row.try_get(7)?,
+        consumed_by_account_id: row.try_get(8)?,
+    })
+}
+
+fn pg_account_proof_from_row(row: &postgres::Row) -> MetadataResult<AccountOwnershipProof> {
+    Ok(AccountOwnershipProof {
+        account_id: row.try_get(0)?,
+        provider_kind: row.try_get(1)?,
+        provider_issuer: row.try_get(2)?,
+        provider_subject: row.try_get(3)?,
+        verified_email: row.try_get(4)?,
+        verified_domain: row.try_get(5)?,
+        proof_state: row.try_get(6)?,
+        proof_issued_at: row.try_get(7)?,
+        proof_expires_at_unix: row.try_get(8)?,
+    })
+}
+
+fn pg_account_session_from_row(row: &postgres::Row) -> MetadataResult<AccountSession> {
+    Ok(AccountSession {
+        session_id: row.try_get(0)?,
+        account_id: row.try_get(1)?,
+        provider_kind: row.try_get(2)?,
+        provider_issuer: row.try_get(3)?,
+        provider_subject: row.try_get(4)?,
+        session_token_hash_hex: row.try_get(5)?,
+        session_state: row.try_get(6)?,
+        created_at: row.try_get(7)?,
+        expires_at_unix: row.try_get(8)?,
+        revoked_at: row.try_get(9)?,
+        last_seen_at: row.try_get(10)?,
+    })
+}
+
+fn pg_device_from_row(row: &postgres::Row) -> MetadataResult<DeviceRecord> {
+    Ok(DeviceRecord {
+        account_id: row.try_get(0)?,
+        device_id: row.try_get(1)?,
+        display_name: row.try_get(2)?,
+        trust_state: row.try_get(3)?,
+        last_seen_at: row.try_get(4)?,
+        updated_at: row.try_get(5)?,
+    })
+}
+
+fn pg_project_from_row(row: &postgres::Row) -> MetadataResult<ProjectRecord> {
+    Ok(ProjectRecord {
+        account_id: row.try_get(0)?,
+        project_id: row.try_get(1)?,
+        display_name: row.try_get(2)?,
+        root_hint: row.try_get(3)?,
+        project_kind: row.try_get(4)?,
+        updated_at: row.try_get(5)?,
+    })
+}
+
+fn pg_snapshot_from_row(row: &postgres::Row) -> MetadataResult<PublishedSnapshotRecord> {
+    let manifest_entry_count_i64: i64 = row.try_get(6)?;
+    let total_size_bytes_i64: i64 = row.try_get(7)?;
+    let manifest_entry_count = u64::try_from(manifest_entry_count_i64).map_err(|error| {
+        MetadataError::InvalidRequest(format!("manifest entry count is invalid: {error}"))
+    })?;
+    let total_size_bytes = u64::try_from(total_size_bytes_i64).map_err(|error| {
+        MetadataError::InvalidRequest(format!("total size bytes is invalid: {error}"))
+    })?;
+    Ok(PublishedSnapshotRecord {
+        account_id: row.try_get(0)?,
+        project_id: row.try_get(1)?,
+        snapshot_id: row.try_get(2)?,
+        parent_snapshot_id: row.try_get(3)?,
+        manifest_object_key: row.try_get(4)?,
+        manifest_hash: row.try_get(5)?,
+        manifest_entry_count,
+        total_size_bytes,
+        published_by_device_id: row.try_get(8)?,
+        published_at: row.try_get(9)?,
+    })
+}
+
+fn pg_cursor_from_row(row: &postgres::Row) -> MetadataResult<DeviceProjectCursorRecord> {
+    Ok(DeviceProjectCursorRecord {
+        account_id: row.try_get(0)?,
+        device_id: row.try_get(1)?,
+        project_id: row.try_get(2)?,
+        cursor_value: row.try_get(3)?,
+        updated_at: row.try_get(4)?,
+    })
+}
+
+fn pg_managed_object_credential_lease_from_row(
+    row: &postgres::Row,
+) -> MetadataResult<ManagedObjectCredentialLeaseRecord> {
+    let provider_kind_text: String = row.try_get(3)?;
+    let capabilities_text: String = row.try_get(10)?;
+    let provider_kind = provider_kind_text.parse()?;
+    let capabilities = capabilities_from_string(&capabilities_text)?;
+    let rotation_generation_i64: i64 = row.try_get(14)?;
+    let rotation_generation = u64::try_from(rotation_generation_i64).map_err(|error| {
+        MetadataError::InvalidRequest(format!("rotation generation is invalid: {error}"))
+    })?;
+    Ok(ManagedObjectCredentialLeaseRecord {
+        account_id: row.try_get(0)?,
+        project_id: row.try_get(1)?,
+        lease_id: row.try_get(2)?,
+        provider_kind,
+        endpoint: row.try_get(4)?,
+        bucket: row.try_get(5)?,
+        region: row.try_get(6)?,
+        prefix: row.try_get(7)?,
+        credential_reference: row.try_get(8)?,
+        credential_fingerprint: row.try_get(9)?,
+        capabilities,
+        issued_at: row.try_get(11)?,
+        expires_at_unix: row.try_get(12)?,
+        revoked_at: row.try_get(13)?,
+        rotation_generation,
+        last_rotated_at: row.try_get(15)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4418,6 +5858,43 @@ mod tests {
     const ACCOUNT: &str = "account-alpha";
     const DEVICE: &str = "device-laptop";
     const PROJECT: &str = "project-devbox";
+
+    #[test]
+    fn postgres_schema_migration_declares_railway_alpha_metadata_shape() {
+        for table in [
+            "metadata_schema_migrations",
+            "metadata_accounts",
+            "metadata_alpha_invites",
+            "metadata_account_ownership_proofs",
+            "metadata_account_sessions",
+            "metadata_managed_object_credential_leases",
+            "metadata_devices",
+            "metadata_projects",
+            "metadata_snapshots",
+            "metadata_device_project_cursors",
+        ] {
+            assert!(
+                POSTGRES_METADATA_SCHEMA_SQL.contains(table),
+                "schema should include {table}"
+            );
+        }
+        for required in [
+            "UNIQUE (invite_code_hash_hex)",
+            "UNIQUE (session_token_hash_hex)",
+            "PRIMARY KEY (account_id, project_scope, lease_id)",
+            "PRIMARY KEY (account_id, project_id, snapshot_id)",
+            "PRIMARY KEY (account_id, device_id, project_id)",
+            "FOREIGN KEY (account_id, provider_kind, provider_issuer, provider_subject)",
+            "FOREIGN KEY (account_id, project_id) REFERENCES metadata_projects",
+            "FOREIGN KEY (account_id, published_by_device_id) REFERENCES metadata_devices",
+            "ON CONFLICT (version) DO NOTHING",
+        ] {
+            assert!(
+                POSTGRES_METADATA_SCHEMA_SQL.contains(required),
+                "schema should preserve {required}"
+            );
+        }
+    }
 
     #[test]
     fn in_memory_cursor_compare_and_set_requires_expected_cursor() {
@@ -4468,30 +5945,32 @@ mod tests {
     #[test]
     fn sqlite_store_round_trips_devices_projects_snapshots_and_cursors() {
         let mut store = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
-        seed_store(&mut store);
-        let snapshot = publish_request();
-        let persisted = store
-            .publish_snapshot(snapshot.clone())
-            .expect("snapshot metadata persists");
-        assert_eq!(persisted, PublishedSnapshotRecord::from(snapshot));
+        assert_store_round_trips_devices_projects_snapshots_and_cursors(&mut store);
+    }
 
-        let fetched = store
-            .snapshot(ACCOUNT, PROJECT, "snapshot-a")
-            .expect("snapshot lookup works")
-            .expect("snapshot exists");
-        assert_eq!(fetched.manifest_object_key, "manifests/snapshot-a.json.enc");
+    #[test]
+    fn postgres_store_matches_sqlite_core_semantics_when_configured() {
+        let Some(mut postgres_core) = PostgresTestContext::open() else {
+            eprintln!(
+                "skipping Postgres metadata parity test; DEVBOX_TEST_POSTGRES_URL is not set"
+            );
+            return;
+        };
+        let mut postgres_leases =
+            PostgresTestContext::open().expect("postgres lease parity context opens");
+        let mut postgres_sentinel =
+            PostgresTestContext::open().expect("postgres sentinel parity context opens");
+        let mut sqlite_core = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        let mut sqlite_leases = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        let mut sqlite_sentinel =
+            SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
 
-        let cursor = store
-            .compare_and_set_cursor(UpdateCursorRequest {
-                account_id: ACCOUNT.to_string(),
-                device_id: DEVICE.to_string(),
-                project_id: PROJECT.to_string(),
-                expected_cursor: None,
-                next_cursor: Some("snapshot-a".to_string()),
-                updated_at: "2026-06-18T10:04:00Z".to_string(),
-            })
-            .expect("cursor persists");
-        assert_eq!(cursor.cursor_value.as_deref(), Some("snapshot-a"));
+        assert_store_round_trips_devices_projects_snapshots_and_cursors(&mut sqlite_core);
+        assert_store_round_trips_devices_projects_snapshots_and_cursors(&mut postgres_core.store);
+        assert_managed_object_credential_lease_store_semantics(&mut sqlite_leases);
+        assert_managed_object_credential_lease_store_semantics(&mut postgres_leases.store);
+        assert_managed_object_project_scope_sentinel_is_reserved(&mut sqlite_sentinel);
+        assert_managed_object_project_scope_sentinel_is_reserved(&mut postgres_sentinel.store);
     }
 
     #[test]
@@ -6293,6 +7772,52 @@ mod tests {
             .expect("project upserts");
     }
 
+    fn assert_store_round_trips_devices_projects_snapshots_and_cursors<S: MetadataStore>(
+        store: &mut S,
+    ) {
+        seed_store(store);
+        let snapshot = publish_request();
+        let persisted = store
+            .publish_snapshot(snapshot.clone())
+            .expect("snapshot metadata persists");
+        assert_eq!(persisted, PublishedSnapshotRecord::from(snapshot));
+
+        let fetched = store
+            .snapshot(ACCOUNT, PROJECT, "snapshot-a")
+            .expect("snapshot lookup works")
+            .expect("snapshot exists");
+        assert_eq!(fetched.manifest_object_key, "manifests/snapshot-a.json.enc");
+
+        let cursor = store
+            .compare_and_set_cursor(UpdateCursorRequest {
+                account_id: ACCOUNT.to_string(),
+                device_id: DEVICE.to_string(),
+                project_id: PROJECT.to_string(),
+                expected_cursor: None,
+                next_cursor: Some("snapshot-a".to_string()),
+                updated_at: "2026-06-18T10:04:00Z".to_string(),
+            })
+            .expect("cursor persists");
+        assert_eq!(cursor.cursor_value.as_deref(), Some("snapshot-a"));
+
+        let conflict = store
+            .compare_and_set_cursor(UpdateCursorRequest {
+                account_id: ACCOUNT.to_string(),
+                device_id: DEVICE.to_string(),
+                project_id: PROJECT.to_string(),
+                expected_cursor: None,
+                next_cursor: Some("snapshot-b".to_string()),
+                updated_at: "2026-06-18T10:05:00Z".to_string(),
+            })
+            .expect_err("stale cursor precondition fails");
+        assert!(matches!(
+            conflict,
+            MetadataError::CursorPreconditionFailed {
+                current_cursor: Some(_)
+            }
+        ));
+    }
+
     fn assert_proof_rebind_with_existing_session_is_rejected<S: MetadataStore>(store: &mut S) {
         let raw_token = "raw-hosted-session-token";
         let original = account_proof();
@@ -6498,6 +8023,51 @@ mod tests {
             sentinel_active_lookup.to_string(),
             "project id '*' is reserved for account-wide managed object credential leases"
         );
+    }
+
+    struct PostgresTestContext {
+        store: PostgresMetadataStore,
+        admin_url: String,
+        schema: String,
+    }
+
+    impl PostgresTestContext {
+        fn open() -> Option<Self> {
+            let admin_url = std::env::var("DEVBOX_TEST_POSTGRES_URL").ok()?;
+            let unique_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after unix epoch")
+                .as_nanos();
+            let schema = format!("devbox_test_{}_{}", std::process::id(), unique_nanos);
+            let mut admin =
+                PostgresClient::connect(&admin_url, NoTls).expect("test Postgres connects");
+            admin
+                .batch_execute(&format!("CREATE SCHEMA {schema}"))
+                .expect("test schema creates");
+            let store_url = postgres_url_with_search_path(&admin_url, &schema);
+            let store = PostgresMetadataStore::connect(&store_url).expect("postgres store opens");
+            Some(Self {
+                store,
+                admin_url,
+                schema,
+            })
+        }
+    }
+
+    impl Drop for PostgresTestContext {
+        fn drop(&mut self) {
+            if let Ok(mut admin) = PostgresClient::connect(&self.admin_url, NoTls) {
+                let _ =
+                    admin.batch_execute(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema));
+            }
+        }
+    }
+
+    fn postgres_url_with_search_path(admin_url: &str, schema: &str) -> String {
+        let mut url = Url::parse(admin_url).expect("postgres test url parses");
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={schema}"));
+        url.to_string()
     }
 
     fn seed_verified_account_session_and_project<S: MetadataStore>(store: &mut S) -> &'static str {

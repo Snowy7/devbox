@@ -11,6 +11,22 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: devbox
+          POSTGRES_PASSWORD: devbox
+          POSTGRES_DB: devbox_metadata_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devbox -d devbox_metadata_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DEVBOX_TEST_POSTGRES_URL: postgres://devbox:devbox@localhost:5432/devbox_metadata_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
