@@ -3,12 +3,16 @@
 //! Scanning, generated-file policy, materialization, restore safety, and
 //! file-version capture belong here as the old snapshot crate is migrated.
 
-use loom_core::{FileKind, FileVersion, FileVersionId, LoomError, RevisionBoundary, SharedFolder};
-use loom_store::{path_to_store_string, ObjectCache, StoreError, STORE_DIR};
+use loom_core::{
+    FileKind, FileVersion, FileVersionId, FolderRevision, FolderRevisionId, LoomError,
+    RevisionBoundary, SharedFolder,
+};
+use loom_store::{path_to_store_string, LocalStore, ObjectCache, StoreError, STORE_DIR};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[cfg(test)]
 const OLD_SECRET_SCAN_PREFIX_BYTES: usize = 1024 * 1024;
@@ -33,6 +37,155 @@ impl CaptureRequest {
 pub enum RestoreMode {
     Preview,
     Apply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeDiff {
+    created: Vec<PathBuf>,
+    modified: Vec<PathBuf>,
+    deleted: Vec<PathBuf>,
+    unchanged: usize,
+}
+
+impl WorktreeDiff {
+    fn new(
+        created: Vec<PathBuf>,
+        modified: Vec<PathBuf>,
+        deleted: Vec<PathBuf>,
+        unchanged: usize,
+    ) -> Self {
+        Self {
+            created,
+            modified,
+            deleted,
+            unchanged,
+        }
+    }
+
+    pub fn created(&self) -> &[PathBuf] {
+        &self.created
+    }
+
+    pub fn modified(&self) -> &[PathBuf] {
+        &self.modified
+    }
+
+    pub fn deleted(&self) -> &[PathBuf] {
+        &self.deleted
+    }
+
+    pub fn unchanged(&self) -> usize {
+        self.unchanged
+    }
+
+    pub fn has_changes(&self) -> bool {
+        !self.created.is_empty() || !self.modified.is_empty() || !self.deleted.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreReport {
+    revision_id: FolderRevisionId,
+    diff: WorktreeDiff,
+}
+
+impl RestoreReport {
+    pub fn revision_id(&self) -> &FolderRevisionId {
+        &self.revision_id
+    }
+
+    pub fn diff(&self) -> &WorktreeDiff {
+        &self.diff
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoreEngine<'a> {
+    store: &'a LocalStore,
+}
+
+impl<'a> RestoreEngine<'a> {
+    pub fn new(store: &'a LocalStore) -> Self {
+        Self { store }
+    }
+
+    pub fn restore(
+        &self,
+        revision: &FolderRevision,
+        current: &WorktreeCapture,
+    ) -> CaptureResult<RestoreReport> {
+        if let Some(notice) = current.blocked().first() {
+            return Err(CaptureError::UnsafeRestore {
+                path: notice.relative_path().to_path_buf(),
+                reason: "working folder contains a secret-blocked source file".to_string(),
+            });
+        }
+
+        if let Some(notice) = current.deferred().first() {
+            return Err(CaptureError::UnsafeRestore {
+                path: notice.relative_path().to_path_buf(),
+                reason: "working folder contains a deferred source entry".to_string(),
+            });
+        }
+
+        let diff = diff_revision_to_capture(revision, current)?;
+        let target_paths = revision
+            .entries()
+            .iter()
+            .map(|entry| entry.path().to_path_buf())
+            .collect::<BTreeSet<_>>();
+        let file_versions = self
+            .store
+            .file_versions()
+            .map_err(CaptureError::Store)?
+            .into_iter()
+            .map(|version| (version.id().clone(), version))
+            .collect::<BTreeMap<_, _>>();
+
+        validate_restore_entries(revision)?;
+
+        let mut removed = current
+            .file_versions()
+            .iter()
+            .filter(|version| !target_paths.contains(version.path()))
+            .collect::<Vec<_>>();
+        removed.sort_by(|left, right| {
+            path_to_store_string(right.path()).cmp(&path_to_store_string(left.path()))
+        });
+
+        for version in removed {
+            remove_current_entry(current.root(), version)?;
+        }
+
+        let mut entries = revision.entries().to_vec();
+        entries.sort_by(|left, right| {
+            path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
+        });
+
+        for entry in entries {
+            let version = file_versions.get(entry.file_version_id()).ok_or_else(|| {
+                CaptureError::MissingRevisionFileVersion {
+                    revision_id: revision.id().clone(),
+                    file_version_id: entry.file_version_id().clone(),
+                }
+            })?;
+            if entry.path() != version.path() {
+                return Err(CaptureError::UnsafeRestore {
+                    path: entry.path().to_path_buf(),
+                    reason: format!(
+                        "revision entry points at file version for {}",
+                        path_to_store_string(version.path())
+                    ),
+                });
+            }
+            materialize_file_version(self.store, current.root(), version)?;
+        }
+
+        Ok(RestoreReport {
+            revision_id: revision.id().clone(),
+            diff,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -199,11 +352,26 @@ pub enum DirectoryPolicyDecision {
 
 #[derive(Debug)]
 pub enum CaptureError {
-    RootNotFound { path: PathBuf },
-    RootNotDirectory { path: PathBuf },
-    Io { path: PathBuf, source: io::Error },
+    RootNotFound {
+        path: PathBuf,
+    },
+    RootNotDirectory {
+        path: PathBuf,
+    },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     Store(StoreError),
     Loom(LoomError),
+    UnsafeRestore {
+        path: PathBuf,
+        reason: String,
+    },
+    MissingRevisionFileVersion {
+        revision_id: FolderRevisionId,
+        file_version_id: FileVersionId,
+    },
 }
 
 impl fmt::Display for CaptureError {
@@ -218,6 +386,16 @@ impl fmt::Display for CaptureError {
             }
             Self::Store(error) => write!(f, "{error}"),
             Self::Loom(error) => write!(f, "{error}"),
+            Self::UnsafeRestore { path, reason } => {
+                write!(f, "restore refused for {}: {reason}", path.display())
+            }
+            Self::MissingRevisionFileVersion {
+                revision_id,
+                file_version_id,
+            } => write!(
+                f,
+                "revision {revision_id} references missing file version {file_version_id}"
+            ),
         }
     }
 }
@@ -228,7 +406,10 @@ impl std::error::Error for CaptureError {
             Self::Io { source, .. } => Some(source),
             Self::Store(error) => Some(error),
             Self::Loom(error) => Some(error),
-            Self::RootNotFound { .. } | Self::RootNotDirectory { .. } => None,
+            Self::RootNotFound { .. }
+            | Self::RootNotDirectory { .. }
+            | Self::UnsafeRestore { .. }
+            | Self::MissingRevisionFileVersion { .. } => None,
         }
     }
 }
@@ -246,6 +427,215 @@ impl From<LoomError> for CaptureError {
 }
 
 pub type CaptureResult<T> = Result<T, CaptureError>;
+
+pub fn diff_revision_to_capture(
+    revision: &FolderRevision,
+    capture: &WorktreeCapture,
+) -> CaptureResult<WorktreeDiff> {
+    validate_restore_entries(revision)?;
+
+    let base_entries = revision
+        .entries()
+        .iter()
+        .map(|entry| (entry.path().to_path_buf(), entry.file_version_id().clone()))
+        .collect::<BTreeMap<_, _>>();
+    let current_entries = capture
+        .file_versions()
+        .iter()
+        .map(|version| (version.path().to_path_buf(), version.id().clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut created = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+    let mut unchanged = 0;
+
+    for (path, current_id) in &current_entries {
+        match base_entries.get(path) {
+            Some(base_id) if base_id == current_id => unchanged += 1,
+            Some(_) => modified.push(path.clone()),
+            None => created.push(path.clone()),
+        }
+    }
+
+    for path in base_entries.keys() {
+        if !current_entries.contains_key(path) {
+            deleted.push(path.clone());
+        }
+    }
+
+    Ok(WorktreeDiff::new(created, modified, deleted, unchanged))
+}
+
+fn validate_restore_entries(revision: &FolderRevision) -> CaptureResult<()> {
+    for entry in revision.entries() {
+        validate_materialized_relative_path(entry.path())?;
+    }
+
+    Ok(())
+}
+
+fn materialize_file_version(
+    store: &LocalStore,
+    root: &Path,
+    version: &FileVersion,
+) -> CaptureResult<()> {
+    let target =
+        validate_materialized_relative_path(version.path()).map(|_| root.join(version.path()))?;
+
+    match version.kind() {
+        FileKind::Directory => {
+            if let Ok(metadata) = fs::symlink_metadata(&target) {
+                if metadata.file_type().is_symlink() {
+                    return Err(CaptureError::UnsafeRestore {
+                        path: version.path().to_path_buf(),
+                        reason: "refusing to replace a symlink".to_string(),
+                    });
+                }
+                if metadata.is_file() {
+                    fs::remove_file(&target).map_err(|source| CaptureError::Io {
+                        path: target.clone(),
+                        source,
+                    })?;
+                }
+            }
+
+            fs::create_dir_all(&target).map_err(|source| CaptureError::Io {
+                path: target,
+                source,
+            })
+        }
+        FileKind::File => {
+            let object_id = version
+                .object_id()
+                .ok_or_else(|| CaptureError::UnsafeRestore {
+                    path: version.path().to_path_buf(),
+                    reason: "file version has no content object".to_string(),
+                })?;
+            let bytes = store
+                .object_cache()
+                .read(object_id)
+                .map_err(CaptureError::Store)?;
+            prepare_file_target(version.path(), &target)?;
+            fs::write(&target, bytes).map_err(|source| CaptureError::Io {
+                path: target,
+                source,
+            })
+        }
+        FileKind::Symlink | FileKind::Unsupported => Err(CaptureError::UnsafeRestore {
+            path: version.path().to_path_buf(),
+            reason: "only regular files and directories can be restored safely".to_string(),
+        }),
+    }
+}
+
+fn prepare_file_target(relative_path: &Path, target: &Path) -> CaptureResult<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|source| CaptureError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to overwrite a symlink".to_string(),
+        }),
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir(target)
+            .map_err(|source| restore_remove_dir_error(relative_path, target, source)),
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CaptureError::Io {
+            path: target.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn remove_current_entry(root: &Path, version: &FileVersion) -> CaptureResult<()> {
+    let target =
+        validate_materialized_relative_path(version.path()).map(|_| root.join(version.path()))?;
+
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CaptureError::UnsafeRestore {
+            path: version.path().to_path_buf(),
+            reason: "refusing to remove a symlink".to_string(),
+        }),
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir(&target)
+            .map_err(|source| restore_remove_dir_error(version.path(), &target, source)),
+        Ok(metadata) if metadata.is_file() => {
+            fs::remove_file(&target).map_err(|source| CaptureError::Io {
+                path: target,
+                source,
+            })
+        }
+        Ok(_) => Err(CaptureError::UnsafeRestore {
+            path: version.path().to_path_buf(),
+            reason: "unsupported filesystem entry".to_string(),
+        }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CaptureError::Io {
+            path: target,
+            source,
+        }),
+    }
+}
+
+fn validate_materialized_relative_path(relative_path: &Path) -> CaptureResult<()> {
+    if relative_path.as_os_str().is_empty() {
+        return Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "empty materialization path".to_string(),
+        });
+    }
+
+    let mut policy_path = PathBuf::new();
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(part) => {
+                policy_path.push(part);
+                if let DirectoryPolicyDecision::Ignore { reason } =
+                    evaluate_directory_policy(&policy_path)
+                {
+                    return Err(CaptureError::UnsafeRestore {
+                        path: relative_path.to_path_buf(),
+                        reason,
+                    });
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(CaptureError::UnsafeRestore {
+                    path: relative_path.to_path_buf(),
+                    reason: "path must stay inside the shared folder".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn restore_remove_dir_error(
+    relative_path: &Path,
+    target: &Path,
+    source: io::Error,
+) -> CaptureError {
+    if matches!(
+        source.kind(),
+        io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::PermissionDenied
+    ) {
+        return CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to remove a non-empty or protected directory".to_string(),
+        };
+    }
+
+    CaptureError::Io {
+        path: target.to_path_buf(),
+        source,
+    }
+}
 
 fn walk_directory(
     object_cache: &ObjectCache,
@@ -781,6 +1171,118 @@ mod tests {
         assert!(!reason.contains(&raw_secret));
     }
 
+    #[test]
+    fn diffs_current_worktree_against_a_folder_revision() {
+        let fixture = TestFolder::new();
+        fixture.write("a.txt", "one\n");
+        fixture.write("b.txt", "two\n");
+        let first_capture = fixture.capture();
+        let first_revision = fixture
+            .store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, first_capture.file_versions())
+            .expect("revision creates")
+            .revision()
+            .clone();
+
+        fixture.write("a.txt", "changed\n");
+        fixture.remove("b.txt");
+        fixture.write("c.txt", "three\n");
+        let current = fixture.capture();
+
+        let diff = diff_revision_to_capture(&first_revision, &current).expect("diff creates");
+
+        assert_eq!(store_paths(diff.created()), vec!["c.txt"]);
+        assert_eq!(store_paths(diff.modified()), vec!["a.txt"]);
+        assert_eq!(store_paths(diff.deleted()), vec!["b.txt"]);
+        assert_eq!(diff.unchanged(), 0);
+    }
+
+    #[test]
+    fn restore_materializes_tracked_source_and_preserves_local_context() {
+        let fixture = TestFolder::new();
+        fixture.write("README.md", "before\n");
+        fixture.write(".git/config", "local git metadata\n");
+        fixture.write("node_modules/pkg/index.js", "module.exports = true;\n");
+        let first_capture = fixture.capture();
+        let first_revision = fixture
+            .store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, first_capture.file_versions())
+            .expect("revision creates")
+            .revision()
+            .clone();
+
+        fixture.write("README.md", "after\n");
+        fixture.write("new.txt", "temporary\n");
+        let current = fixture.capture();
+        let report = RestoreEngine::new(&fixture.store)
+            .restore(&first_revision, &current)
+            .expect("restore applies");
+
+        assert_eq!(report.revision_id(), first_revision.id());
+        assert_eq!(fixture.read("README.md"), "before\n");
+        assert!(!fixture.root.join("new.txt").exists());
+        assert_eq!(fixture.read(".git/config"), "local git metadata\n");
+        assert_eq!(
+            fixture.read("node_modules/pkg/index.js"),
+            "module.exports = true;\n"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_secret_blocked_working_entries() {
+        let fixture = TestFolder::new();
+        fixture.write("README.md", "before\n");
+        let first_capture = fixture.capture();
+        let first_revision = fixture
+            .store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, first_capture.file_versions())
+            .expect("revision creates")
+            .revision()
+            .clone();
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        fixture.write("secrets.env", &format!("OPENAI_API_KEY={raw_secret}\n"));
+        let current = fixture.capture();
+
+        let error = RestoreEngine::new(&fixture.store)
+            .restore(&first_revision, &current)
+            .expect_err("restore refuses blocked files");
+
+        assert!(matches!(error, CaptureError::UnsafeRestore { .. }));
+        assert!(fixture.root.join("secrets.env").exists());
+    }
+
+    #[test]
+    fn restore_rejects_revisions_that_try_to_materialize_git_metadata() {
+        let fixture = TestFolder::new();
+        let object = fixture
+            .store
+            .object_cache()
+            .write_bytes(b"[core]\n")
+            .expect("object writes");
+        let version = FileVersion::new(
+            FileVersionId::new("file-version-git-config").expect("file version id"),
+            ".git/config",
+            FileKind::File,
+            Some(object.id().clone()),
+            Some(object.size_bytes()),
+            "unix:1",
+        )
+        .expect("file version creates");
+        let protected_revision = fixture
+            .store
+            .coalesce_folder_revision(RevisionBoundary::LoomCommand, &[version])
+            .expect("revision creates")
+            .revision()
+            .clone();
+        let current = fixture.capture();
+
+        let error = RestoreEngine::new(&fixture.store)
+            .restore(&protected_revision, &current)
+            .expect_err("restore rejects protected paths");
+
+        assert!(matches!(error, CaptureError::UnsafeRestore { .. }));
+    }
+
     struct TestFolder {
         _dir: tempfile::TempDir,
         root: PathBuf,
@@ -809,6 +1311,14 @@ mod tests {
                 fs::create_dir_all(parent).expect("parent creates");
             }
             fs::write(path, content).expect("file writes");
+        }
+
+        fn read(&self, path: &str) -> String {
+            fs::read_to_string(self.root.join(path)).expect("file reads")
+        }
+
+        fn remove(&self, path: &str) {
+            fs::remove_file(self.root.join(path)).expect("file removes");
         }
 
         fn capture(&self) -> WorktreeCapture {
@@ -859,5 +1369,12 @@ mod tests {
 
             false
         }
+    }
+
+    fn store_paths(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| path_to_store_string(path))
+            .collect()
     }
 }

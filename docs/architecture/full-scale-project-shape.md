@@ -130,6 +130,7 @@ Human CLI:
 loom track
 loom status
 loom history
+loom diff
 loom checkpoint
 loom restore
 loom sync

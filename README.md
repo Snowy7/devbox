@@ -32,7 +32,7 @@ The workspace now has first-class Loom and Devbox platform boundaries:
 - `crates/loom-core` owns canonical Loom vocabulary: objects, file versions, folder revisions,
   checkpoints, pins, cursors, shared folders, and folder scopes.
 - `crates/loom-cli` provides the `loom` binary and the MVP command shape: `track`, `status`,
-  `history`, `checkpoint`, `restore`, `sync`, and `clone`.
+  `history`, `diff`, `checkpoint`, `restore`, `sync`, and `clone`.
 - `crates/loom-store`, `crates/loom-worktree`, `crates/loom-pack`, `crates/loom-sync`,
   `crates/loom-daemon`, and `crates/loom-git` are compileable skeleton boundaries for follow-up
   engine work.

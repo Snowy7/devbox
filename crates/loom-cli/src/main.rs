@@ -1,7 +1,13 @@
 use loom_core::RevisionBoundary;
-use loom_store::{path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore};
-use loom_worktree::{CaptureEngine, CaptureRequest, WorktreeCapture};
-use std::path::PathBuf;
+use loom_store::{
+    path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore,
+    ResolvedRevisionTarget,
+};
+use loom_worktree::{
+    diff_revision_to_capture, CaptureEngine, CaptureRequest, RestoreEngine, WorktreeCapture,
+    WorktreeDiff,
+};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -39,17 +45,24 @@ const COMMANDS: &[CommandSpec] = &[
         planned_behavior: "show automatic folder revisions plus human checkpoints",
     },
     CommandSpec {
+        name: "diff",
+        usage: "loom diff [FOLDER] [REVISION|CHECKPOINT]",
+        summary: "Compare the working folder to local history",
+        implemented: true,
+        planned_behavior: "summarize created, modified, deleted, blocked, and ignored entries",
+    },
+    CommandSpec {
         name: "checkpoint",
         usage: "loom checkpoint [FOLDER] -m <MESSAGE>",
         summary: "Name the current folder revision",
-        implemented: false,
+        implemented: true,
         planned_behavior: "attach a human message to a durable folder revision",
     },
     CommandSpec {
         name: "restore",
-        usage: "loom restore <REVISION>",
+        usage: "loom restore [FOLDER] <REVISION|CHECKPOINT>",
         summary: "Restore a folder revision",
-        implemented: false,
+        implemented: true,
         planned_behavior: "materialize a previous folder revision with safety checks",
     },
     CommandSpec {
@@ -107,6 +120,9 @@ fn run_command(command: &CommandSpec, args: &[String]) -> ExitCode {
         "track" => result_to_exit(run_track(args)),
         "status" => result_to_exit(run_status(args)),
         "history" => result_to_exit(run_history(args)),
+        "diff" => result_to_exit(run_diff(args)),
+        "checkpoint" => result_to_exit(run_checkpoint(args)),
+        "restore" => result_to_exit(run_restore(args)),
         _ => {
             run_placeholder(command);
             ExitCode::SUCCESS
@@ -155,6 +171,8 @@ fn run_status(args: &[String]) -> Result<(), String> {
 fn run_history(args: &[String]) -> Result<(), String> {
     let store = open_existing_store(args)?;
     let revisions = store.revisions().map_err(|error| error.to_string())?;
+    let checkpoints = store.checkpoints().map_err(|error| error.to_string())?;
+    let pins = store.pins().map_err(|error| error.to_string())?;
 
     println!("Folder: {}", store.folder_root().display());
     if revisions.is_empty() {
@@ -178,21 +196,147 @@ fn run_history(args: &[String]) -> Result<(), String> {
         );
     }
 
+    if checkpoints.is_empty() {
+        println!("Checkpoints: none");
+    } else {
+        println!("Checkpoints:");
+        for checkpoint in checkpoints.iter().rev() {
+            let pin_count = pins
+                .iter()
+                .filter(|pin| pin.revision_id() == checkpoint.revision_id())
+                .count();
+            println!(
+                "{}  {}  revision={}  pins={}  {}",
+                checkpoint.id(),
+                checkpoint.created_at(),
+                checkpoint.revision_id(),
+                pin_count,
+                checkpoint.message()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn run_diff(args: &[String]) -> Result<(), String> {
+    let parsed = parse_diff_args(args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let target = match parsed.target {
+        Some(target) => store
+            .resolve_revision_target(&target)
+            .map_err(|error| error.to_string())?,
+        None => ResolvedRevisionTarget::Revision(
+            store
+                .latest_revision()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "no folder revisions yet; run 'loom status' first".to_string())?,
+        ),
+    };
+    let capture = capture_worktree(&store, RevisionBoundary::LoomCommand)?;
+    let diff =
+        diff_revision_to_capture(target.revision(), &capture).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    print_target("Compared to", &target);
+    print_worktree_diff(&diff);
+    print_policy_summary(&capture);
+    print_notices("Blocked", capture.blocked());
+    print_notices("Ignored", capture.ignored());
+    Ok(())
+}
+
+fn run_checkpoint(args: &[String]) -> Result<(), String> {
+    let parsed = parse_checkpoint_args(args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let revision = store
+        .latest_revision()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no folder revisions yet; run 'loom status' first".to_string())?;
+    let capture = capture_worktree(&store, RevisionBoundary::LoomCommand)?;
+    ensure_no_blocked_or_deferred(&capture, "checkpoint")?;
+    let diff = diff_revision_to_capture(&revision, &capture).map_err(|error| error.to_string())?;
+    if diff.has_changes() {
+        return Err(
+            "checkpoint refused because the working folder differs from the latest folder revision; run 'loom status' first"
+                .to_string(),
+        );
+    }
+
+    let checkpoint = store
+        .create_checkpoint(&revision, parsed.message)
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Checkpoint: {}", checkpoint.id());
+    println!("Revision: {}", checkpoint.revision_id());
+    println!("Message: {}", checkpoint.message());
+    println!("Pinned: revision kept for checkpoint retention");
+    Ok(())
+}
+
+fn run_restore(args: &[String]) -> Result<(), String> {
+    let parsed = parse_restore_args(args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let target = store
+        .resolve_revision_target(&parsed.target)
+        .map_err(|error| error.to_string())?;
+    let current = capture_worktree(&store, RevisionBoundary::Restore)?;
+    ensure_no_blocked_or_deferred(&current, "restore")?;
+    let current_diff =
+        diff_revision_to_capture(target.revision(), &current).map_err(|error| error.to_string())?;
+    let pre_restore = store
+        .coalesce_folder_revision(RevisionBoundary::Restore, current.file_versions())
+        .map_err(|error| error.to_string())?;
+    let report = RestoreEngine::new(&store)
+        .restore(target.revision(), &current)
+        .map_err(|error| error.to_string())?;
+    let restored_capture = capture_worktree(&store, RevisionBoundary::Restore)?;
+    let restored = store
+        .coalesce_folder_revision(RevisionBoundary::Restore, restored_capture.file_versions())
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    print_target("Restored", &target);
+    println!("Pre-restore revision: {}", pre_restore.revision().id());
+    println!("Current folder revision: {}", restored.revision().id());
+    println!(
+        "Restore changes: {} removed, {} reverted, {} restored, {} unchanged",
+        report.diff().created().len(),
+        report.diff().modified().len(),
+        report.diff().deleted().len(),
+        current_diff.unchanged()
+    );
     Ok(())
 }
 
 fn capture_and_coalesce(
     store: &LocalStore,
 ) -> Result<(WorktreeCapture, CoalescedRevision), String> {
-    let request = CaptureRequest::new(store.shared_folder().clone(), RevisionBoundary::LoomCommand);
-    let capture = CaptureEngine::new(store.object_cache())
-        .capture(&request)
-        .map_err(|error| error.to_string())?;
+    capture_and_coalesce_with_boundary(store, RevisionBoundary::LoomCommand)
+}
+
+fn capture_and_coalesce_with_boundary(
+    store: &LocalStore,
+    boundary: RevisionBoundary,
+) -> Result<(WorktreeCapture, CoalescedRevision), String> {
+    let capture = capture_worktree(store, boundary)?;
     let coalesced = store
-        .coalesce_folder_revision(RevisionBoundary::LoomCommand, capture.file_versions())
+        .coalesce_folder_revision(boundary, capture.file_versions())
         .map_err(|error| error.to_string())?;
 
     Ok((capture, coalesced))
+}
+
+fn capture_worktree(
+    store: &LocalStore,
+    boundary: RevisionBoundary,
+) -> Result<WorktreeCapture, String> {
+    let request = CaptureRequest::new(store.shared_folder().clone(), boundary);
+    let capture = CaptureEngine::new(store.object_cache())
+        .capture(&request)
+        .map_err(|error| error.to_string())?;
+    Ok(capture)
 }
 
 fn print_capture_result(capture: &WorktreeCapture, coalesced: &CoalescedRevision) {
@@ -236,6 +380,79 @@ fn print_status_summary(capture: &WorktreeCapture, coalesced: &CoalescedRevision
     }
 }
 
+fn print_target(prefix: &str, target: &ResolvedRevisionTarget) {
+    match target {
+        ResolvedRevisionTarget::Revision(revision) => {
+            println!("{prefix}: revision {}", revision.id());
+        }
+        ResolvedRevisionTarget::Checkpoint {
+            checkpoint,
+            revision,
+        } => {
+            println!(
+                "{prefix}: checkpoint {} ({}) -> revision {}",
+                checkpoint.id(),
+                checkpoint.message(),
+                revision.id()
+            );
+        }
+    }
+}
+
+fn print_worktree_diff(diff: &WorktreeDiff) {
+    println!(
+        "Changes: {} created, {} modified, {} deleted, {} unchanged",
+        diff.created().len(),
+        diff.modified().len(),
+        diff.deleted().len(),
+        diff.unchanged()
+    );
+    print_paths("Created", diff.created());
+    print_paths("Modified", diff.modified());
+    print_paths("Deleted", diff.deleted());
+}
+
+fn print_paths(label: &str, paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+
+    println!("{label}:");
+    for path in paths.iter().take(20) {
+        println!("  {}", path_to_store_string(path));
+    }
+    if paths.len() > 20 {
+        println!("  ... {} more", paths.len() - 20);
+    }
+}
+
+fn print_policy_summary(capture: &WorktreeCapture) {
+    println!(
+        "Policy: {} ignored, {} secret-blocked, {} deferred",
+        capture.summary().ignored_entries(),
+        capture.summary().blocked_secret_files(),
+        capture.summary().deferred_entries()
+    );
+}
+
+fn print_notices(label: &str, notices: &[loom_worktree::CaptureNotice]) {
+    if notices.is_empty() {
+        return;
+    }
+
+    println!("{label}:");
+    for notice in notices.iter().take(20) {
+        println!(
+            "  {} ({})",
+            path_to_store_string(notice.relative_path()),
+            notice.reason()
+        );
+    }
+    if notices.len() > 20 {
+        println!("  ... {} more", notices.len() - 20);
+    }
+}
+
 fn required_folder_arg(command: &str, args: &[String]) -> Result<PathBuf, String> {
     match args {
         [folder] => Ok(PathBuf::from(folder)),
@@ -255,6 +472,128 @@ fn open_existing_store(args: &[String]) -> Result<LocalStore, String> {
         [folder] => LocalStore::open(folder).map_err(|error| error.to_string()),
         _ => Err("expected at most one folder argument".to_string()),
     }
+}
+
+fn open_store_from_optional_folder(folder: Option<PathBuf>) -> Result<LocalStore, String> {
+    match folder {
+        Some(folder) => LocalStore::open(folder).map_err(|error| error.to_string()),
+        None => {
+            let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
+            LocalStore::discover_from(current_dir).map_err(|error| error.to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CheckpointArgs {
+    folder: Option<PathBuf>,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct DiffArgs {
+    folder: Option<PathBuf>,
+    target: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RestoreArgs {
+    folder: Option<PathBuf>,
+    target: String,
+}
+
+fn parse_checkpoint_args(args: &[String]) -> Result<CheckpointArgs, String> {
+    let mut folder = None;
+    let mut message = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-m" || arg == "--message" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| "checkpoint requires a message after -m".to_string())?;
+            message = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--message=") {
+            message = Some(value.to_string());
+        } else if folder.is_none() {
+            folder = Some(PathBuf::from(arg));
+        } else {
+            return Err("checkpoint accepts at most one folder".to_string());
+        }
+        index += 1;
+    }
+
+    let message = message.ok_or_else(|| {
+        "checkpoint requires a message\nUsage: loom checkpoint [FOLDER] -m <MESSAGE>".to_string()
+    })?;
+    if message.trim().is_empty() {
+        return Err("checkpoint message cannot be empty".to_string());
+    }
+
+    Ok(CheckpointArgs { folder, message })
+}
+
+fn parse_diff_args(args: &[String]) -> Result<DiffArgs, String> {
+    match args {
+        [] => Ok(DiffArgs {
+            folder: None,
+            target: None,
+        }),
+        [single] if looks_like_folder_arg(single) => Ok(DiffArgs {
+            folder: Some(PathBuf::from(single)),
+            target: None,
+        }),
+        [single] => Ok(DiffArgs {
+            folder: None,
+            target: Some(single.clone()),
+        }),
+        [folder, target] => Ok(DiffArgs {
+            folder: Some(PathBuf::from(folder)),
+            target: Some(target.clone()),
+        }),
+        _ => Err("diff accepts an optional folder and optional revision/checkpoint".to_string()),
+    }
+}
+
+fn parse_restore_args(args: &[String]) -> Result<RestoreArgs, String> {
+    match args {
+        [target] => Ok(RestoreArgs {
+            folder: None,
+            target: target.clone(),
+        }),
+        [folder, target] => Ok(RestoreArgs {
+            folder: Some(PathBuf::from(folder)),
+            target: target.clone(),
+        }),
+        [] => Err("restore requires a revision or checkpoint".to_string()),
+        _ => Err("restore accepts an optional folder plus one revision/checkpoint".to_string()),
+    }
+}
+
+fn looks_like_folder_arg(value: &str) -> bool {
+    Path::new(value).is_dir()
+}
+
+fn ensure_no_blocked_or_deferred(capture: &WorktreeCapture, command: &str) -> Result<(), String> {
+    if let Some(notice) = capture.blocked().first() {
+        return Err(format!(
+            "{command} refused because {} is secret-blocked: {}",
+            path_to_store_string(notice.relative_path()),
+            notice.reason()
+        ));
+    }
+
+    if let Some(notice) = capture.deferred().first() {
+        return Err(format!(
+            "{command} refused because {} is deferred: {}",
+            path_to_store_string(notice.relative_path()),
+            notice.reason()
+        ));
+    }
+
+    Ok(())
 }
 
 fn result_to_exit(result: Result<(), String>) -> ExitCode {
@@ -318,6 +657,7 @@ mod tests {
                 "track",
                 "status",
                 "history",
+                "diff",
                 "checkpoint",
                 "restore",
                 "sync",
