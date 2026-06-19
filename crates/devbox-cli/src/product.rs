@@ -429,16 +429,16 @@ fn capture_worktree(
 fn ensure_no_blocked_or_deferred(capture: &WorktreeCapture, action: &str) -> Result<(), String> {
     if let Some(notice) = capture.blocked().first() {
         return Err(format!(
-            "{action} refused because {} is secret-blocked: {}",
+            "{action} refused because {} {}",
             display_store_path(notice.relative_path()),
-            notice.reason()
+            product_blocked_source_reason(notice.reason())
         ));
     }
     if let Some(notice) = capture.deferred().first() {
         return Err(format!(
-            "{action} refused because {} is deferred: {}",
+            "{action} paused because {} {}",
             display_store_path(notice.relative_path()),
-            notice.reason()
+            product_deferred_source_reason(notice.reason())
         ));
     }
     Ok(())
@@ -1038,12 +1038,14 @@ fn product_daemon_error(error: loom_daemon::DaemonError) -> String {
             "Sync paused because this folder changed in more than one place. Run devbox status before resuming.".to_string()
         }
         loom_daemon::DaemonError::BlockedSource { path, reason } => format!(
-            "Sync paused because {} is blocked by policy: {reason}",
-            display_store_path(&path)
+            "Sync paused because {} {}",
+            display_store_path(&path),
+            product_blocked_source_reason(&reason)
         ),
         loom_daemon::DaemonError::DeferredSource { path, reason } => format!(
-            "Sync paused because {} needs attention before it can be shared: {reason}",
-            display_store_path(&path)
+            "Sync paused because {} {}",
+            display_store_path(&path),
+            product_deferred_source_reason(&reason)
         ),
         loom_daemon::DaemonError::AlreadyRunning { .. } => {
             "Sync is already running for this folder".to_string()
@@ -1063,6 +1065,64 @@ fn product_daemon_error(error: loom_daemon::DaemonError) -> String {
             "Devbox could not update sync for this folder; try again".to_string()
         }
     }
+}
+
+fn product_blocked_source_reason(reason: &str) -> String {
+    let line = value_between(reason, " at line ", ";");
+    let evidence = value_after(reason, "evidence: ");
+    let mut message = "contains a blocked secret pattern".to_string();
+    if let Some(line) = line {
+        message.push_str(&format!(" at line {line}"));
+    }
+    if let Some(evidence) = evidence {
+        message.push_str(&format!(
+            "; evidence: {}",
+            product_safe_reason_fragment(evidence)
+        ));
+    }
+    message.push_str(". Remove it or exclude the file, then try again.");
+    message
+}
+
+fn product_deferred_source_reason(reason: &str) -> String {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("symlink") {
+        return "is a symlink, which Devbox does not share yet. Replace it with a regular file or exclude it, then try again.".to_string();
+    }
+    if lower.contains("unsupported") {
+        return "has an unsupported file type. Remove it or exclude it, then try again."
+            .to_string();
+    }
+    format!(
+        "needs attention before it can be shared: {}. Fix it or exclude it, then try again.",
+        product_safe_reason_fragment(reason)
+    )
+}
+
+fn product_safe_reason_fragment(value: &str) -> String {
+    let sanitized = value
+        .replace("Loom", "Devbox")
+        .replace("loom", "Devbox")
+        .replace("cursor", "sync state")
+        .replace("pack", "shared folder data")
+        .replace("remote", "shared-folder service")
+        .replace("devbox://", "Devbox link");
+    sanitized.trim().trim_end_matches('.').to_string()
+}
+
+fn value_between<'a>(value: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    value
+        .split_once(prefix)
+        .and_then(|(_, rest)| rest.split_once(suffix))
+        .map(|(matched, _)| matched.trim())
+        .filter(|matched| !matched.is_empty())
+}
+
+fn value_after<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .split_once(prefix)
+        .map(|(_, matched)| matched.trim())
+        .filter(|matched| !matched.is_empty())
 }
 
 fn api_url(api: &str, path: &str) -> Result<String, String> {

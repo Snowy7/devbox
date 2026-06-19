@@ -153,8 +153,11 @@ fn secret_blocking_still_applies_through_product_share() {
 
     assert_failure(&share);
     let combined = format!("{}\n{}", stdout(&share), stderr(&share));
-    assert!(combined.contains("secret-blocked"));
+    assert!(combined.contains("blocked secret pattern at line 1"));
+    assert!(combined.contains("evidence: sk-<redacted>"));
+    assert!(combined.contains("Remove it or exclude the file"));
     assert!(!combined.contains(raw_secret));
+    assert_product_output_is_clean(&combined);
 }
 
 #[test]
