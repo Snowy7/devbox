@@ -16,17 +16,19 @@ Import and materialize also require:
 
 ```text
 --metadata-project <PROJECT_ID>
---metadata-account <ACCOUNT_ID>  # or derive from --mock-key-source-db <PUBLISHER_DB>
+--metadata-account <ACCOUNT_ID>  # or legacy-derive from --mock-key-source-db <PUBLISHER_DB>
 ```
 
 That account/project scope lets the receiver discover the manifest object key from hosted metadata
 by `(account_id, project_id, snapshot_id)` before decrypting the encrypted bundle. In the current
 mock-dev CLI path, `--mock-key-source-db <PUBLISHER_DB>` can provide the publisher account id for
-the same local trust bootstrap that provides the decryption key. The default path remains local/mock
-only and still derives the manifest object key locally. Hosted metadata handlers now support
-production-shaped account-session bearer auth, but these local sync commands still use the
-in-process mock-dev SQLite metadata mode and do not perform live OAuth-backed network auth. Managed
-object credential lease records now provide a future path
+the same legacy local trust bootstrap that provides the decryption key. The paired-receiver alpha
+path should omit `--mock-key-source-db`: after `devices join -> approve-join -> complete`, the
+receiver DB already has a local device-key envelope created from the token-wrapped completion. The
+default path remains local/mock only and still derives the manifest object key locally. Hosted
+metadata handlers now support production-shaped account-session bearer auth, but these local sync
+commands still use the in-process mock-dev SQLite metadata mode and do not perform live
+OAuth-backed network auth. Managed object credential lease records now provide a future path
 for resolving redacted hosted R2/S3/MinIO provider configuration by authenticated
 account/session/project scope, but sync commands do not yet fetch live managed cloud credentials.
 
@@ -56,8 +58,9 @@ If hosted compare-and-set returns a stale cursor conflict, the local cursor is n
 keeps a receiver from blindly overwriting newer server-side cursor state.
 
 The hosted cursor uses the hosted/publisher account scope and the receiving device id. The local
-cursor remains stored under the receiver DB's local account/device ids so the receiver's local state
-does not pretend to own the publisher account.
+cursor remains stored under the receiver DB's local account/device ids. For paired receivers, that
+local account id is the publisher account id because pairing completion installs the receiver device
+inside that account boundary.
 
 ## CLI Boundary
 

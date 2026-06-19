@@ -11,7 +11,8 @@ use devbox_auth::{
     revoke_recovery_grant as auth_revoke_recovery_grant, revoke_trusted_device,
     validate_account_ownership_proof, AccountOwnershipProof, AccountSession, AuthSession,
     DeviceProjectCursor, DeviceRotationIntent, DeviceTrustRecord, KeyEnvelope, PairingApproval,
-    PairingInvitation, RecoveryGrant,
+    PairingCompletion, PairingInvitation, PairingInvitationToken, RecoveryGrant,
+    REMOTE_DEVICE_KEY_SENTINEL_HEX,
 };
 use devbox_conflict::{ConflictSummary, PathComparisonState};
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision, ProjectId};
@@ -19,7 +20,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+
+const PENDING_PAIRING_SYNC_KEY_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+pub fn is_pending_pairing_sync_key_hex(value: &str) -> bool {
+    value == PENDING_PAIRING_SYNC_KEY_HEX
+}
 
 const SUMMARY_TABLES: &[&str] = &[
     "projects",
@@ -35,6 +43,7 @@ const SUMMARY_TABLES: &[&str] = &[
     "account_ownership_proofs",
     "account_sessions",
     "pairing_invitations",
+    "pending_pairings",
     "trusted_devices",
     "key_envelopes",
     "recovery_grants",
@@ -256,6 +265,10 @@ impl Store {
             self.conn.execute_batch(MIGRATION_10_SECRET_POLICY_RULES)?;
         }
 
+        if version < 11 {
+            self.conn.execute_batch(MIGRATION_11_PENDING_PAIRING)?;
+        }
+
         Ok(())
     }
 
@@ -472,6 +485,248 @@ impl Store {
         })
     }
 
+    pub fn prepare_pairing_receiver_identity(
+        &mut self,
+        token: &PairingInvitationToken,
+        device_name: &str,
+    ) -> StoreResult<LocalIdentityRecord> {
+        if let Some(identity) = self.local_identity()? {
+            if identity.account_id != token.account_id {
+                return Err(StoreError::InvalidStoredValue(
+                    "local identity is already initialized for a different account".to_string(),
+                ));
+            }
+            if identity.sync_key_hex != PENDING_PAIRING_SYNC_KEY_HEX {
+                return Err(StoreError::InvalidStoredValue(
+                    "local identity is already paired; refusing to start a new pending pairing"
+                        .to_string(),
+                ));
+            }
+            self.persist_pending_pairing(token, &identity.device_id)?;
+            return Ok(identity);
+        }
+
+        let created_at = self.current_timestamp()?;
+        let device_id = random_prefixed_id("device")?;
+        let device_key_hex = random_key_hex()?;
+        let display_name = if device_name.trim().is_empty() {
+            "paired device"
+        } else {
+            device_name.trim()
+        };
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO local_accounts (id, display_name, sync_key_hex, created_at)
+            VALUES (?1, 'paired account', ?2, ?3)
+            "#,
+            params![token.account_id, PENDING_PAIRING_SYNC_KEY_HEX, created_at],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO local_devices (
+                id,
+                account_id,
+                display_name,
+                device_key_hex,
+                is_local,
+                created_at,
+                last_seen_at
+            )
+            VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+            "#,
+            params![
+                device_id,
+                token.account_id,
+                display_name,
+                device_key_hex,
+                created_at
+            ],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO pending_pairings (
+                invitation_id,
+                account_id,
+                receiver_device_id,
+                pairing_token,
+                created_at,
+                completed_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+            "#,
+            params![
+                token.id,
+                token.account_id,
+                device_id,
+                token.expose_for_cli(),
+                created_at,
+            ],
+        )?;
+        tx.commit()?;
+
+        self.local_identity()?.ok_or_else(|| {
+            StoreError::InvalidMigrationState(
+                "paired receiver identity was not persisted".to_string(),
+            )
+        })
+    }
+
+    pub fn complete_pairing_for_local_device(
+        &mut self,
+        completion: &PairingCompletion,
+    ) -> StoreResult<LocalIdentityRecord> {
+        let identity = self.local_identity()?.ok_or_else(|| {
+            StoreError::InvalidStoredValue("local identity is missing".to_string())
+        })?;
+        if completion.account_id != identity.account_id
+            || completion.device_id != identity.device_id
+        {
+            return Err(StoreError::InvalidStoredValue(
+                "pairing completion does not match the local account/device".to_string(),
+            ));
+        }
+        if identity.sync_key_hex != PENDING_PAIRING_SYNC_KEY_HEX {
+            return Err(StoreError::InvalidStoredValue(
+                "pairing is already completed for the local device".to_string(),
+            ));
+        }
+        let pending_token = self.pending_pairing_token(&completion.invitation_id)?;
+        let token = PairingInvitationToken::parse(&pending_token)
+            .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        let sync_key_hex = completion
+            .open_with_token(&token)
+            .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        let local_envelope = create_key_envelope(
+            &identity.account_id,
+            &identity.device_id,
+            &identity.device_key_hex,
+            &sync_key_hex,
+            &completion.envelope.created_at,
+        )
+        .map_err(|error| StoreError::InvalidStoredValue(error.to_string()))?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO key_envelopes (
+                id,
+                account_id,
+                device_id,
+                key_ref,
+                ciphertext_hex,
+                created_at,
+                rotation_generation
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                local_envelope.id,
+                local_envelope.account_id,
+                local_envelope.device_id,
+                local_envelope.key_ref,
+                local_envelope.ciphertext_hex,
+                local_envelope.created_at,
+                local_envelope.rotation_generation as i64,
+            ],
+        )?;
+        let updated_account = tx.execute(
+            r#"
+            UPDATE local_accounts
+            SET sync_key_hex = ?1
+            WHERE id = ?2 AND sync_key_hex = ?3
+            "#,
+            params![
+                sync_key_hex,
+                identity.account_id,
+                PENDING_PAIRING_SYNC_KEY_HEX
+            ],
+        )?;
+        if updated_account != 1 {
+            return Err(StoreError::InvalidStoredValue(
+                "pairing completion cannot overwrite completed local key state".to_string(),
+            ));
+        }
+        let completed = tx.execute(
+            r#"
+            UPDATE pending_pairings
+            SET completed_at = ?1
+            WHERE invitation_id = ?2
+                AND receiver_device_id = ?3
+                AND completed_at IS NULL
+            "#,
+            params![
+                completion.envelope.created_at,
+                completion.invitation_id,
+                identity.device_id,
+            ],
+        )?;
+        if completed != 1 {
+            return Err(StoreError::InvalidStoredValue(
+                "pairing completion was already consumed or is not pending".to_string(),
+            ));
+        }
+        tx.commit()?;
+
+        self.local_identity()?.ok_or_else(|| {
+            StoreError::InvalidMigrationState(
+                "paired receiver identity was not available after completion".to_string(),
+            )
+        })
+    }
+
+    fn persist_pending_pairing(
+        &mut self,
+        token: &PairingInvitationToken,
+        receiver_device_id: &str,
+    ) -> StoreResult<()> {
+        let created_at = self.current_timestamp()?;
+        self.conn.execute(
+            r#"
+            INSERT INTO pending_pairings (
+                invitation_id,
+                account_id,
+                receiver_device_id,
+                pairing_token,
+                created_at,
+                completed_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+            ON CONFLICT(invitation_id) DO UPDATE SET
+                pairing_token = excluded.pairing_token,
+                receiver_device_id = excluded.receiver_device_id
+            "#,
+            params![
+                token.id,
+                token.account_id,
+                receiver_device_id,
+                token.expose_for_cli(),
+                created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn pending_pairing_token(&self, invitation_id: &str) -> StoreResult<String> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT pairing_token
+                FROM pending_pairings
+                WHERE invitation_id = ?1
+                    AND completed_at IS NULL
+                "#,
+                params![invitation_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::InvalidStoredValue(format!(
+                    "pending pairing not found for invitation: {invitation_id}"
+                ))
+            })
+    }
+
     pub fn local_identity(&self) -> StoreResult<Option<LocalIdentityRecord>> {
         self.conn
             .query_row(
@@ -507,6 +762,18 @@ impl Store {
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    pub fn completed_local_identity(&self) -> StoreResult<Option<LocalIdentityRecord>> {
+        let Some(identity) = self.local_identity()? else {
+            return Ok(None);
+        };
+        if identity.sync_key_hex == PENDING_PAIRING_SYNC_KEY_HEX {
+            return Err(StoreError::InvalidStoredValue(
+                "local identity is pending pairing completion".to_string(),
+            ));
+        }
+        Ok(Some(identity))
     }
 
     pub fn list_devices(&self) -> StoreResult<Vec<DeviceRecord>> {
@@ -1363,6 +1630,12 @@ impl Store {
         if existing.rotation_generation != stored_intent.key_envelope_generation {
             return Err(StoreError::InvalidStoredValue(
                 "device rotation intent generation is stale".to_string(),
+            ));
+        }
+        if device_key_hex == REMOTE_DEVICE_KEY_SENTINEL_HEX {
+            return Err(StoreError::InvalidStoredValue(
+                "device key envelope cannot be rotated from a source-side receiver record"
+                    .to_string(),
             ));
         }
 
@@ -3682,6 +3955,30 @@ PRAGMA user_version = 10;
 COMMIT;
 "#;
 
+const MIGRATION_11_PENDING_PAIRING: &str = r#"
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS pending_pairings (
+    invitation_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES local_accounts(id) ON DELETE CASCADE,
+    receiver_device_id TEXT NOT NULL REFERENCES local_devices(id) ON DELETE CASCADE,
+    pairing_token TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE (receiver_device_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_pairings_account_completed
+    ON pending_pairings(account_id, completed_at);
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (11, 'pending_pairing_completion_state');
+
+PRAGMA user_version = 11;
+
+COMMIT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4160,6 +4457,112 @@ mod tests {
         for id in approved_device_ids {
             assert!(trust.iter().any(|device| device.device_id == id));
         }
+    }
+
+    #[test]
+    fn receiver_pairing_completion_installs_local_sync_key_without_source_db() {
+        let mut source = migrated_store();
+        let source_identity = source
+            .ensure_local_identity(&EnsureLocalIdentityOptions {
+                device_name: Some("Source"),
+            })
+            .expect("source identity initializes");
+        let source_view = local_identity_view(&source_identity);
+        let draft =
+            devbox_auth::create_pairing_invitation(&source_view, "2026-06-18T10:00:00Z", 100, 600)
+                .expect("invitation creates");
+        source
+            .insert_pairing_invitation(&draft.invitation)
+            .expect("invitation persists");
+
+        let mut receiver = migrated_store();
+        let receiver_identity = receiver
+            .prepare_pairing_receiver_identity(&draft.token, "Receiver laptop")
+            .expect("receiver identity prepares");
+        assert_eq!(receiver_identity.account_id, source_identity.account_id);
+        assert_eq!(receiver_identity.sync_key_hex, PENDING_PAIRING_SYNC_KEY_HEX);
+        let join =
+            devbox_auth::create_pairing_join_request(&draft.token, &receiver_identity.device_id)
+                .expect("join creates");
+        assert!(!join
+            .expose_for_cli()
+            .contains(&receiver_identity.device_key_hex));
+        let loaded = source
+            .pairing_invitation(&draft.invitation.id)
+            .expect("invitation reads")
+            .expect("invitation exists");
+        let approval = devbox_auth::approve_pairing_join_request(
+            &source_view,
+            &loaded,
+            &draft.token,
+            &join,
+            "Receiver laptop",
+            "2026-06-18T10:01:00Z",
+            101,
+        )
+        .expect("join approves");
+        source
+            .persist_pairing_approval(&approval)
+            .expect("approval persists");
+        assert_ne!(
+            approval.device.device_key_hex,
+            receiver_identity.device_key_hex
+        );
+        let source_envelope = source
+            .key_envelope_for_device(&approval.device.device_id)
+            .expect("source envelope reads")
+            .expect("source envelope exists");
+        let source_rotation = rotation_intent_for(
+            &source_identity.account_id,
+            &approval.device.device_id,
+            source_envelope.rotation_generation,
+            101,
+            600,
+        );
+        source
+            .upsert_device_rotation_intent(&source_rotation)
+            .expect("source rotation intent persists");
+        let source_rotation_error = source
+            .rotate_key_envelope_for_device(
+                &source_rotation,
+                &source_identity.sync_key_hex,
+                "2026-06-18T10:02:00Z",
+                102,
+            )
+            .expect_err("source-side receiver record cannot rotate");
+        assert!(source_rotation_error
+            .to_string()
+            .contains("source-side receiver record"));
+        let completion = devbox_auth::pairing_completion_from_approval(&approval);
+        let mut wrong_invitation = completion.clone();
+        wrong_invitation.invitation_id = "invitation-other".to_string();
+        let wrong_invitation_error = receiver
+            .complete_pairing_for_local_device(&wrong_invitation)
+            .expect_err("wrong invitation completion is rejected");
+        assert!(wrong_invitation_error
+            .to_string()
+            .contains("pending pairing not found"));
+
+        let completed = receiver
+            .complete_pairing_for_local_device(&completion)
+            .expect("receiver completes pairing");
+
+        assert_eq!(completed.account_id, source_identity.account_id);
+        assert_eq!(completed.device_id, receiver_identity.device_id);
+        assert_eq!(completed.sync_key_hex, source_identity.sync_key_hex);
+        let stored_envelope = receiver
+            .key_envelope_for_device(&receiver_identity.device_id)
+            .expect("envelope reads")
+            .expect("envelope exists");
+        assert_eq!(stored_envelope.key_ref, "account-sync-key-v1");
+        assert_ne!(
+            stored_envelope.ciphertext_hex,
+            completion.envelope.ciphertext_hex
+        );
+        let replay = receiver
+            .complete_pairing_for_local_device(&completion)
+            .expect_err("completion replay is rejected");
+        assert!(replay.to_string().contains("already completed"));
     }
 
     #[test]

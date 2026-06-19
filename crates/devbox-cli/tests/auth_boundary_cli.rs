@@ -70,6 +70,204 @@ fn mock_verified_bootstrap_and_proof_check_never_print_or_persist_raw_token() {
 }
 
 #[test]
+fn receiver_pairing_cli_flow_creates_fresh_receiver_db_without_key_leaks() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source_db = dir.path().join("source.sqlite3");
+    let receiver_db = dir.path().join("receiver.sqlite3");
+    let devbox = env!("CARGO_BIN_EXE_devbox");
+
+    let init = Command::new(devbox)
+        .args([
+            "init",
+            "--db",
+            source_db.to_str().expect("source db path is utf8"),
+            "--device-name",
+            "Desk",
+        ])
+        .output()
+        .expect("source init runs");
+    assert!(init.status.success(), "{}", stderr(&init));
+
+    let invite = Command::new(devbox)
+        .args([
+            "devices",
+            "invite",
+            "--db",
+            source_db.to_str().expect("source db path is utf8"),
+        ])
+        .output()
+        .expect("invite runs");
+    assert!(invite.status.success(), "{}", stderr(&invite));
+    let invite_stdout = stdout(&invite);
+    let token = line_value(&invite_stdout, "Pairing token: ");
+    assert!(token.starts_with("devbox-pair-v1:"));
+
+    let join = Command::new(devbox)
+        .env("DEVBOX_PAIRING_TOKEN", &token)
+        .args([
+            "devices",
+            "join",
+            "--db",
+            receiver_db.to_str().expect("receiver db path is utf8"),
+            "--token-env",
+            "DEVBOX_PAIRING_TOKEN",
+            "--device-name",
+            "Laptop",
+        ])
+        .output()
+        .expect("join runs");
+    assert!(join.status.success(), "{}", stderr(&join));
+    assert!(receiver_db.exists());
+    let join_stdout = stdout(&join);
+    assert!(!join_stdout.contains(&token));
+    let join_request = export_value(&join_stdout, "DEVBOX_PAIRING_JOIN_REQUEST");
+
+    let pending_upload = Command::new(devbox)
+        .args([
+            "sync",
+            "upload",
+            "--db",
+            receiver_db.to_str().expect("receiver db path is utf8"),
+            "--cache",
+            dir.path()
+                .join("receiver-cache")
+                .to_str()
+                .expect("cache path is utf8"),
+            "--remote",
+            dir.path()
+                .join("remote")
+                .to_str()
+                .expect("remote path is utf8"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .output()
+        .expect("pending upload runs");
+    assert!(
+        !pending_upload.status.success(),
+        "{}",
+        stdout(&pending_upload)
+    );
+    let pending_upload_stderr = stderr(&pending_upload);
+    assert!(
+        pending_upload_stderr.contains("local identity is pending pairing completion"),
+        "{pending_upload_stderr}"
+    );
+
+    let pending_download = Command::new(devbox)
+        .args([
+            "sync",
+            "download",
+            "--db",
+            receiver_db.to_str().expect("receiver db path is utf8"),
+            "--cache",
+            dir.path()
+                .join("receiver-cache")
+                .to_str()
+                .expect("cache path is utf8"),
+            "--remote",
+            dir.path()
+                .join("remote")
+                .to_str()
+                .expect("remote path is utf8"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .output()
+        .expect("pending download runs");
+    assert!(
+        !pending_download.status.success(),
+        "{}",
+        stdout(&pending_download)
+    );
+    let pending_download_stderr = stderr(&pending_download);
+    assert!(
+        pending_download_stderr.contains("local identity is pending pairing completion"),
+        "{pending_download_stderr}"
+    );
+
+    for command in ["publish-snapshot", "import-snapshot", "materialize"] {
+        let mut pending = Command::new(devbox);
+        pending.args([
+            "sync",
+            command,
+            "--db",
+            receiver_db.to_str().expect("receiver db path is utf8"),
+            "--cache",
+            dir.path()
+                .join("receiver-cache")
+                .to_str()
+                .expect("cache path is utf8"),
+            "--remote",
+            dir.path()
+                .join("remote")
+                .to_str()
+                .expect("remote path is utf8"),
+        ]);
+        if command == "materialize" {
+            pending.args([
+                "--to",
+                dir.path()
+                    .join("target")
+                    .to_str()
+                    .expect("target path is utf8"),
+            ]);
+        }
+        let pending = pending
+            .arg("snapshot-pending")
+            .output()
+            .expect("pending snapshot sync runs");
+        assert!(!pending.status.success(), "{}", stdout(&pending));
+        let pending_stderr = stderr(&pending);
+        assert!(
+            pending_stderr.contains("local identity is pending pairing completion"),
+            "{command}: {pending_stderr}"
+        );
+    }
+
+    let approve = Command::new(devbox)
+        .env("DEVBOX_PAIRING_TOKEN", &token)
+        .env("DEVBOX_PAIRING_JOIN_REQUEST", &join_request)
+        .args([
+            "devices",
+            "approve-join",
+            "--db",
+            source_db.to_str().expect("source db path is utf8"),
+            "--token-env",
+            "DEVBOX_PAIRING_TOKEN",
+            "--join-request-env",
+            "DEVBOX_PAIRING_JOIN_REQUEST",
+            "--device-name",
+            "Laptop",
+        ])
+        .output()
+        .expect("approve join runs");
+    assert!(approve.status.success(), "{}", stderr(&approve));
+    let approve_stdout = stdout(&approve);
+    assert!(!approve_stdout.contains(&token));
+    assert!(!approve_stdout.contains(&join_request));
+    let completion = export_value(&approve_stdout, "DEVBOX_PAIRING_COMPLETION");
+
+    let complete = Command::new(devbox)
+        .env("DEVBOX_PAIRING_COMPLETION", &completion)
+        .args([
+            "devices",
+            "complete",
+            "--db",
+            receiver_db.to_str().expect("receiver db path is utf8"),
+            "--completion-env",
+            "DEVBOX_PAIRING_COMPLETION",
+        ])
+        .output()
+        .expect("complete runs");
+    assert!(complete.status.success(), "{}", stderr(&complete));
+    let complete_stdout = stdout(&complete);
+    assert!(complete_stdout.contains("Pairing completed"));
+    assert!(
+        complete_stdout.contains("Receiver can import/materialize without --mock-key-source-db")
+    );
+    assert!(!complete_stdout.contains(&completion));
+}
+
+#[test]
 fn managed_object_credential_lease_cli_never_prints_or_persists_raw_cloud_material() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = dir.path().join("metadata.sqlite3");
@@ -299,4 +497,22 @@ fn stdout(output: &std::process::Output) -> String {
 
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn line_value(output: &str, prefix: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .expect("line with prefix exists")
+        .to_string()
+}
+
+fn export_value(output: &str, name: &str) -> String {
+    let prefix = format!("export {name}='");
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .and_then(|value| value.strip_suffix('\''))
+        .expect("export line exists")
+        .to_string()
 }

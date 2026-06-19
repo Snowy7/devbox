@@ -20,10 +20,15 @@ now opt into an in-process mock-dev hosted metadata store for manifest discovery
 cursor compare-and-set, but the default remains local/mock only. Production-shaped account/session
 proof primitives exist for future hosted auth, but this materialization path does not enforce them
 yet. Local preflight now refuses divergent local/mock import/materialize paths and persists local
-conflict records, but it does not resolve or merge them. The manual smoke path can use
-`--mock-key-source-db` so a receiving local context can decrypt a publisher's locally encrypted
-objects without printing raw key material. That flag is a test/dev trust bootstrap, not a production
-key exchange.
+conflict records, but it does not resolve or merge them.
+
+The current alpha path can pair a fresh receiving DB without copying or opening the publisher DB:
+`devices join` creates the receiver-generated local device identity, `devices approve-join` returns a
+token-wrapped completion payload without learning the receiver local device key, and
+`devices complete` opens that completion and installs a local device-key envelope into the receiver
+DB. The older `--mock-key-source-db` flag remains as a
+test/dev trust bootstrap for legacy smoke paths; it is not the preferred paired-device path and is
+not a production key exchange.
 
 ## Domain Boundary
 
@@ -94,11 +99,19 @@ existing restore safety rules still apply:
 
 ```text
 devbox init --db <SOURCE_DB> --device-name Desk
-devbox init --db <RECEIVER_DB> --device-name Laptop
 devbox snapshot --db <SOURCE_DB> --cache <SOURCE_CACHE> <PROJECT_ROOT>
 devbox sync publish-snapshot --db <SOURCE_DB> --cache <SOURCE_CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
-devbox sync import-snapshot --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> --mock-key-source-db <SOURCE_DB> <SNAPSHOT_ID>
-devbox sync materialize --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> --to <TARGET> --mock-key-source-db <SOURCE_DB> <SNAPSHOT_ID> --apply
+
+devbox devices invite --db <SOURCE_DB>
+export DEVBOX_PAIRING_TOKEN='<printed-token>'
+devbox devices join --db <RECEIVER_DB> --token-env DEVBOX_PAIRING_TOKEN --device-name Laptop
+export DEVBOX_PAIRING_JOIN_REQUEST='<printed-join-request>'
+devbox devices approve-join --db <SOURCE_DB> --token-env DEVBOX_PAIRING_TOKEN --join-request-env DEVBOX_PAIRING_JOIN_REQUEST --device-name Laptop
+export DEVBOX_PAIRING_COMPLETION='<printed-completion>'
+devbox devices complete --db <RECEIVER_DB> --completion-env DEVBOX_PAIRING_COMPLETION
+
+devbox sync import-snapshot --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
+devbox sync materialize --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> --to <TARGET> <SNAPSHOT_ID> --apply
 ```
 
 The same imported snapshot can also be materialized with:
@@ -111,9 +124,11 @@ devbox snapshot restore --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --to <TARGET
 
 For dev/test wiring, add `--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>` to publish.
 For import/materialize, also pass `--metadata-project <PROJECT_ID>` and either
-`--metadata-account <ACCOUNT_ID>` or the existing `--mock-key-source-db <PUBLISHER_DB>` local/mock
-trust bootstrap. That account/project scope lets the manifest object key be looked up from
-publisher-scoped hosted metadata instead of derived locally. Cursor advancement uses hosted
+`--metadata-account <ACCOUNT_ID>` or the legacy `--mock-key-source-db <PUBLISHER_DB>` local/mock
+trust bootstrap. A completed paired receiver should pass `--metadata-account <ACCOUNT_ID>` and omit
+`--mock-key-source-db`; its local DB already has the decryptable account sync key envelope. That
+account/project scope lets the manifest object key be looked up from publisher-scoped hosted
+metadata instead of derived locally. Cursor advancement uses hosted
 compare-and-set first under the hosted account scope and receiver device id; if the hosted cursor is
 stale, the local cursor remains unchanged.
 

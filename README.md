@@ -32,7 +32,10 @@ This repository currently contains the product foundation and MVP planning artif
   account-session auth resolved through the hosted session store. Hosted metadata now also models
   managed object credential leases with account/session/project scoping, R2/S3/MinIO-shaped provider
   references, redacted credential references, expiration, revocation, and rotation generation. Local
-  pairing now includes no-network recovery grants and device key-envelope rotation intents for future
+  pairing now includes receiver-generated join/complete handoff, so a paired laptop can install its
+  own local account key envelope and materialize without opening the publisher DB or sharing its
+  local device key with the source. It also
+  includes no-network recovery grants and device key-envelope rotation intents for future
   production pairing/recovery flows. The hosted metadata service can now run as a single-instance
   alpha API with one-time invite login, bearer session status/logout, `/ready`, and mock-dev auth
   disabled by default in the server binary. The private-alpha desktop shell now provides a
@@ -60,6 +63,10 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox auth hosted-logout --api <URL> [--session-token-env <ENV>]`
 - `devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>`
 - `devbox auth revoke-session --db <DB_PATH> <SESSION_ID>`
+- `devbox devices invite --db <SOURCE_DB> [--ttl-seconds <SECONDS>]`
+- `devbox devices join --db <RECEIVER_DB> --token-env <ENV> --device-name <NAME>`
+- `devbox devices approve-join --db <SOURCE_DB> --token-env <ENV> --join-request-env <ENV> --device-name <NAME>`
+- `devbox devices complete --db <RECEIVER_DB> --completion-env <ENV>`
 - `devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF>`
 - `devbox devices recovery revoke --db <DB_PATH> <GRANT_ID>`
 - `devbox devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>`
@@ -70,14 +77,16 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 
 - `devbox sync publish-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>`
-- `devbox sync import-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --mock-key-source-db <PUBLISHER_DB>`
-- `devbox sync materialize ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --mock-key-source-db <PUBLISHER_DB>`
+- `devbox sync import-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --metadata-account <ACCOUNT_ID>`
+- `devbox sync materialize ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --metadata-account <ACCOUNT_ID>`
 
 For import/materialize, the hosted metadata account scope is either passed explicitly with
 `--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
-local/mock trust bootstrap. Invite-based hosted alpha login and session-auth hosted metadata request
-handling exist, but OAuth, production credential brokering, production deployment hardening, and UI
-onboarding remain deferred.
+legacy local/mock trust bootstrap. New paired receiver flows should run `devices join`,
+`devices approve-join`, and `devices complete` first; after completion the receiver can decrypt with
+its own local key state and does not need `--mock-key-source-db`. Invite-based hosted alpha login
+and session-auth hosted metadata request handling exist, but OAuth, production credential brokering,
+production deployment hardening, and UI onboarding remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the project root. Created, modified, and deleted files become pending local operations in

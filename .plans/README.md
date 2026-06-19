@@ -32,7 +32,9 @@ bearer session status/logout, and mock-dev auth disabled by default in the serve
 Hosted metadata now also models account/session/project-scoped managed object credential leases
 with redacted provider references, expiration, revocation, rotation generation, and no-network
 mock/dev CLI smoke commands. Local pairing now includes no-network recovery grant references,
-revocation, device rotation intents, and key-envelope rotation generation. The final private-alpha
+receiver-generated join/complete handoff, revocation, device rotation intents, and key-envelope
+rotation generation. Paired receivers can now materialize with their own local key state instead of
+opening the publisher DB. The final private-alpha
 surface now adds a no-network Electron shell, explicit path-scoped secret policy records, and guarded
 manual conflict resolution records. OAuth/OIDC provider login, live Cloudflare/AWS credential
 provisioning, production pairing UX, automatic merge/apply resolution, paid/team/agent/Git

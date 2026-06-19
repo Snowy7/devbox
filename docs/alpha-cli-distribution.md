@@ -84,7 +84,8 @@ The current real-R2 smoke path is still local/manual:
 
 - object bytes go to R2
 - snapshot metadata can live in local SQLite, with hosted auth now available separately
-- device trust is bootstrapped with `--mock-key-source-db`
+- device trust can now use receiver-generated pairing with `devices join`, `devices approve-join`,
+  and `devices complete`
 - production credential leasing and production key exchange are deferred to the next alpha PRs
 - the Electron app is not yet wired to live daemon/API state
 
@@ -169,6 +170,9 @@ Current safe alpha setup:
 - each tester gets their own bucket or tightly controlled credential
 - each tester keeps credentials in `.env.r2.local`
 - do not share one long-lived bucket token across untrusted testers
-- `--mock-key-source-db` is still required so the receiver can decrypt publisher objects
+- for same-user two-device tests, run the receiver-generated pairing flow before import/materialize
+  so the receiver can decrypt without `--mock-key-source-db`
+- `--mock-key-source-db` remains only for legacy local smoke tests where both SQLite DBs are on the
+  same machine
 
 Prefixes are useful for organization, but they are not the security boundary yet.
