@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/package-cli.sh [VERSION]
 
-Builds and packages the Devbox CLI for the current macOS/Linux host.
+Builds and packages Devbox alpha command-line tools for the current macOS/Linux host.
 
 Environment:
   DEVBOX_RELEASE_TARGET   Optional Rust target triple.
@@ -67,11 +67,23 @@ rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 
 rustup target add "$target"
-cargo build --release --locked -p devbox-cli --target "$target"
+cargo build --release --locked \
+  -p devbox-cli \
+  -p devbox-daemon \
+  -p devbox-metadata \
+  --target "$target"
 
 cp "$repo_root/target/$target/release/devbox" "$stage_dir/devbox"
+cp "$repo_root/target/$target/release/devbox-daemon" "$stage_dir/devbox-daemon"
+cp "$repo_root/target/$target/release/devbox-metadata" "$stage_dir/devbox-metadata"
 cp "$repo_root/README.md" "$stage_dir/README.md"
 cp "$repo_root/LICENSE" "$stage_dir/LICENSE"
+cp "$repo_root/.env.example" "$stage_dir/.env.example"
+mkdir -p "$stage_dir/scripts" "$stage_dir/docs"
+cp "$repo_root/scripts/load-r2-env.sh" "$stage_dir/scripts/load-r2-env.sh"
+cp "$repo_root/scripts/devbox-live-sync-alpha.sh" "$stage_dir/scripts/devbox-live-sync-alpha.sh"
+cp "$repo_root/scripts/alpha-two-device-smoke.sh" "$stage_dir/scripts/alpha-two-device-smoke.sh"
+cp "$repo_root/docs/alpha-cli-distribution.md" "$stage_dir/docs/alpha-cli-distribution.md"
 
 tar -czf "$archive" -C "$dist_dir" "$package_name"
 

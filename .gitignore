@@ -62,4 +62,5 @@ venv/
 
 # Local devbox data
 .devbox/
+.devbox-alpha-evidence/
 .devbox-cache/

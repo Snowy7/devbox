@@ -14,8 +14,8 @@ The implementation is local-first:
 
 It does not add production auth, managed R2/S3 credential provisioning, automatic merge/apply
 resolution, Git replacement UX, or a hosted conflict service. The Electron alpha shell can now show
-fixture-backed conflict state and CLI command hints, while real daemon IPC remains a later
-integration point. A hosted metadata API
+redacted env-backed conflict state, hosted config, object-access scope, pairing, and CLI/daemon
+command hints, while real daemon IPC remains a later integration point. A hosted metadata API
 foundation now models server-side compare-and-set cursors, and the opt-in mock-dev sync wiring can
 use that hosted cursor CAS. The preflight comparison and conflict records remain local.
 

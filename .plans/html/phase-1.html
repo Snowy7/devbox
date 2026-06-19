@@ -68,9 +68,11 @@
             <h3>CLI and Minimal UI</h3>
             <ul class="checklist">
               <li>`devbox init`, `devices`, `sync`, `pause`, `restore`.</li>
-              <li>Minimal Electron shell for alpha onboarding and status.</li>
-              <li>Tray state: idle, syncing, paused, warning.</li>
-              <li>Fixture-backed no-network control surface for projects, conflicts, devices, secrets, and settings.</li>
+          <li>Env-backed Electron shell for alpha onboarding, status, hosted config, object-access grants, pairing, and live sync commands.</li>
+          <li>Tray state: ready, needs-config, command-only, blocked.</li>
+          <li>Redacted control surface for local paths, projects, conflicts, devices, secrets, remote prefix state, and settings.</li>
+          <li>macOS/Linux alpha release scripts for CLI/daemon/metadata tools and unsigned desktop bundles.</li>
+          <li>Deterministic two-device smoke harness with redacted evidence logs.</li>
               <li>Support bundle without source content by default.</li>
             </ul>
           </article>
@@ -108,8 +110,8 @@
           <li>Local high-confidence secret detection blocks detected files before blob-cache writes and uploadable local/mock sync blobs.</li>
           <li>Local conflict-as-divergent-snapshot compare and persistence metadata records readable path-level divergence without source bytes.</li>
           <li>Local sync preflight refuses divergent import/materialization before receiver file blobs are downloaded or applied, and leaves cursors unchanged when conflicts are created.</li>
-          <li>No-network Electron alpha shell, explicit path-scoped secret policy records, and guarded manual conflict resolution records are now in place.</li>
-          <li>OAuth/OIDC login, hosted object proxy or signed URL transfer, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
+          <li>Env-backed redacted Electron alpha shell, explicit path-scoped secret policy records, guarded manual conflict resolution records, alpha package scripts, and deterministic two-device smoke evidence are now in place.</li>
+          <li>OAuth/OIDC login, hosted object proxy or signed URL transfer, signed installers, live Cloudflare/AWS object credential provisioning, production pairing/recovery UX, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
         </ul>
       </section>
 

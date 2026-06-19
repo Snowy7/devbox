@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+package_root="$(cd "$script_dir/.." && pwd)"
 env_file="${1:-.env.r2.local}"
 if [[ -f "$env_file" ]]; then
   set -a
@@ -9,7 +11,13 @@ if [[ -f "$env_file" ]]; then
   set +a
 fi
 
-daemon_bin="${DEVBOX_DAEMON_BIN:-devbox-daemon}"
+if [[ -n "${DEVBOX_DAEMON_BIN:-}" ]]; then
+  daemon_bin="$DEVBOX_DAEMON_BIN"
+elif [[ -x "$package_root/devbox-daemon" ]]; then
+  daemon_bin="$package_root/devbox-daemon"
+else
+  daemon_bin="devbox-daemon"
+fi
 mode="${DEVBOX_LIVE_MODE:-push}"
 db="${DEVBOX_LIVE_DB:?set DEVBOX_LIVE_DB}"
 cache="${DEVBOX_LIVE_CACHE:?set DEVBOX_LIVE_CACHE}"

@@ -5,6 +5,9 @@ import { join } from "node:path";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const files = [
   "src/shared/alphaState.ts",
+  "src/main.ts",
+  "src/preload.ts",
+  "src/renderer/devbox.d.ts",
   "src/renderer/App.tsx"
 ];
 

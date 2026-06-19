@@ -38,9 +38,10 @@ prefixes, expiration, revocation, rotation generation, hosted CLI resolution, an
 mock/dev CLI smoke commands. Local pairing now includes no-network recovery grant references,
 receiver-generated join/complete handoff, revocation, device rotation intents, and key-envelope
 rotation generation. Paired receivers can now materialize with their own local key state instead of
-opening the publisher DB. The final private-alpha
-surface now adds a no-network Electron shell, explicit path-scoped secret policy records, and guarded
-manual conflict resolution records. OAuth/OIDC provider login, hosted object proxy/signed URL data
-transfer, live Cloudflare/AWS credential provisioning, production pairing UX, automatic merge/apply
-resolution, paid/team/agent/Git
+opening the publisher DB. The final private-alpha surface now adds an env-backed redacted Electron
+control surface, explicit path-scoped secret policy records, guarded manual conflict resolution
+records, macOS/Linux alpha release scripts, and a deterministic two-device smoke harness with
+redacted evidence logs. OAuth/OIDC provider login, hosted object proxy/signed URL data transfer,
+signed installers, live Cloudflare/AWS credential provisioning, production pairing UX, automatic
+merge/apply resolution, paid/team/agent/Git
 replacement work, and production deployment hardening remain deferred.

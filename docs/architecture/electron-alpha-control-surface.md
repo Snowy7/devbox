@@ -8,8 +8,10 @@ The desktop app is a local-first control surface. It can run without cloud crede
 login, Docker, Postgres, production hosted metadata, or external network services.
 
 The app does not directly mutate workspace files. Renderer code reads alpha state through the
-Electron preload bridge. Future workspace mutations must go through the Rust daemon or an explicit
-local bridge command boundary.
+Electron preload bridge. The main process derives redacted state from `DEVBOX_*` environment
+variables and never reads raw Cloudflare/R2/API/session values except to report whether a named env
+var is present. Future workspace mutations must go through the Rust daemon or an explicit local
+bridge command boundary.
 
 ## Surface
 
@@ -18,15 +20,21 @@ The first screen is the actual control surface, not a landing page. It includes:
 - status and tray affordance
 - watched projects
 - sync activity
+- local DB/cache/project/receiver paths
+- hosted metadata API, session env, account/project, and object-access lease
+- shared bucket prefix and remote kind
+- generated live sync, pairing, release, and smoke-test commands
 - manual conflict records
 - devices and pairing state
 - explicit secret safety policy records
 - redacted remote/provider settings
 - CLI command hints for local alpha workflows
 
-The fixture-backed bridge is intentional for this PR. It keeps the UI buildable and reviewable while
-the daemon API remains a later integration point. The fixture contains redacted identifiers and
-opaque references only; no raw secret, key, recovery, token, or cloud credential material is present.
+The env-backed bridge is still command-state only: it does not start the daemon, publish snapshots,
+or materialize files. That keeps the private alpha honest until live daemon IPC is wired. Placeholder
+state remains available for builds and screenshots without credentials. The fixture contains
+redacted identifiers and opaque references only; no raw secret, key, recovery, token, or cloud
+credential material is present.
 
 ## Validation
 
@@ -40,7 +48,14 @@ npm run build
 
 `test:safety` scans desktop fixture and renderer source for common raw secret/token shapes.
 
+The unsigned desktop alpha bundle can be produced with:
+
+```text
+scripts/package-desktop-alpha.sh v0.1.0-alpha.1
+```
+
 ## Deferred
 
-Deferred work includes live daemon IPC, production OAuth UI, live provider provisioning, paid/team
-flows, agent workflows, Git replacement UI, automatic conflict resolution, and production packaging.
+Deferred work includes live daemon IPC, production OAuth UI, live provider provisioning, signed
+installers, paid/team flows, agent workflows, Git replacement UI, automatic conflict resolution, and
+production packaging.

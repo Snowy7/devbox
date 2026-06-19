@@ -15,9 +15,10 @@ This is still a local/mock foundation.
 
 It does not implement live OAuth-backed account login, managed R2/S3 credential provisioning,
 production pairing UX, or automatic conflict resolution. The private-alpha Electron shell can show
-fixture-backed continuation, conflict, device, and safety state; this materialization path itself can
-now opt into an in-process mock-dev hosted metadata store for manifest discovery and server-side
-cursor compare-and-set, but the default remains local/mock only. Production-shaped account/session
+redacted env-backed continuation, hosted config, object-access scope, conflict, device, pairing, and
+safety command state; this materialization path itself can now opt into an in-process mock-dev
+hosted metadata store for manifest discovery and server-side cursor compare-and-set, but the default
+remains local/mock only. Production-shaped account/session
 proof primitives exist for future hosted auth, but this materialization path does not enforce them
 yet. Local preflight now refuses divergent local/mock import/materialize paths and persists local
 conflict records, but it does not resolve or merge them.

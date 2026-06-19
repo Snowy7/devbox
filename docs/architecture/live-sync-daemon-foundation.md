@@ -18,6 +18,14 @@ synced" while keeping the alpha boundary conservative.
 The deterministic alpha smoke path is:
 
 ```text
+scripts/alpha-two-device-smoke.sh
+```
+
+That harness exercises receiver-generated pairing, pending-receiver fail-closed behavior, source
+live publish, latest remote discovery, receiver materialization, and redacted evidence logs. The
+lower-level daemon push command is:
+
+```text
 devbox-daemon sync \
   --db <DB_PATH> \
   --cache <CACHE_ROOT> \
