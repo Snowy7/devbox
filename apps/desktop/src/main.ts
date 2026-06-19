@@ -1,16 +1,16 @@
 import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage } from "electron";
 import path from "node:path";
-import { alphaStateFixture } from "./shared/alphaState";
+import { buildAlphaStateFromEnv } from "./shared/alphaState";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1120,
-    height: 760,
-    minWidth: 900,
-    minHeight: 620,
+    width: 1240,
+    height: 820,
+    minWidth: 960,
+    minHeight: 680,
     title: "Devbox Alpha",
     webPreferences: {
       contextIsolation: true,
@@ -29,8 +29,9 @@ function createWindow() {
 }
 
 function createTray() {
+  const state = buildAlphaStateFromEnv(process.env);
   tray = new Tray(nativeImage.createEmpty());
-  tray.setToolTip("Devbox alpha: warning");
+  tray.setToolTip(`Devbox alpha: ${state.status}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
@@ -39,8 +40,9 @@ function createTray() {
           mainWindow?.show();
         }
       },
-      { label: "Status: warning", enabled: false },
-      { label: "Sync mode: no-network", enabled: false },
+      { label: `Status: ${state.status}`, enabled: false },
+      { label: `Remote: ${state.remote.kind}`, enabled: false },
+      { label: `Live sync: ${state.liveSync.status}`, enabled: false },
       { type: "separator" },
       {
         label: "Quit",
@@ -50,7 +52,7 @@ function createTray() {
   );
 }
 
-ipcMain.handle("devbox:alpha-state", () => alphaStateFixture);
+ipcMain.handle("devbox:alpha-state", () => buildAlphaStateFromEnv(process.env));
 
 void app.whenReady().then(() => {
   createWindow();

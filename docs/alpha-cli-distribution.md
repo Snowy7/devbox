@@ -1,12 +1,11 @@
-# Alpha CLI Distribution
+# Alpha Tool Distribution
 
-Devbox alpha testers need a downloadable CLI binary before the desktop app is wired to live daemon
-state. For now, publishing is local: build the CLI on a macOS or Linux machine and upload the
-archive to a GitHub Release with `gh`.
+Devbox alpha testers need downloadable command-line tools and a runnable desktop control surface
+before signed installers and hosted object transfer exist. For now, publishing is local: build the
+macOS/Linux alpha archives on matching hosts and upload them to a GitHub Release with `gh`.
 
-GitHub Packages is not the right first home for the raw native binary. Packages is useful for npm,
-NuGet, Maven, RubyGems, and containers. A standalone CLI binary should start as a GitHub Release
-asset.
+GitHub Packages is not the right first home for raw native binaries. Packages is useful for npm,
+NuGet, Maven, RubyGems, and containers. Devbox alpha tools should start as GitHub Release assets.
 
 ## Credentials
 
@@ -19,7 +18,7 @@ $EDITOR .env.r2.local
 
 `.env.r2.local` must never be committed. The repo ignores `.env` and `.env.*`.
 
-Load it before running R2 smoke commands:
+Load it before running trusted-operator R2 smoke commands:
 
 ```bash
 source scripts/load-r2-env.sh .env.r2.local
@@ -34,11 +33,19 @@ DEVBOX_R2_PREFIX=accounts/account-example/projects/project-example
 DEVBOX_R2_ACCESS_KEY_ID=replace-me
 DEVBOX_R2_SECRET_ACCESS_KEY=replace-me
 DEVBOX_METADATA_API=http://127.0.0.1:8787
+DEVBOX_METADATA_ACCOUNT=account-example
+DEVBOX_METADATA_PROJECT=project-example
+DEVBOX_OBJECT_ACCESS_LEASE=lease-alpha
 DEVBOX_ALPHA_INVITE_CODE=replace-after-invite-create
 DEVBOX_SESSION_TOKEN=replace-after-hosted-login
+DEVBOX_LIVE_DB=./devbox.sqlite3
+DEVBOX_LIVE_CACHE=./.devbox-cache
+DEVBOX_LIVE_PROJECT_ROOT=./project
+DEVBOX_LIVE_TARGET=./receiver-project
+DEVBOX_REMOTE_KIND=s3
 ```
 
-Pass the credential variable names to the CLI:
+Pass credential variable names to the CLI and daemon:
 
 ```bash
 --s3-access-key-env DEVBOX_R2_ACCESS_KEY_ID
@@ -48,8 +55,9 @@ Pass the credential variable names to the CLI:
 Do not pass raw key values as CLI arguments.
 
 For external multi-user alpha testing, tester machines should not receive shared bucket credentials.
-Run R2 credentials on the hosted metadata server only. The server enables object-access resolution
-when these server-side env vars are populated:
+Use one shared bucket with per-account/project prefixes. Run R2 credentials on the hosted metadata
+server only. The server enables object-access resolution when these server-side env vars are
+populated:
 
 ```bash
 DEVBOX_R2_ACCESS_KEY_ID=server-side-access-key
@@ -61,18 +69,29 @@ DEVBOX_R2_SESSION_TOKEN=server-side-session-token
 You can rename the server-side variable names with `DEVBOX_OBJECT_ACCESS_KEY_ENV`,
 `DEVBOX_OBJECT_SECRET_KEY_ENV`, and `DEVBOX_OBJECT_SESSION_TOKEN_ENV`, but the server still checks
 that the referenced env vars have values before enabling grants. A Cloudflare API token is not
-required for this PR; the broker does not call Cloudflare to mint temporary credentials.
+required for the current broker; it does not call Cloudflare to mint temporary credentials.
+
+The prefix shape is the authorization boundary:
+
+```text
+accounts/<account-id>/projects/<project-id>
+```
+
+Every grant is scoped to one account session, one project, one lease, and one prefix. A tester should
+never be told to set a prefix outside their own account/project path.
 
 ## Current Deployment Boundary
 
-The manual real-R2 alpha path still does not require deploying the Devbox API.
+The local trusted-operator real-R2 smoke path does not require deploying the Devbox API. The external
+multi-user path does: run the hosted metadata API with server-side bucket credentials and have
+testers resolve object-access grants with their session token.
 
-The repo now has a deployable hosted metadata alpha API with:
+The repo has a deployable hosted metadata alpha API with:
 
 - `/ready`
 - one-time alpha invite login
 - bearer account-session status and logout
-- hosted metadata handlers that can reject mock-dev headers unless explicitly enabled
+- hosted metadata handlers that reject mock-dev headers unless explicitly enabled
 - server-mediated object-access prefix grants for one shared R2 bucket when server-managed R2 env
   credentials are configured
 
@@ -121,7 +140,18 @@ cargo run -p devbox-cli -- metadata object-access resolve \
 `object-access resolve` prints the authorized prefix, endpoint, bucket, capabilities, expiration,
 and rotation generation. It does not print or return raw R2 credentials.
 
-For a local deterministic live-sync smoke test, use the daemon once mode:
+For a deterministic local two-device live-sync smoke test:
+
+```bash
+scripts/alpha-two-device-smoke.sh
+```
+
+That script initializes source and receiver DBs, runs receiver-generated pairing, proves the pending
+receiver fails closed before completion, publishes a live snapshot into a local encrypted remote,
+pulls the latest mock hosted snapshot, materializes it into the receiver target, and writes redacted
+evidence logs under the printed `evidence=` directory.
+
+For a lower-level local live-sync command, use daemon once mode:
 
 ```bash
 DEVBOX_LIVE_DB=./devbox.sqlite3 \
@@ -146,16 +176,18 @@ The current real-R2 smoke path is split:
   credentials and the authorized prefix
 - external testers should use hosted auth plus the server-mediated object-access grant; direct
   shared bucket credentials are not the multi-user security boundary
-- device trust can now use receiver-generated pairing with `devices join`, `devices approve-join`,
-  and `devices complete`
+- device trust can use receiver-generated pairing with `devices join`, `devices approve-join`, and
+  `devices complete`
 - live daemon sync can publish current work and pull the latest hosted mock-dev snapshot with
   deterministic `--once` tests and long-running debounce mode
-- hosted object proxy or signed URL data transfer is deferred to the next alpha PRs
-- the Electron app is not yet wired to live daemon/API state
+- hosted object proxy or signed URL data transfer is deferred
+- the Electron app reads redacted `DEVBOX_*` config and generated command state, but does not start
+  the daemon or mutate files yet
 
-## Local Package
+## Local Alpha Tools Package
 
-Build a host package:
+Build a host package containing `devbox`, `devbox-daemon`, `devbox-metadata`, docs, env template,
+and alpha helper scripts:
 
 ```bash
 scripts/package-cli.sh v0.1.0-alpha.1
@@ -180,6 +212,24 @@ Set a target explicitly when needed:
 DEVBOX_RELEASE_TARGET=x86_64-unknown-linux-gnu scripts/package-cli.sh v0.1.0-alpha.1
 ```
 
+## Local Desktop Package
+
+Build an unsigned Electron alpha bundle on macOS/Linux:
+
+```bash
+scripts/package-desktop-alpha.sh v0.1.0-alpha.1
+```
+
+The script runs the desktop safety scan and build, then writes:
+
+```text
+dist/devbox-desktop-v0.1.0-alpha.1.tar.gz
+dist/devbox-desktop-v0.1.0-alpha.1.tar.gz.sha256
+```
+
+This is not a signed installer. Extract it, run `npm ci`, then `npm run start:built`. The desktop
+surface reads `DEVBOX_*` env variables and shows redacted setup/command state only.
+
 ## Publish Locally To GitHub Releases
 
 Use a prerelease tag for alpha testers:
@@ -195,12 +245,14 @@ The publish script:
 1. Requires a clean working tree.
 2. Creates the tag locally if it does not exist.
 3. Pushes the tag.
-4. Builds the CLI archive on the current machine.
+4. Builds the alpha tools archive on the current machine.
 5. Creates or updates the GitHub Release.
 6. Uploads the archive and its `.sha256` file.
 
 Run the same command from a Linux machine and a Mac if you want both platform archives on the same
-release. The script uses `--clobber`, so rerunning replaces the same target asset.
+release. Build/upload the desktop archive separately with `scripts/package-desktop-alpha.sh` until a
+single release orchestrator exists. The CLI publish script uses `--clobber`, so rerunning replaces
+the same target asset.
 
 ## Tester Install Notes
 
@@ -210,6 +262,8 @@ Linux:
 tar -xzf devbox-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz
 cd devbox-v0.1.0-alpha.1-x86_64-unknown-linux-gnu
 ./devbox --help
+./devbox-daemon --help
+./devbox-metadata --help
 ```
 
 macOS:
@@ -217,8 +271,10 @@ macOS:
 ```bash
 tar -xzf devbox-v0.1.0-alpha.1-aarch64-apple-darwin.tar.gz
 cd devbox-v0.1.0-alpha.1-aarch64-apple-darwin
-xattr -dr com.apple.quarantine ./devbox
+xattr -dr com.apple.quarantine ./devbox ./devbox-daemon ./devbox-metadata
 ./devbox --help
+./devbox-daemon --help
+./devbox-metadata --help
 ```
 
 ## R2 Alpha Boundary

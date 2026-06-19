@@ -10,7 +10,7 @@ This repository currently contains the product foundation and MVP planning artif
 
 - [.product](.product/README.md) - product strategy, market sizing, KPIs, architecture, roadmap, and sources.
 - [.plans](.plans/README.md) - MVP execution plan with static HTML pages for phases, architecture, and validation.
-- [docs/alpha-cli-distribution.md](docs/alpha-cli-distribution.md) - GitHub Release packaging for alpha CLI binaries.
+- [docs/alpha-cli-distribution.md](docs/alpha-cli-distribution.md) - GitHub Release packaging, R2/shared-bucket setup, and two-device alpha smoke testing.
 
 ## Current Stack Direction
 
@@ -45,10 +45,16 @@ This repository currently contains the product foundation and MVP planning artif
   includes no-network recovery grants and device key-envelope rotation intents for future
   production pairing/recovery flows. The hosted metadata service can now run as a single-instance
   alpha API with one-time invite login, bearer session status/logout, `/ready`, and mock-dev auth
-  disabled by default in the server binary. The private-alpha desktop shell now provides a
-  no-network Electron control surface for status, projects, sync activity, conflicts, devices,
-  secret policy, and settings. OAuth, live Cloudflare/AWS credential provisioning, hosted object
-  proxy/signed URL data transfer, Postgres-backed
+  disabled by default in the server binary. Alpha release packaging now produces macOS/Linux
+  command-line tool archives containing `devbox`, `devbox-daemon`, `devbox-metadata`, helper
+  scripts, docs, and an env template. A deterministic two-device smoke harness proves
+  receiver-generated pairing, pending-receiver fail-closed behavior, live publish, latest remote
+  discovery, and receiver materialization with redacted evidence logs. The private-alpha desktop
+  shell now provides an Electron control surface for local DB/cache/project paths, hosted
+  API/session/project config, R2/shared-bucket prefix state, pairing, live sync command state,
+  conflicts, devices, secret policy, and settings. It reads redacted `DEVBOX_*` setup state and
+  does not start sync or mutate files directly. OAuth, live Cloudflare/AWS credential provisioning,
+  hosted object proxy/signed URL data transfer, signed installers, Postgres-backed
   production deployment hardening, automatic conflict resolution, and paid/team/agent/Git-replacement
   work remain deferred.
 
@@ -84,6 +90,13 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]`
 - `devbox-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT> [--once]`
 - `devbox-daemon sync --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> [--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>] [--push|--pull|--two-way] <PROJECT_ROOT> [--once]`
+
+Alpha helper scripts:
+
+- `scripts/alpha-two-device-smoke.sh` runs a local two-device proof with pairing, pending receiver refusal, live publish, latest pull, materialization, and redacted evidence logs.
+- `scripts/devbox-live-sync-alpha.sh` maps `.env` values into a live daemon command for local or S3-compatible remotes.
+- `scripts/package-cli.sh <VERSION>` builds macOS/Linux alpha tool archives with CLI, daemon, metadata server, docs, env template, and helper scripts.
+- `scripts/package-desktop-alpha.sh <VERSION>` builds an unsigned Electron alpha control-surface bundle for macOS/Linux.
 
 Hosted metadata sync wiring is explicit opt-in for dev/test flows:
 

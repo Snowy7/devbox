@@ -2,11 +2,12 @@
 
 This is the private-alpha Electron + React + TypeScript shell for Devbox.
 
-The app is a no-network local control surface for the desktop-to-laptop alpha loop. It shows status,
-watched projects, sync activity, manual conflict records, devices/pairing state, explicit secret
-policy records, and redacted settings. The current bridge returns fixture-backed alpha state so the
-app can build and run without cloud credentials, browser login, Docker, Postgres, or production
-services.
+The app is a local control surface for the desktop-to-laptop alpha loop. It shows local DB/cache and
+project paths, hosted API/session/project config, remote kind and shared bucket prefix, object-access
+lease state, receiver pairing handoff, live sync command state, manual conflict records, explicit
+secret policy records, and redacted settings. The Electron bridge derives state from `DEVBOX_*`
+environment variables when present and otherwise falls back to safe placeholders, so it can build and
+run without cloud credentials, browser login, Docker, Postgres, or production services.
 
 The desktop app must call the Rust daemon or a narrow local bridge for workspace mutations. It must
 never write, delete, restore, or merge project files directly from renderer code.
@@ -23,3 +24,12 @@ npm run start
 
 `npm run dev` starts the Vite renderer for local UI work. `npm run start` builds the renderer and
 Electron main/preload files, then opens the desktop shell.
+
+For an unsigned alpha bundle on macOS/Linux:
+
+```text
+scripts/package-desktop-alpha.sh v0.1.0-alpha.1
+```
+
+The bundle is not a signed installer. It is a runnable Electron control surface for alpha testing:
+extract it, run `npm ci`, then `npm run start:built`.

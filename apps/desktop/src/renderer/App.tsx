@@ -2,23 +2,27 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { alphaStateFixture, type AlphaState } from "../shared/alphaState";
 
-type Tab = "projects" | "activity" | "conflicts" | "devices" | "secrets" | "settings";
+type Tab = "overview" | "projects" | "hosted" | "pairing" | "sync" | "safety";
 
 const tabs: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
   { id: "projects", label: "Projects" },
-  { id: "activity", label: "Activity" },
-  { id: "conflicts", label: "Conflicts" },
-  { id: "devices", label: "Devices" },
-  { id: "secrets", label: "Secrets" },
-  { id: "settings", label: "Settings" }
+  { id: "hosted", label: "Hosted" },
+  { id: "pairing", label: "Pairing" },
+  { id: "sync", label: "Live Sync" },
+  { id: "safety", label: "Safety" }
 ];
 
 export function App() {
   const [state, setState] = useState<AlphaState>(alphaStateFixture);
-  const [activeTab, setActiveTab] = useState<Tab>("projects");
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
+
+  const refreshState = () => {
+    void window.devbox?.getAlphaState().then(setState);
+  };
 
   useEffect(() => {
-    void window.devbox?.getAlphaState().then(setState);
+    refreshState();
   }, []);
 
   const totals = useMemo(
@@ -59,25 +63,52 @@ export function App() {
       <section className="workspace">
         <header className="topline">
           <div>
-            <p className="eyebrow">{state.accountMode} / {state.syncMode}</p>
-            <h2>Local control surface</h2>
+            <p className="eyebrow">
+              {state.source} / {state.remote.kind} / {state.liveSync.status}
+            </p>
+            <h2>Alpha Control Surface</h2>
+            <p className="subtle">{state.statusLabel}</p>
           </div>
-          <div className="summary-strip" aria-label="Alpha summary">
-            <Metric label="Projects" value={totals.projects} />
-            <Metric label="Pending" value={totals.pending} />
-            <Metric label="Conflicts" value={totals.conflicts} />
-            <Metric label="Secrets" value={totals.secrets} />
+          <div className="top-actions">
+            <button type="button" onClick={refreshState}>
+              Refresh state
+            </button>
           </div>
         </header>
 
+        <div className="summary-strip" aria-label="Alpha summary">
+          <Metric label="Projects" value={String(totals.projects)} />
+          <Metric label="Pending" value={String(totals.pending)} />
+          <Metric label="Conflicts" value={String(totals.conflicts)} />
+          <Metric label="Secrets" value={String(totals.secrets)} />
+          <Metric label="Session" value={state.hosted.sessionState} />
+        </div>
+
+        {activeTab === "overview" && (
+          <Panel title="Configured Alpha Paths">
+            <KeyValueGrid
+              rows={[
+                ["Local DB", state.local.dbPath],
+                ["Blob cache", state.local.cacheRoot],
+                ["Project root", state.local.projectRoot],
+                ["Receiver target", state.local.targetPath],
+                ["Local remote", state.local.remoteDir],
+                ["Evidence path", state.local.evidenceDir]
+              ]}
+            />
+            <CommandBlock label="Deterministic smoke test" command={state.commands.smokeTest} />
+            <CommandBlock label="Desktop build" command={state.commands.desktopBuild} />
+          </Panel>
+        )}
+
         {activeTab === "projects" && (
-          <Panel title="Watched Projects">
+          <Panel title="Watched Project State">
             <div className="table">
               <div className="table-row table-head">
                 <span>Name</span>
                 <span>Status</span>
                 <span>Pending</span>
-                <span>Safety</span>
+                <span>Remote</span>
               </div>
               {state.projects.map((project) => (
                 <div className="table-row" key={project.id}>
@@ -87,45 +118,48 @@ export function App() {
                   </span>
                   <span className={`dot-label ${project.status}`}>{project.status}</span>
                   <span>{project.pendingChanges}</span>
-                  <span>{project.blockedSecrets} blocked · {project.openConflicts} conflicts</span>
+                  <span>{project.remoteKind}</span>
                 </div>
               ))}
             </div>
+            <CommandBlock label="Live command" command={state.commands.liveSync} />
           </Panel>
         )}
 
-        {activeTab === "activity" && (
-          <Panel title="Sync Activity">
-            <div className="activity-list">
-              {state.projects.map((project) => (
-                <div className="activity" key={project.id}>
-                  <span className={`rail ${project.status}`} />
-                  <div>
-                    <strong>{project.name}</strong>
-                  <p>{project.pendingChanges} pending change(s), last snapshot {project.lastSnapshot}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
+        {activeTab === "hosted" && (
+          <Panel title="Hosted API And Object Access">
+            <KeyValueGrid
+              rows={[
+                ["Metadata API", state.hosted.api],
+                ["Metadata DB", state.hosted.metadataDb],
+                ["Account", state.hosted.metadataAccount],
+                ["Project", state.hosted.metadataProject],
+                ["Session env", state.hosted.sessionTokenEnv],
+                ["Session state", state.hosted.sessionState],
+                ["Remote bucket", state.remote.bucket],
+                ["Remote prefix", state.remote.prefix],
+                ["Object lease", state.remote.objectAccess.leaseId],
+                ["Object grant", state.remote.objectAccess.grantStatus],
+                ["Boundary", state.remote.objectAccess.sharedBucketBoundary],
+                ["Capabilities", state.remote.objectAccess.capabilities]
+              ]}
+            />
+            <CommandBlock label="Hosted login" command={state.hosted.commands.login} />
+            <CommandBlock label="Hosted status" command={state.hosted.commands.status} />
+            <CommandBlock label="Object access" command={state.hosted.commands.objectAccess} />
           </Panel>
         )}
 
-        {activeTab === "conflicts" && (
-          <Panel title="Manual Conflict Resolution">
-            {state.conflicts.map((conflict) => (
-              <article className="record" key={conflict.id}>
-                <div>
-                  <strong>{conflict.project}</strong>
-                  <p>{conflict.affectedPaths} path(s), {conflict.localSnapshot} vs {conflict.incomingSnapshot}</p>
-                </div>
-                <code>{state.commands.conflicts}</code>
-              </article>
-            ))}
-          </Panel>
-        )}
-
-        {activeTab === "devices" && (
-          <Panel title="Devices And Pairing">
+        {activeTab === "pairing" && (
+          <Panel title="Device Pairing Handoff">
+            <KeyValueGrid
+              rows={[
+                ["Pairing state", state.pairing.status],
+                ["Token env", state.pairing.tokenEnv],
+                ["Join request env", state.pairing.joinRequestEnv],
+                ["Completion env", state.pairing.completionEnv]
+              ]}
+            />
             <div className="table compact">
               {state.devices.map((device) => (
                 <div className="table-row" key={device.id}>
@@ -139,37 +173,64 @@ export function App() {
                 </div>
               ))}
             </div>
+            <CommandBlock label="Invite" command={state.pairing.commands.invite} />
+            <CommandBlock label="Join" command={state.pairing.commands.join} />
+            <CommandBlock label="Approve" command={state.pairing.commands.approveJoin} />
+            <CommandBlock label="Complete" command={state.pairing.commands.complete} />
           </Panel>
         )}
 
-        {activeTab === "secrets" && (
-          <Panel title="Secret Safety Policy">
+        {activeTab === "sync" && (
+          <Panel title="Live Sync Run State">
+            <KeyValueGrid
+              rows={[
+                ["Status", state.liveSync.status],
+                ["Mode", state.liveSync.mode],
+                ["Once", String(state.liveSync.once)],
+                ["Apply materialization", String(state.liveSync.apply)],
+                ["Remote endpoint", state.remote.endpoint],
+                ["Region", state.remote.region],
+                ["Credentials", state.remote.credentials]
+              ]}
+            />
+            <div className="note-list">
+              {state.liveSync.notes.map((note) => (
+                <p key={note}>{note}</p>
+              ))}
+            </div>
+            <CommandBlock label="Run live sync" command={state.liveSync.command} />
+            <CommandBlock label="Package CLI" command={state.commands.packageCli} />
+            <CommandBlock label="Publish release" command={state.commands.publishCli} />
+          </Panel>
+        )}
+
+        {activeTab === "safety" && (
+          <Panel title="Safety And Redaction">
             {state.secrets.map((policy) => (
               <article className="record" key={`${policy.project}-${policy.path}`}>
                 <div>
-                  <strong>{policy.project} / {policy.path}</strong>
+                  <strong>
+                    {policy.project} / {policy.path}
+                  </strong>
                   <p>{policy.note}</p>
                 </div>
                 <span className="action">{policy.action}</span>
                 <code>{policy.envelopeRef ?? "raw material never printed"}</code>
               </article>
             ))}
-          </Panel>
-        )}
-
-        {activeTab === "settings" && (
-          <Panel title="Alpha Settings">
-            <div className="settings-grid">
-              <Setting label="Watcher" value={state.watcher} />
-              <Setting label="Remote provider" value={state.remote.provider} />
-              <Setting label="Remote location" value={state.remote.location} />
-              <Setting label="Credentials" value={state.remote.credentials} />
-            </div>
-            <div className="command-stack">
-              <code>{state.commands.init}</code>
-              <code>{state.commands.snapshot}</code>
-              <code>{state.commands.secrets}</code>
-            </div>
+            {state.conflicts.map((conflict) => (
+              <article className="record" key={conflict.id}>
+                <div>
+                  <strong>{conflict.project}</strong>
+                  <p>
+                    {conflict.affectedPaths} path(s), {conflict.localSnapshot} vs{" "}
+                    {conflict.incomingSnapshot}
+                  </p>
+                </div>
+                <span className="action">{conflict.status}</span>
+                <code>{conflict.command}</code>
+              </article>
+            ))}
           </Panel>
         )}
       </section>
@@ -177,7 +238,7 @@ export function App() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="metric">
       <span>{label}</span>
@@ -195,11 +256,24 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function Setting({ label, value }: { label: string; value: string }) {
+function KeyValueGrid({ rows }: { rows: [string, string][] }) {
   return (
-    <div className="setting">
+    <div className="kv-grid">
+      {rows.map(([label, value]) => (
+        <div className="setting" key={label}>
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CommandBlock({ label, command }: { label: string; command: string }) {
+  return (
+    <div className="command-block">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <code>{command}</code>
     </div>
   );
 }

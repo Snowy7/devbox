@@ -66,7 +66,7 @@ else
   gh release create "$tag" "${assets[@]}" \
     --repo "$repo" \
     --title "Devbox CLI $tag" \
-    --notes "Alpha CLI build for manual R2/two-device testing. Production backend credential leasing and desktop live-state wiring are not included yet." \
+    --notes "Alpha command-line tools for manual R2, hosted metadata, and two-device live-sync testing. OAuth, signed installers, and object proxy transfer are not included yet." \
     "${release_flags[@]}"
 fi
 
