@@ -5,8 +5,9 @@ use loom_store::{
     ResolvedRevisionTarget,
 };
 use loom_sync::{
-    import_pack, sync_store_to_remote, LocalFilesystemRemote, LoomRemote, DEFAULT_REMOTE_NAME,
-    LOCAL_FILESYSTEM_REMOTE_KIND,
+    import_pack, provision_devbox_hosted_remote, sync_store_to_remote, DevboxHostedRemote,
+    DevboxHostedRemoteConfig, LocalFilesystemRemote, LoomRemote, DEFAULT_REMOTE_NAME,
+    DEVBOX_HOSTED_REMOTE_KIND, LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
     diff_revision_to_capture, evaluate_directory_policy, CaptureEngine, CaptureRequest,
@@ -73,7 +74,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "remote",
-        usage: "loom remote add <NAME> <LOCAL_PATH> [FOLDER]",
+        usage: "loom remote add <NAME> <LOCAL_PATH|DEVBOX_API_URL> [FOLDER]",
         summary: "Configure a Loom remote endpoint",
         implemented: true,
         planned_behavior: "remember a named Loom folder-state endpoint",
@@ -344,9 +345,31 @@ fn run_remote(args: &[String]) -> Result<(), String> {
 
 fn run_remote_add(name: &str, location: &str, folder: Option<PathBuf>) -> Result<(), String> {
     let store = open_store_for_sync_source(folder)?;
-    let location = absolute_path(location)?;
-    let location = location.to_string_lossy().into_owned();
-    let remote = RemoteConfig::new(name, LOCAL_FILESYSTEM_REMOTE_KIND, location.clone())
+    let (kind, stored_location, display_location) = if looks_like_devbox_api_url(location) {
+        let provisioned = provision_devbox_hosted_remote(
+            location,
+            store.shared_folder().id(),
+            store.shared_folder().display_name(),
+        )
+        .map_err(|error| error.to_string())?;
+        let clone_url = provisioned.config.clone_url();
+        (
+            DEVBOX_HOSTED_REMOTE_KIND,
+            clone_url.clone(),
+            format!(
+                "{}\nClone URL: {}\nAccount: {}\nSession: {}",
+                provisioned.config.api(),
+                clone_url,
+                provisioned.account_id,
+                provisioned.session_id
+            ),
+        )
+    } else {
+        let location = absolute_path(location)?;
+        let location = location.to_string_lossy().into_owned();
+        (LOCAL_FILESYSTEM_REMOTE_KIND, location.clone(), location)
+    };
+    let remote = RemoteConfig::new(name, kind, stored_location.clone())
         .map_err(|error| error.to_string())?;
     store
         .upsert_remote(remote)
@@ -354,8 +377,8 @@ fn run_remote_add(name: &str, location: &str, folder: Option<PathBuf>) -> Result
 
     println!("Folder: {}", store.folder_root().display());
     println!("Remote: {name}");
-    println!("Kind: {LOCAL_FILESYSTEM_REMOTE_KIND}");
-    println!("Location: {location}");
+    println!("Kind: {kind}");
+    println!("Location: {display_location}");
     Ok(())
 }
 
@@ -384,22 +407,15 @@ fn run_sync_once(args: &[String]) -> Result<(), String> {
         .ok_or_else(|| {
             "no Loom remote configured; run 'loom remote add local <PATH>' first".to_string()
         })?;
-    if remote_config.kind() != LOCAL_FILESYSTEM_REMOTE_KIND {
-        return Err(format!(
-            "remote {} uses unsupported kind {}",
-            remote_config.name(),
-            remote_config.kind()
-        ));
-    }
-
     let (capture, coalesced) = capture_and_coalesce_with_boundary(&store, RevisionBoundary::Sync)?;
     ensure_no_blocked_or_deferred(&capture, "sync")?;
-    let remote = LocalFilesystemRemote::new(remote_config.location());
-    let report = sync_store_to_remote(&store, &remote).map_err(|error| error.to_string())?;
+    let remote = remote_from_config(&remote_config)?;
+    let report =
+        sync_store_to_remote(&store, remote.as_ref()).map_err(|error| error.to_string())?;
 
     println!("Folder: {}", store.folder_root().display());
     println!("Remote: {}", remote_config.name());
-    println!("Location: {}", remote.root().display());
+    println!("Location: {}", remote_config.location());
     if coalesced.created() {
         println!("Captured sync revision: {}", coalesced.revision().id());
     } else {
@@ -473,12 +489,11 @@ fn run_sync_run_loop(args: &[String]) -> Result<(), String> {
 }
 
 fn run_clone(args: &[String]) -> Result<(), String> {
-    let (remote_path, target) = match args {
-        [remote_path, target] => (PathBuf::from(remote_path), PathBuf::from(target)),
+    let (remote_location, target) = match args {
+        [remote_location, target] => (remote_location.clone(), PathBuf::from(target)),
         _ => return Err("clone requires a remote path and target folder".to_string()),
     };
-    let remote_path = absolute_path_from_path(&remote_path)?;
-    let remote = LocalFilesystemRemote::new(&remote_path);
+    let (remote, remote_kind, stored_location) = clone_remote_from_location(&remote_location)?;
     let remote_revision_id = remote
         .get_cursor(loom_sync::DEFAULT_CURSOR_ID)
         .map_err(|error| error.to_string())?
@@ -517,18 +532,14 @@ fn run_clone(args: &[String]) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     store
         .upsert_remote(
-            RemoteConfig::new(
-                DEFAULT_REMOTE_NAME,
-                LOCAL_FILESYSTEM_REMOTE_KIND,
-                remote_path.to_string_lossy().into_owned(),
-            )
-            .map_err(|error| error.to_string())?,
+            RemoteConfig::new(DEFAULT_REMOTE_NAME, remote_kind, stored_location.clone())
+                .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
 
     println!("Cloned revision: {}", report.revision_id());
     println!("Target: {}", store.folder_root().display());
-    println!("Remote: {}", remote.root().display());
+    println!("Remote: {}", stored_location);
     println!("Imported objects: {}", import_report.imported_objects);
     println!(
         "Imported metadata: {} file versions, {} revisions, {} checkpoints, {} pins",
@@ -827,6 +838,49 @@ fn absolute_path_from_path(path: &Path) -> Result<PathBuf, String> {
     Ok(std::env::current_dir()
         .map_err(|error| error.to_string())?
         .join(path))
+}
+
+fn looks_like_devbox_api_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn remote_from_config(config: &RemoteConfig) -> Result<Box<dyn LoomRemote>, String> {
+    match config.kind() {
+        LOCAL_FILESYSTEM_REMOTE_KIND => Ok(Box::new(LocalFilesystemRemote::new(config.location()))),
+        DEVBOX_HOSTED_REMOTE_KIND => {
+            let config = DevboxHostedRemoteConfig::from_clone_url(config.location())
+                .map_err(|error| error.to_string())?;
+            Ok(Box::new(DevboxHostedRemote::new(config)))
+        }
+        kind => Err(format!(
+            "remote {} uses unsupported kind {}",
+            config.name(),
+            kind
+        )),
+    }
+}
+
+fn clone_remote_from_location(
+    location: &str,
+) -> Result<(Box<dyn LoomRemote>, &'static str, String), String> {
+    if location.starts_with("devbox://") {
+        let config = DevboxHostedRemoteConfig::from_clone_url(location)
+            .map_err(|error| error.to_string())?;
+        let stored_location = config.clone_url();
+        return Ok((
+            Box::new(DevboxHostedRemote::new(config)),
+            DEVBOX_HOSTED_REMOTE_KIND,
+            stored_location,
+        ));
+    }
+
+    let remote_path = absolute_path_from_path(Path::new(location))?;
+    let stored_location = remote_path.to_string_lossy().into_owned();
+    Ok((
+        Box::new(LocalFilesystemRemote::new(remote_path)),
+        LOCAL_FILESYSTEM_REMOTE_KIND,
+        stored_location,
+    ))
 }
 
 #[derive(Debug, Clone)]

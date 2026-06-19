@@ -7,8 +7,9 @@
 use loom_core::{FolderRevision, FolderRevisionId, RevisionBoundary};
 use loom_store::{path_to_store_string, LocalStore, RemoteConfig, StoreError};
 use loom_sync::{
-    import_pack, sync_store_to_remote, LocalFilesystemRemote, LoomRemote, SyncError,
-    DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME, LOCAL_FILESYSTEM_REMOTE_KIND,
+    import_pack, sync_store_to_remote, DevboxHostedRemote, DevboxHostedRemoteConfig,
+    LocalFilesystemRemote, LoomRemote, SyncError, DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME,
+    DEVBOX_HOSTED_REMOTE_KIND, LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
     diff_revision_to_capture, CaptureEngine, CaptureError, CaptureRequest, RestoreEngine,
@@ -365,7 +366,7 @@ pub fn run_loop(options: &DaemonLoopOptions) -> DaemonResult<()> {
     let mut cycles = 0usize;
     let mut last_report = None;
     cycles += 1;
-    match reconcile_once(&store, &remote) {
+    match reconcile_once(&store, remote.as_ref()) {
         Ok(report) => {
             last_report = Some(report);
             write_status(
@@ -409,7 +410,7 @@ pub fn run_loop(options: &DaemonLoopOptions) -> DaemonResult<()> {
         let now_ms = elapsed_ms(start);
         if planner.take_due_batch(now_ms).is_some() {
             cycles += 1;
-            match reconcile_once(&store, &remote) {
+            match reconcile_once(&store, remote.as_ref()) {
                 Ok(report) => {
                     last_report = Some(report);
                     write_status(
@@ -479,7 +480,7 @@ pub fn run_loop(options: &DaemonLoopOptions) -> DaemonResult<()> {
 
 pub fn reconcile_once(
     store: &LocalStore,
-    remote: &LocalFilesystemRemote,
+    remote: &dyn LoomRemote,
 ) -> DaemonResult<ReconcileReport> {
     let capture = CaptureEngine::new(store.object_cache()).capture(&CaptureRequest::new(
         store.shared_folder().clone(),
@@ -579,15 +580,18 @@ pub fn configured_remote(store: &LocalStore) -> DaemonResult<RemoteConfig> {
         .ok_or(DaemonError::NoRemote)
 }
 
-pub fn remote_from_config(config: &RemoteConfig) -> DaemonResult<LocalFilesystemRemote> {
-    if config.kind() != LOCAL_FILESYSTEM_REMOTE_KIND {
-        return Err(DaemonError::UnsupportedRemote {
+pub fn remote_from_config(config: &RemoteConfig) -> DaemonResult<Box<dyn LoomRemote>> {
+    match config.kind() {
+        LOCAL_FILESYSTEM_REMOTE_KIND => Ok(Box::new(LocalFilesystemRemote::new(config.location()))),
+        DEVBOX_HOSTED_REMOTE_KIND => {
+            let config = DevboxHostedRemoteConfig::from_clone_url(config.location())?;
+            Ok(Box::new(DevboxHostedRemote::new(config)))
+        }
+        kind => Err(DaemonError::UnsupportedRemote {
             name: config.name().to_string(),
-            kind: config.kind().to_string(),
-        });
+            kind: kind.to_string(),
+        }),
     }
-
-    Ok(LocalFilesystemRemote::new(config.location()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1316,7 +1320,7 @@ mod tests {
         capture_and_coalesce(source_store);
         sync_store_to_remote(source_store, remote).expect("second sync");
 
-        let report = reconcile_once(&target_store, &remote).expect("target pulls");
+        let report = reconcile_once(&target_store, remote).expect("target pulls");
 
         assert_eq!(report.action, ReconcileAction::Pulled);
         assert_eq!(
