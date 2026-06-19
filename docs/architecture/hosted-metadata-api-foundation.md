@@ -40,10 +40,13 @@ project-scoped routes:
 ```text
 PUT /v1/projects/:project_id/snapshots
 GET /v1/projects/:project_id/snapshots/:snapshot_id
+GET /v1/projects/:project_id/snapshots/latest
 ```
 
-Snapshot records store object references and counts only. They do not store plaintext file bytes,
-sync keys, device keys, R2 secrets, object credentials, or manifest contents.
+Snapshot records store object references and counts only. The latest route returns the newest
+published record for an account/project so live receivers do not need a pasted snapshot id. They do
+not store plaintext file bytes, sync keys, device keys, R2 secrets, object credentials, or manifest
+contents.
 
 Managed object credential lease records store redacted provider references, endpoint/bucket/region
 shape, optional project scope, capabilities, expiration, revocation, and rotation generation only.

@@ -58,6 +58,7 @@
               <li>Local watcher feeds the pending operation log after debounced filesystem events.</li>
               <li>Upload queue, retry, resume, and backoff.</li>
               <li>Local/mock publish, import, and materialize foundation through encrypted local remote.</li>
+              <li>Live daemon sync loop for deterministic scan/publish and latest-remote import/materialize with cursor preflight.</li>
               <li>Download and materialization queue.</li>
               <li>Local device cursor reconciliation before import/materialization.</li>
               <li>Conflict-as-divergent-snapshot refusal records for divergent local/mock sync.</li>
@@ -96,6 +97,7 @@
           <li>S3-compatible encrypted blob transport can target Cloudflare R2, AWS S3, or MinIO with redacted environment-based credential configuration.</li>
           <li>Hosted metadata API/store/handler foundations model accounts, devices, projects, published snapshot manifests, and server-side compare-and-set device/project cursors.</li>
           <li>Publish/import/materialize can opt into in-process mock-dev hosted metadata for manifest discovery and server-side cursor compare-and-set.</li>
+          <li>Live daemon sync can scan/debounce, persist idempotent snapshots, publish encrypted objects, register hosted mock-dev metadata, discover latest remote snapshots, and import/materialize with conflict refusal.</li>
           <li>Local/mock auth sessions, pairing invitations, approved-device trust records, key envelopes, revocation markers, and local device/project cursors are in place.</li>
           <li>Production-shaped account ownership proof and account session primitives model provider subject/email/domain proof, token-hash sessions, expiration, revocation, and no-network CLI/dev persistence.</li>
           <li>Hosted metadata handlers now support explicit mock-dev headers for tests/dev plus production-shaped account-session bearer auth resolved through the hosted session store, with account-scoped device/project/snapshot/cursor operations.</li>

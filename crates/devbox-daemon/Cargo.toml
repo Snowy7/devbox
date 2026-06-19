@@ -11,9 +11,16 @@ name = "devbox-daemon"
 path = "src/main.rs"
 
 [dependencies]
+devbox-materialize = { path = "../devbox-materialize" }
+devbox-metadata = { path = "../devbox-metadata" }
 devbox-snapshot = { path = "../devbox-snapshot" }
+devbox-store = { path = "../devbox-store" }
+devbox-sync = { path = "../devbox-sync" }
 notify = "6"
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
+devbox-auth = { path = "../devbox-auth" }
 rusqlite = "0.31"
 tempfile = "3"

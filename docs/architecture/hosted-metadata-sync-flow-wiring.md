@@ -33,6 +33,10 @@ provide a hosted path for resolving an authenticated account/session/project pre
 R2/S3/MinIO-compatible bucket, but sync commands do not yet transfer object bytes through the hosted
 grant.
 
+The live daemon adds latest-snapshot discovery for the same account/project scope. Receivers can
+omit a pasted snapshot id and let `devbox-daemon sync --pull` resolve the latest published metadata
+record before import or materialization.
+
 ## Publish Semantics
 
 After encrypted blob objects and the encrypted snapshot bundle are written, metadata-enabled publish:
@@ -51,6 +55,8 @@ Metadata-enabled import/materialize:
 
 - upserts the receiver mock-dev device
 - looks up the published snapshot metadata by hosted account, project, and snapshot id
+- or, in daemon live pull mode, first resolves the latest published snapshot for the hosted
+  account/project
 - downloads/decrypts the manifest from the hosted metadata object key
 - keeps local preflight conflict refusal before blob download/materialization
 - advances the hosted device/project cursor with compare-and-set before writing the local cursor
@@ -77,6 +83,11 @@ unsafe endpoint material.
 `DEVBOX_SESSION_TOKEN` by default, calls the metadata API, and returns a redacted server-mediated
 grant for `accounts/<account-id>/projects/<project-id>`. Direct S3-compatible sync flags remain a
 trusted-operator smoke path until sync has a hosted object proxy or signed URL transport.
+
+`devbox-daemon sync --remote-kind s3` is stricter than the manual CLI smoke path: it requires an
+object-access API, lease id, session token environment variable name, and an `--s3-prefix` that
+matches the grant. The grant is used as an authorization/prefix preflight; raw object credentials
+are still loaded only from environment variable names for the current alpha transport.
 
 ## Deferred
 

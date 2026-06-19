@@ -322,10 +322,17 @@ version = "0.1.0"
 name = "devbox-daemon"
 version = "0.1.0"
 dependencies = [
+ "devbox-auth",
+ "devbox-materialize",
+ "devbox-metadata",
  "devbox-snapshot",
+ "devbox-store",
+ "devbox-sync",
  "notify",
  "rusqlite",
+ "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

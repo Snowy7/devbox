@@ -121,6 +121,24 @@ cargo run -p devbox-cli -- metadata object-access resolve \
 `object-access resolve` prints the authorized prefix, endpoint, bucket, capabilities, expiration,
 and rotation generation. It does not print or return raw R2 credentials.
 
+For a local deterministic live-sync smoke test, use the daemon once mode:
+
+```bash
+DEVBOX_LIVE_DB=./devbox.sqlite3 \
+DEVBOX_LIVE_CACHE=./.devbox-cache \
+DEVBOX_LIVE_PROJECT_ROOT=./project \
+DEVBOX_REMOTE_DIR=./remote \
+DEVBOX_METADATA_DB=./metadata-alpha.sqlite3 \
+DEVBOX_LIVE_MODE=push \
+DEVBOX_LIVE_ONCE=true \
+scripts/devbox-live-sync-alpha.sh
+```
+
+For shared-bucket R2 alpha testing, set `DEVBOX_REMOTE_KIND=s3`,
+`DEVBOX_METADATA_API`, `DEVBOX_METADATA_DB`, `DEVBOX_METADATA_PROJECT`, `DEVBOX_SESSION_TOKEN`,
+`DEVBOX_OBJECT_ACCESS_LEASE`, and `DEVBOX_R2_PREFIX=accounts/<account-id>/projects/<project-id>`.
+The live daemon resolves the object-access grant before S3 work and refuses a prefix mismatch.
+
 The current real-R2 smoke path is split:
 
 - object bytes go to R2
@@ -130,6 +148,8 @@ The current real-R2 smoke path is split:
   shared bucket credentials are not the multi-user security boundary
 - device trust can now use receiver-generated pairing with `devices join`, `devices approve-join`,
   and `devices complete`
+- live daemon sync can publish current work and pull the latest hosted mock-dev snapshot with
+  deterministic `--once` tests and long-running debounce mode
 - hosted object proxy or signed URL data transfer is deferred to the next alpha PRs
 - the Electron app is not yet wired to live daemon/API state
 
