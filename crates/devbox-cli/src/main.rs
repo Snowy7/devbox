@@ -16,8 +16,9 @@ use devbox_core::{BlobId, ManifestEntryKind, PolicyDecision};
 use devbox_materialize::{
     import_snapshot, import_snapshot_with_metadata, materialize_snapshot,
     materialize_snapshot_with_metadata, publish_snapshot, publish_snapshot_with_metadata,
-    sync_preflight, HostedMetadataImportOptions, ImportSnapshotRequest, MaterializationRequest,
-    MaterializeError, PublishSnapshotRequest, SyncPreflightOutcome, SyncPreflightRequest,
+    sync_preflight, HostedMetadataApiClient, HostedMetadataApiConfig, HostedMetadataImportOptions,
+    ImportSnapshotRequest, MaterializationRequest, MaterializeError, PublishSnapshotRequest,
+    SyncPreflightOutcome, SyncPreflightRequest,
 };
 use devbox_metadata::{
     active_managed_object_credential_lease_for_session, authenticate_account_session,
@@ -624,6 +625,7 @@ enum SyncRemoteKindArg {
 enum SyncMetadataModeArg {
     LocalMock,
     MockDevSqlite,
+    HostedApi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -633,6 +635,8 @@ struct SyncMetadataArgs {
     account_id: Option<String>,
     project_id: Option<String>,
     endpoint: Option<String>,
+    api: Option<String>,
+    session_token_env: Option<String>,
 }
 
 impl Default for SyncMetadataArgs {
@@ -643,6 +647,8 @@ impl Default for SyncMetadataArgs {
             account_id: None,
             project_id: None,
             endpoint: None,
+            api: None,
+            session_token_env: None,
         }
     }
 }
@@ -2816,13 +2822,17 @@ fn parse_sync_metadata_arg(
         "--metadata-mode" => {
             *index += 1;
             let value = args.get(*index).ok_or_else(|| {
-                "--metadata-mode requires local-mock or mock-dev-sqlite".to_string()
+                "--metadata-mode requires local-mock, mock-dev-sqlite, or hosted-api".to_string()
             })?;
             metadata.mode = match value.as_str() {
                 "local-mock" => SyncMetadataModeArg::LocalMock,
                 "mock-dev-sqlite" => SyncMetadataModeArg::MockDevSqlite,
+                "hosted-api" => SyncMetadataModeArg::HostedApi,
                 _ => {
-                    return Err("--metadata-mode requires local-mock or mock-dev-sqlite".to_string())
+                    return Err(
+                        "--metadata-mode requires local-mock, mock-dev-sqlite, or hosted-api"
+                            .to_string(),
+                    )
                 }
             };
         }
@@ -2842,6 +2852,14 @@ fn parse_sync_metadata_arg(
             *index += 1;
             metadata.endpoint = args.get(*index).cloned();
         }
+        "--metadata-api" => {
+            *index += 1;
+            metadata.api = args.get(*index).cloned();
+        }
+        "--metadata-session-token-env" => {
+            *index += 1;
+            metadata.session_token_env = args.get(*index).cloned();
+        }
         _ => return Ok(false),
     }
 
@@ -2858,38 +2876,83 @@ fn finalize_sync_metadata(
             || metadata.account_id.is_some()
             || metadata.project_id.is_some()
             || metadata.endpoint.is_some()
+            || metadata.api.is_some()
+            || metadata.session_token_env.is_some()
         {
             return Err(format!(
-                "{command} metadata flags require --metadata-mode mock-dev-sqlite"
+                "{command} metadata flags require --metadata-mode mock-dev-sqlite or hosted-api"
             ));
         }
         return Ok(metadata);
     }
 
-    if metadata.db_path.is_none() {
-        return Err(format!(
-            "{command} requires --metadata-db <DB_PATH> with --metadata-mode mock-dev-sqlite"
-        ));
-    }
-    if !require_project_for_metadata
-        && (metadata.account_id.is_some() || metadata.project_id.is_some())
-    {
-        return Err(format!(
-            "{command} accepts --metadata-account/--metadata-project only for import-snapshot or materialize"
-        ));
-    }
-    if require_project_for_metadata && metadata.project_id.is_none() {
-        return Err(format!(
-            "{command} requires --metadata-project <PROJECT_ID> with --metadata-mode mock-dev-sqlite"
-        ));
-    }
-    if let Some(endpoint) = &metadata.endpoint {
-        MetadataServiceConfig {
-            endpoint: endpoint.clone(),
-            auth_mode: MetadataAuthMode::MockDevHeaders,
+    match metadata.mode {
+        SyncMetadataModeArg::LocalMock => unreachable!(),
+        SyncMetadataModeArg::MockDevSqlite => {
+            if metadata.api.is_some() || metadata.session_token_env.is_some() {
+                return Err(format!(
+                    "{command} hosted API metadata flags require --metadata-mode hosted-api"
+                ));
+            }
+            if metadata.db_path.is_none() {
+                return Err(format!(
+                    "{command} requires --metadata-db <DB_PATH> with --metadata-mode mock-dev-sqlite"
+                ));
+            }
+            if !require_project_for_metadata
+                && (metadata.account_id.is_some() || metadata.project_id.is_some())
+            {
+                return Err(format!(
+                    "{command} accepts --metadata-account/--metadata-project only for import-snapshot or materialize"
+                ));
+            }
+            if require_project_for_metadata && metadata.project_id.is_none() {
+                return Err(format!(
+                    "{command} requires --metadata-project <PROJECT_ID> with --metadata-mode mock-dev-sqlite"
+                ));
+            }
+            if let Some(endpoint) = &metadata.endpoint {
+                MetadataServiceConfig {
+                    endpoint: endpoint.clone(),
+                    auth_mode: MetadataAuthMode::MockDevHeaders,
+                }
+                .validate()
+                .map_err(|error| error.to_string())?;
+            }
         }
-        .validate()
-        .map_err(|error| error.to_string())?;
+        SyncMetadataModeArg::HostedApi => {
+            if metadata.db_path.is_some() || metadata.endpoint.is_some() {
+                return Err(format!(
+                    "{command} hosted API metadata uses --metadata-api, not --metadata-db or --metadata-endpoint"
+                ));
+            }
+            if metadata.account_id.is_some() {
+                return Err(format!(
+                    "{command} hosted API metadata derives account identity from the authenticated session; remove --metadata-account"
+                ));
+            }
+            if metadata.api.is_none() {
+                return Err(format!(
+                    "{command} requires --metadata-api <URL> with --metadata-mode hosted-api"
+                ));
+            }
+            if require_project_for_metadata && metadata.project_id.is_none() {
+                return Err(format!(
+                    "{command} requires --metadata-project <PROJECT_ID> with --metadata-mode hosted-api"
+                ));
+            }
+            let token_env = metadata
+                .session_token_env
+                .as_deref()
+                .unwrap_or("DEVBOX_SESSION_TOKEN");
+            validate_env_name(token_env, "--metadata-session-token-env")?;
+            MetadataServiceConfig {
+                endpoint: metadata.api.clone().expect("metadata api checked"),
+                auth_mode: MetadataAuthMode::AccountSession,
+            }
+            .validate()
+            .map_err(|error| error.to_string())?;
+        }
     }
 
     Ok(metadata)
@@ -4065,6 +4128,19 @@ fn secret_from_env(name: &str, label: &'static str) -> Result<String, Box<dyn st
     Ok(value)
 }
 
+fn validate_env_name(name: &str, flag: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(format!("{flag} requires an environment variable name"));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(format!("{flag} requires an environment variable name"));
+    }
+    Ok(())
+}
+
 fn api_url(api: &str, path: &str) -> Result<String, Box<dyn std::error::Error>> {
     let check = MetadataServiceConfig {
         endpoint: api.to_string(),
@@ -4713,6 +4789,19 @@ fn open_sync_metadata_store(
     Ok(SqliteMetadataStore::open_file(path)?)
 }
 
+fn open_hosted_metadata_client(
+    metadata: &SyncMetadataArgs,
+) -> Result<HostedMetadataApiClient, Box<dyn std::error::Error>> {
+    let api = metadata.api.as_deref().ok_or("metadata API is missing")?;
+    let session_token_env = metadata
+        .session_token_env
+        .as_deref()
+        .unwrap_or("DEVBOX_SESSION_TOKEN");
+    Ok(HostedMetadataApiClient::new(
+        HostedMetadataApiConfig::from_env(api, session_token_env)?,
+    ))
+}
+
 fn metadata_import_options(
     request: &ImportSnapshotRequest,
     metadata: &SyncMetadataArgs,
@@ -4753,6 +4842,21 @@ fn import_snapshot_command(
         let options = metadata_import_options(request, metadata)
             .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
         import_snapshot_with_metadata(request, provider, &mut metadata_store, &options)
+    } else if metadata.mode == SyncMetadataModeArg::HostedApi {
+        let mut metadata_client = open_hosted_metadata_client(metadata)
+            .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
+        let receiver_store = Store::open_file(&request.db_path)?;
+        receiver_store.apply_migrations()?;
+        let receiver_identity = receiver_store
+            .completed_local_identity()?
+            .ok_or(MaterializeError::LocalIdentityMissing)?;
+        let options = HostedMetadataImportOptions {
+            account_id: receiver_identity.account_id,
+            project_id: metadata.project_id.clone().ok_or_else(|| {
+                MaterializeError::InvalidBundle("metadata project id is missing".to_string())
+            })?,
+        };
+        import_snapshot_with_metadata(request, provider, &mut metadata_client, &options)
     } else {
         import_snapshot(request, provider)
     }
@@ -4775,6 +4879,21 @@ fn materialize_snapshot_command(
         let options = metadata_import_options(&import_request, metadata)
             .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
         materialize_snapshot_with_metadata(request, provider, &mut metadata_store, &options)
+    } else if metadata.mode == SyncMetadataModeArg::HostedApi {
+        let mut metadata_client = open_hosted_metadata_client(metadata)
+            .map_err(|error| MaterializeError::InvalidBundle(error.to_string()))?;
+        let receiver_store = Store::open_file(&request.db_path)?;
+        receiver_store.apply_migrations()?;
+        let receiver_identity = receiver_store
+            .completed_local_identity()?
+            .ok_or(MaterializeError::LocalIdentityMissing)?;
+        let options = HostedMetadataImportOptions {
+            account_id: receiver_identity.account_id,
+            project_id: metadata.project_id.clone().ok_or_else(|| {
+                MaterializeError::InvalidBundle("metadata project id is missing".to_string())
+            })?,
+        };
+        materialize_snapshot_with_metadata(request, provider, &mut metadata_client, &options)
     } else {
         materialize_snapshot(request, provider)
     }
@@ -4811,6 +4930,26 @@ fn print_sync_metadata_boundary(
                 "Boundary: mock-dev metadata wiring only; production OAuth, managed credentials, deployment hardening, Electron UI, and conflict UI are deferred"
             );
         }
+        SyncMetadataModeArg::HostedApi => {
+            let api = metadata.api.as_deref().ok_or("metadata API is missing")?;
+            let session_token_env = metadata
+                .session_token_env
+                .as_deref()
+                .unwrap_or("DEVBOX_SESSION_TOKEN");
+            let check = MetadataServiceConfig {
+                endpoint: api.to_string(),
+                auth_mode: MetadataAuthMode::AccountSession,
+            }
+            .validate()?;
+            println!("Metadata mode: hosted-api; manifest discovery and cursor CAS use HTTP");
+            println!("Metadata auth mode: account-session");
+            println!("Metadata API (sanitized): {}", check.endpoint);
+            println!("Metadata session token env: {session_token_env}");
+            println!("Metadata session token: not printed");
+            println!(
+                "Boundary: external hosted alpha metadata uses the authenticated session account; --metadata-account is not accepted"
+            );
+        }
     }
 
     Ok(())
@@ -4826,6 +4965,9 @@ fn sync_publish_snapshot(args: &SyncSnapshotArgs) -> Result<(), Box<dyn std::err
     let published = if args.metadata.mode == SyncMetadataModeArg::MockDevSqlite {
         let mut metadata_store = open_sync_metadata_store(&args.metadata)?;
         publish_snapshot_with_metadata(&request, provider.as_ref(), &mut metadata_store)?
+    } else if args.metadata.mode == SyncMetadataModeArg::HostedApi {
+        let mut metadata_client = open_hosted_metadata_client(&args.metadata)?;
+        publish_snapshot_with_metadata(&request, provider.as_ref(), &mut metadata_client)?
     } else {
         publish_snapshot(&request, provider.as_ref())?
     };
@@ -6464,10 +6606,13 @@ fn print_sync_usage() {
         "  Add --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> to import-snapshot or materialize for hosted mock-dev manifest discovery and cursor CAS."
     );
     eprintln!(
-        "  Import/materialize metadata account scope is --metadata-account <ACCOUNT_ID>, or it is derived from --mock-key-source-db <PUBLISHER_DB> in the local/mock trust bootstrap path."
+        "  Add --metadata-mode hosted-api --metadata-api <URL> [--metadata-session-token-env DEVBOX_SESSION_TOKEN] for external hosted metadata registration, latest discovery, and cursor CAS."
     );
     eprintln!(
-        "  Optional --metadata-endpoint <URL> validates and prints a sanitized label only; sync metadata mode remains in-process and no network check runs."
+        "  Local/mock import/materialize metadata account scope is --metadata-account <ACCOUNT_ID>, or it is derived from --mock-key-source-db <PUBLISHER_DB> in the local/mock trust bootstrap path; hosted-api derives account from the authenticated session."
+    );
+    eprintln!(
+        "  Optional --metadata-endpoint <URL> validates and prints a sanitized label only for mock-dev SQLite mode; hosted-api uses --metadata-api."
     );
     eprintln!(
         "  devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID> [--device <DEVICE_ID>]"
@@ -7321,6 +7466,69 @@ mod tests {
     }
 
     #[test]
+    fn sync_hosted_api_metadata_args_use_session_token_env_and_reject_account() {
+        let args = vec![
+            "--db".to_string(),
+            "devbox.sqlite3".to_string(),
+            "--cache".to_string(),
+            "cache".to_string(),
+            "--remote-kind".to_string(),
+            "hosted".to_string(),
+            "--object-access-api".to_string(),
+            "https://metadata.example".to_string(),
+            "--object-access-project".to_string(),
+            "project-1".to_string(),
+            "--object-access-lease".to_string(),
+            "lease-1".to_string(),
+            "--metadata-mode".to_string(),
+            "hosted-api".to_string(),
+            "--metadata-api".to_string(),
+            "https://metadata.example".to_string(),
+            "--metadata-session-token-env".to_string(),
+            "DEVBOX_SESSION_TOKEN".to_string(),
+            "--metadata-project".to_string(),
+            "project-1".to_string(),
+            "snapshot-1".to_string(),
+        ];
+
+        let parsed = parse_sync_snapshot_args(&args, true).expect("hosted metadata args parse");
+
+        assert_eq!(parsed.metadata.mode, SyncMetadataModeArg::HostedApi);
+        assert_eq!(
+            parsed.metadata.session_token_env.as_deref(),
+            Some("DEVBOX_SESSION_TOKEN")
+        );
+        assert_eq!(parsed.metadata.account_id, None);
+        assert!(!format!("{:?}", parsed.metadata).contains("raw-hosted-token"));
+
+        let mut forged_account = args.clone();
+        let insert_at = forged_account.len() - 1;
+        forged_account.insert(insert_at, "--metadata-account".to_string());
+        forged_account.insert(insert_at + 1, "account-forged".to_string());
+        let error = parse_sync_snapshot_args(&forged_account, true)
+            .expect_err("hosted API account must not be supplied");
+        assert_eq!(
+            error,
+            "sync snapshot hosted API metadata derives account identity from the authenticated session; remove --metadata-account"
+        );
+
+        let mut bad_env = args.clone();
+        let env_index = bad_env
+            .iter()
+            .position(|arg| arg == "--metadata-session-token-env")
+            .expect("env flag exists")
+            + 1;
+        bad_env[env_index] = "raw-hosted-token".to_string();
+        let error =
+            parse_sync_snapshot_args(&bad_env, true).expect_err("invalid env name is rejected");
+        assert_eq!(
+            error,
+            "--metadata-session-token-env requires an environment variable name"
+        );
+        assert!(!error.contains("raw-hosted-token"));
+    }
+
+    #[test]
     fn sync_metadata_endpoint_validation_does_not_reflect_secret_material() {
         let args = vec![
             "--db".to_string(),
@@ -7373,6 +7581,8 @@ mod tests {
                 account_id: None,
                 project_id: Some("project-1".to_string()),
                 endpoint: None,
+                api: None,
+                session_token_env: None,
             },
         )
         .expect("metadata options derive account");

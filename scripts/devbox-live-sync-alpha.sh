@@ -31,13 +31,19 @@ args=(
 )
 
 if [[ "$remote_kind" == "hosted" ]]; then
-  : "${DEVBOX_METADATA_DB:?set DEVBOX_METADATA_DB for hosted live sync metadata}"
+  : "${DEVBOX_METADATA_API:?set DEVBOX_METADATA_API for hosted metadata/object-access API}"
   : "${DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT for hosted object-access scope}"
+  : "${DEVBOX_OBJECT_ACCESS_LEASE:?set DEVBOX_OBJECT_ACCESS_LEASE for hosted object access}"
+  : "${DEVBOX_SESSION_TOKEN:?set DEVBOX_SESSION_TOKEN with devbox auth hosted-login}"
   args+=(
     --remote-kind hosted
-    --object-access-api "${DEVBOX_METADATA_API:?set DEVBOX_METADATA_API}"
+    --object-access-api "$DEVBOX_METADATA_API"
     --object-access-session-token-env DEVBOX_SESSION_TOKEN
-    --object-access-lease "${DEVBOX_OBJECT_ACCESS_LEASE:?set DEVBOX_OBJECT_ACCESS_LEASE}"
+    --object-access-lease "$DEVBOX_OBJECT_ACCESS_LEASE"
+    --metadata-mode hosted-api
+    --metadata-api "$DEVBOX_METADATA_API"
+    --metadata-session-token-env DEVBOX_SESSION_TOKEN
+    --metadata-project "$DEVBOX_METADATA_PROJECT"
   )
 elif [[ "$remote_kind" == "s3" ]]; then
   : "${DEVBOX_METADATA_DB:?set DEVBOX_METADATA_DB for s3 live sync}"
@@ -64,7 +70,7 @@ else
   exit 2
 fi
 
-if [[ -n "${DEVBOX_METADATA_DB:-}" ]]; then
+if [[ -n "${DEVBOX_METADATA_DB:-}" && "$remote_kind" != "hosted" ]]; then
   args+=(--metadata-mode mock-dev-sqlite --metadata-db "$DEVBOX_METADATA_DB")
   if [[ -n "${DEVBOX_METADATA_ACCOUNT:-}" ]]; then
     args+=(--metadata-account "$DEVBOX_METADATA_ACCOUNT")

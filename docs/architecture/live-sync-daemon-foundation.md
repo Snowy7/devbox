@@ -55,6 +55,28 @@ devbox-daemon sync \
   <TARGET_DIR>
 ```
 
+External hosted alpha sync swaps the shared mock metadata DB for the live account-session API:
+
+```text
+devbox-daemon sync \
+  --db <DB_PATH> \
+  --cache <CACHE_ROOT> \
+  --remote-kind hosted \
+  --object-access-api <URL> \
+  --object-access-lease <LEASE_ID> \
+  --metadata-mode hosted-api \
+  --metadata-api <URL> \
+  --metadata-project <PROJECT_ID> \
+  --metadata-session-token-env DEVBOX_SESSION_TOKEN \
+  --push \
+  --once \
+  <PROJECT_ROOT>
+```
+
+Hosted mode transfers encrypted object bytes through the metadata API and derives metadata account
+scope from the authenticated session. It does not require local R2 keys or a shared metadata SQLite
+database.
+
 Without `--once`, the daemon uses the same recursive filesystem notifications, debounce planner,
 idle timeout, and bounded loop controls as `watch`. Filesystem events remain hints; each cycle
 reconciles by scanning the tree.

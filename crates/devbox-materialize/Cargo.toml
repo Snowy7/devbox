@@ -17,6 +17,9 @@ devbox-store = { path = "../devbox-store" }
 devbox-sync = { path = "../devbox-sync" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
+axum = "0.7"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }

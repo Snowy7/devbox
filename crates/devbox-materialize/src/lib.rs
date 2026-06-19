@@ -6,9 +6,9 @@ use devbox_conflict::{
 };
 use devbox_core::{BlobId, DomainIdError, ManifestEntryKind, PolicyDecision};
 use devbox_metadata::{
-    DeviceProjectCursorRecord, MetadataError, MetadataStore,
-    PublishSnapshotRequest as MetadataPublishSnapshotRequest, PublishedSnapshotRecord,
-    UpdateCursorRequest, UpsertDeviceRequest, UpsertProjectRequest,
+    DeviceProjectCursorRecord, ErrorResponse, MetadataAuthMode, MetadataError,
+    MetadataServiceConfig, MetadataStore, PublishSnapshotRequest as MetadataPublishSnapshotRequest,
+    PublishedSnapshotRecord, UpdateCursorRequest, UpsertDeviceRequest, UpsertProjectRequest,
 };
 use devbox_snapshot::{RestoreMaterializer, RestorePlan, RestorePlanError, RestorePlanSummary};
 use devbox_store::{
@@ -161,6 +161,11 @@ pub trait HostedMetadataClient {
         project_id: &str,
         snapshot_id: &str,
     ) -> MaterializeResult<Option<PublishedSnapshotRecord>>;
+    fn latest_snapshot(
+        &mut self,
+        account_id: &str,
+        project_id: &str,
+    ) -> MaterializeResult<Option<PublishedSnapshotRecord>>;
     fn compare_and_set_cursor(
         &mut self,
         request: UpdateCursorRequest,
@@ -199,12 +204,288 @@ impl<T: MetadataStore + ?Sized> HostedMetadataClient for T {
         )?)
     }
 
+    fn latest_snapshot(
+        &mut self,
+        account_id: &str,
+        project_id: &str,
+    ) -> MaterializeResult<Option<PublishedSnapshotRecord>> {
+        Ok(MetadataStore::latest_snapshot(
+            self, account_id, project_id,
+        )?)
+    }
+
     fn compare_and_set_cursor(
         &mut self,
         request: UpdateCursorRequest,
     ) -> MaterializeResult<DeviceProjectCursorRecord> {
         Ok(MetadataStore::compare_and_set_cursor(self, request)?)
     }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct HostedMetadataApiConfig {
+    endpoint: String,
+    session_token_env: String,
+    session_token: String,
+}
+
+impl std::fmt::Debug for HostedMetadataApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostedMetadataApiConfig")
+            .field("endpoint", &self.endpoint)
+            .field("session_token_env", &self.session_token_env)
+            .field("session_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl HostedMetadataApiConfig {
+    pub fn new(
+        endpoint: impl Into<String>,
+        session_token_env: impl Into<String>,
+        session_token: impl Into<String>,
+    ) -> MaterializeResult<Self> {
+        let endpoint = endpoint.into();
+        let session_token_env = session_token_env.into();
+        validate_env_name(&session_token_env, "--metadata-session-token-env")?;
+        let session_token = session_token.into();
+        if session_token.trim().is_empty() {
+            return Err(metadata_invalid_request("metadata session token is empty"));
+        }
+        let checked = MetadataServiceConfig {
+            endpoint,
+            auth_mode: MetadataAuthMode::AccountSession,
+        }
+        .validate()?;
+        Ok(Self {
+            endpoint: checked.endpoint,
+            session_token_env,
+            session_token,
+        })
+    }
+
+    pub fn from_env(
+        endpoint: impl Into<String>,
+        session_token_env: impl Into<String>,
+    ) -> MaterializeResult<Self> {
+        let session_token_env = session_token_env.into();
+        let session_token = std::env::var(&session_token_env).map_err(|_| {
+            metadata_invalid_request(format!(
+                "metadata session token env var {session_token_env} is not set"
+            ))
+        })?;
+        Self::new(endpoint, session_token_env, session_token)
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn session_token_env(&self) -> &str {
+        &self.session_token_env
+    }
+}
+
+#[derive(Clone)]
+pub struct HostedMetadataApiClient {
+    config: HostedMetadataApiConfig,
+}
+
+impl std::fmt::Debug for HostedMetadataApiClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostedMetadataApiClient")
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl HostedMetadataApiClient {
+    pub fn new(config: HostedMetadataApiConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn config(&self) -> &HostedMetadataApiConfig {
+        &self.config
+    }
+
+    fn url(&self, path: &str) -> MaterializeResult<String> {
+        Ok(format!(
+            "{}{}",
+            self.config.endpoint.trim_end_matches('/'),
+            path
+        ))
+    }
+
+    fn bearer(&self, request: ureq::Request) -> ureq::Request {
+        request.set(
+            "authorization",
+            &format!("Bearer {}", self.config.session_token),
+        )
+    }
+}
+
+impl HostedMetadataClient for HostedMetadataApiClient {
+    fn upsert_device(&mut self, request: UpsertDeviceRequest) -> MaterializeResult<()> {
+        let url = self.url("/v1/devices")?;
+        let _: devbox_metadata::DeviceRecord = self
+            .bearer(ureq::put(&url))
+            .send_json(serde_json::to_value(request)?)
+            .map_err(metadata_http_error)?
+            .into_json()
+            .map_err(metadata_response_error)?;
+        Ok(())
+    }
+
+    fn upsert_project(&mut self, request: UpsertProjectRequest) -> MaterializeResult<()> {
+        let url = self.url("/v1/projects")?;
+        let _: devbox_metadata::ProjectRecord = self
+            .bearer(ureq::put(&url))
+            .send_json(serde_json::to_value(request)?)
+            .map_err(metadata_http_error)?
+            .into_json()
+            .map_err(metadata_response_error)?;
+        Ok(())
+    }
+
+    fn publish_snapshot(
+        &mut self,
+        request: MetadataPublishSnapshotRequest,
+    ) -> MaterializeResult<PublishedSnapshotRecord> {
+        let path = format!(
+            "/v1/projects/{}/snapshots",
+            api_path_segment(&request.project_id, "project id")?
+        );
+        let url = self.url(&path)?;
+        self.bearer(ureq::put(&url))
+            .send_json(serde_json::to_value(request)?)
+            .map_err(metadata_http_error)?
+            .into_json()
+            .map_err(metadata_response_error)
+    }
+
+    fn snapshot(
+        &mut self,
+        _account_id: &str,
+        project_id: &str,
+        snapshot_id: &str,
+    ) -> MaterializeResult<Option<PublishedSnapshotRecord>> {
+        let path = format!(
+            "/v1/projects/{}/snapshots/{}",
+            api_path_segment(project_id, "project id")?,
+            api_path_segment(snapshot_id, "snapshot id")?
+        );
+        let url = self.url(&path)?;
+        match self.bearer(ureq::get(&url)).call() {
+            Ok(response) => response
+                .into_json()
+                .map(Some)
+                .map_err(metadata_response_error),
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(error) => Err(metadata_http_error(error)),
+        }
+    }
+
+    fn latest_snapshot(
+        &mut self,
+        _account_id: &str,
+        project_id: &str,
+    ) -> MaterializeResult<Option<PublishedSnapshotRecord>> {
+        let path = format!(
+            "/v1/projects/{}/snapshots/latest",
+            api_path_segment(project_id, "project id")?
+        );
+        let url = self.url(&path)?;
+        match self.bearer(ureq::get(&url)).call() {
+            Ok(response) => response
+                .into_json()
+                .map(Some)
+                .map_err(metadata_response_error),
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(error) => Err(metadata_http_error(error)),
+        }
+    }
+
+    fn compare_and_set_cursor(
+        &mut self,
+        request: UpdateCursorRequest,
+    ) -> MaterializeResult<DeviceProjectCursorRecord> {
+        let path = format!(
+            "/v1/cursors/{}/{}",
+            api_path_segment(&request.project_id, "project id")?,
+            api_path_segment(&request.device_id, "device id")?
+        );
+        let url = self.url(&path)?;
+        self.bearer(ureq::put(&url))
+            .send_json(serde_json::to_value(request)?)
+            .map_err(metadata_http_error)?
+            .into_json()
+            .map_err(metadata_response_error)
+    }
+}
+
+fn metadata_invalid_request(message: impl Into<String>) -> MaterializeError {
+    MaterializeError::Metadata(MetadataError::InvalidRequest(message.into()))
+}
+
+fn metadata_response_error(error: std::io::Error) -> MaterializeError {
+    metadata_invalid_request(format!("hosted metadata response was invalid: {error}"))
+}
+
+fn metadata_http_error(error: ureq::Error) -> MaterializeError {
+    match error {
+        ureq::Error::Status(status, response) => {
+            if status == 409 {
+                return MaterializeError::Metadata(MetadataError::CursorPreconditionFailed {
+                    current_cursor: None,
+                });
+            }
+            let message = response
+                .into_json::<ErrorResponse>()
+                .ok()
+                .map(|body| body.error)
+                .unwrap_or_else(|| format!("hosted metadata request failed: http_status_{status}"));
+            MaterializeError::Metadata(MetadataError::InvalidRequest(message))
+        }
+        ureq::Error::Transport(_) => {
+            metadata_invalid_request("hosted metadata request failed: transport_error")
+        }
+    }
+}
+
+fn validate_env_name(name: &str, flag: &str) -> MaterializeResult<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(metadata_invalid_request(format!(
+            "{flag} requires an environment variable name"
+        )));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(metadata_invalid_request(format!(
+            "{flag} requires an environment variable name"
+        )));
+    }
+    Ok(())
+}
+
+fn api_path_segment(value: &str, label: &'static str) -> MaterializeResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed == "*"
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed
+            .chars()
+            .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
+    {
+        return Err(metadata_invalid_request(format!(
+            "{label} must be a safe API path segment"
+        )));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,20 +707,25 @@ fn publish_snapshot_inner(
     let manifest_put =
         put_encrypted_manifest(provider, &sync_key, &manifest_object_key, &plaintext)?;
 
-    if let Some(metadata) = metadata {
+    let published_metadata = if let Some(metadata) = metadata {
         let published_at = store.current_timestamp()?;
-        register_published_snapshot_metadata(
+        Some(register_published_snapshot_metadata(
             metadata,
             &identity,
             &persisted,
             &manifest_object_key,
             &plaintext,
             &published_at,
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
 
     Ok(PublishedSnapshotBundle {
-        account_id: identity.account_id,
+        account_id: published_metadata
+            .as_ref()
+            .map(|record| record.account_id.clone())
+            .unwrap_or(identity.account_id),
         device_id: identity.device_id,
         project_id: persisted.project.id,
         snapshot_id: persisted.snapshot.id,
@@ -772,7 +1058,7 @@ fn register_published_snapshot_metadata(
     manifest_object_key: &ObjectKey,
     manifest_plaintext: &[u8],
     published_at: &str,
-) -> MaterializeResult<()> {
+) -> MaterializeResult<PublishedSnapshotRecord> {
     metadata.upsert_device(UpsertDeviceRequest {
         account_id: identity.account_id.clone(),
         device_id: identity.device_id.clone(),
@@ -798,9 +1084,7 @@ fn register_published_snapshot_metadata(
         total_size_bytes: persisted.snapshot.total_size_bytes,
         published_by_device_id: identity.device_id.clone(),
         published_at: published_at.to_string(),
-    })?;
-
-    Ok(())
+    })
 }
 
 fn resolve_manifest_object_key(
@@ -1373,7 +1657,7 @@ fn policy_from_wire(decision: &str, reason: Option<String>) -> MaterializeResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devbox_metadata::InMemoryMetadataStore;
+    use devbox_metadata::{app_with_config, HostedApiConfig, InMemoryMetadataStore, MetadataStore};
     use devbox_snapshot::{RestoreTargetStatus, SnapshotManifestBuilder};
     use devbox_store::{
         local_project_id, BlobCache, EnsureLocalIdentityOptions, NewProject, NewSnapshot,
@@ -1399,6 +1683,78 @@ mod tests {
         assert!(!put.uploaded);
         assert_eq!(provider.put_calls.get(), 1);
         assert_eq!(provider.get_calls.get(), 2);
+    }
+
+    #[test]
+    fn hosted_metadata_api_client_publishes_discovers_latest_and_cas_cursor() {
+        let fixture = FoundationFixture::new();
+        fixture.write("README.md", "hosted api metadata\n");
+        let snapshot_id = fixture.persist_source_snapshot();
+        let identity = local_identity_for_fixture(&fixture.source_db);
+        let raw_token = "raw-hosted-metadata-session-token";
+        let server = start_hosted_metadata_server(&identity.account_id, raw_token);
+        let provider = LocalFilesystemBlobProvider::open(&fixture.remote).expect("remote opens");
+        let config =
+            HostedMetadataApiConfig::new(&server.url, "DEVBOX_TEST_METADATA_TOKEN", raw_token)
+                .expect("hosted metadata config validates");
+        let formatted = format!("{config:?}");
+        assert!(!formatted.contains(raw_token));
+        assert!(formatted.contains("<redacted>"));
+        let mut client = HostedMetadataApiClient::new(config);
+
+        let published = publish_snapshot_with_metadata(
+            &PublishSnapshotRequest {
+                db_path: fixture.source_db.clone(),
+                cache_root: fixture.source_cache.clone(),
+                snapshot_id: snapshot_id.clone(),
+            },
+            &provider,
+            &mut client,
+        )
+        .expect("hosted metadata publish succeeds");
+        assert_eq!(published.account_id, identity.account_id);
+
+        let latest = HostedMetadataClient::latest_snapshot(
+            &mut client,
+            "caller-supplied-account-is-ignored-by-http-client",
+            &published.project_id,
+        )
+        .expect("latest lookup succeeds")
+        .expect("latest snapshot exists");
+        assert_eq!(latest.account_id, identity.account_id);
+        assert_eq!(latest.snapshot_id, snapshot_id);
+        assert_eq!(
+            latest.manifest_object_key,
+            published.manifest_object_key.to_string()
+        );
+
+        let cursor = client
+            .compare_and_set_cursor(UpdateCursorRequest {
+                account_id: "forged-account".to_string(),
+                device_id: identity.device_id.clone(),
+                project_id: published.project_id.clone(),
+                expected_cursor: None,
+                next_cursor: Some(snapshot_id.clone()),
+                updated_at: "2026-06-19T10:00:00Z".to_string(),
+            })
+            .expect("cursor CAS succeeds");
+        assert_eq!(cursor.account_id, identity.account_id);
+        assert_eq!(cursor.cursor_value.as_deref(), Some(snapshot_id.as_str()));
+
+        let stale = client
+            .compare_and_set_cursor(UpdateCursorRequest {
+                account_id: "forged-account".to_string(),
+                device_id: identity.device_id.clone(),
+                project_id: published.project_id.clone(),
+                expected_cursor: None,
+                next_cursor: Some("snapshot-stale".to_string()),
+                updated_at: "2026-06-19T10:01:00Z".to_string(),
+            })
+            .expect_err("stale cursor is rejected");
+        assert!(matches!(
+            stale,
+            MaterializeError::Metadata(MetadataError::CursorPreconditionFailed { .. })
+        ));
     }
 
     #[test]
@@ -2471,6 +2827,73 @@ mod tests {
             },
         )
         .expect("metadata alias publishes");
+    }
+
+    struct HostedMetadataServer {
+        url: String,
+    }
+
+    fn start_hosted_metadata_server(account_id: &str, raw_token: &str) -> HostedMetadataServer {
+        let mut store = InMemoryMetadataStore::default();
+        seed_account_session(&mut store, account_id, raw_token);
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("hosted metadata listener binds");
+        listener
+            .set_nonblocking(true)
+            .expect("listener set nonblocking");
+        let addr = listener.local_addr().expect("listener addr reads");
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime creates");
+            runtime.block_on(async move {
+                let listener =
+                    tokio::net::TcpListener::from_std(listener).expect("tokio listener wraps");
+                axum::serve(
+                    listener,
+                    app_with_config(store, HostedApiConfig::hosted_alpha()),
+                )
+                .await
+                .expect("hosted metadata server runs");
+            });
+        });
+        let server = HostedMetadataServer {
+            url: format!("http://{addr}"),
+        };
+        for _ in 0..50 {
+            if ureq::get(&format!("{}/health", server.url)).call().is_ok() {
+                return server;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("hosted metadata server did not become ready");
+    }
+
+    fn seed_account_session(store: &mut InMemoryMetadataStore, account_id: &str, raw_token: &str) {
+        let proof =
+            devbox_auth::create_account_ownership_proof(devbox_auth::AccountOwnershipProofInput {
+                account_id,
+                provider_kind: "alpha-invite",
+                provider_issuer: "devbox-alpha",
+                provider_subject: "user@example.com",
+                verified_email: Some("user@example.com"),
+                verified_domain: None,
+                proof_issued_at: "2026-06-19T09:00:00Z",
+                proof_expires_at_unix: 4_000_000_000,
+            })
+            .expect("proof creates");
+        store
+            .upsert_account_ownership_proof(proof.clone())
+            .expect("proof upserts");
+        let session = devbox_auth::create_account_session(
+            &proof,
+            raw_token,
+            "2026-06-19T09:01:00Z",
+            101,
+            4_000_000_000,
+        )
+        .expect("session creates");
+        store
+            .upsert_account_session(session)
+            .expect("session upserts");
     }
 
     struct RacingManifestProvider {

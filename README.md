@@ -93,6 +93,7 @@ The current CLI can create/list/show/restore local snapshots and scan pending lo
 - `devbox secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]`
 - `devbox-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT> [--once]`
 - `devbox-daemon sync --db <DB_PATH> --cache <CACHE_ROOT> --remote <REMOTE_DIR> [--metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>] [--push|--pull|--two-way] <PROJECT_ROOT> [--once]`
+- `devbox-daemon sync --remote-kind hosted --object-access-api <URL> --object-access-lease <LEASE_ID> --metadata-mode hosted-api --metadata-api <URL> --metadata-project <PROJECT_ID> [--metadata-session-token-env DEVBOX_SESSION_TOKEN] ...`
 
 Alpha helper scripts:
 
@@ -101,14 +102,23 @@ Alpha helper scripts:
 - `scripts/package-cli.sh <VERSION>` builds macOS/Linux alpha tool archives with CLI, daemon, metadata server, docs, env template, and helper scripts.
 - `scripts/package-desktop-alpha.sh <VERSION>` builds an unsigned Electron alpha control-surface bundle for macOS/Linux.
 
-Hosted metadata sync wiring is explicit opt-in for dev/test flows:
+Hosted metadata sync wiring is explicit opt-in. Local deterministic smoke tests can use the
+in-process SQLite store:
 
 - `devbox sync publish-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB>`
 - `devbox sync import-snapshot ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --metadata-account <ACCOUNT_ID>`
 - `devbox sync materialize ... --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-project <PROJECT_ID> --metadata-account <ACCOUNT_ID>`
 - `devbox-daemon sync --pull --metadata-mode mock-dev-sqlite --metadata-db <METADATA_DB> --metadata-account <ACCOUNT_ID> --metadata-project <PROJECT_ID> --to <TARGET_DIR> --apply ...`
 
-For import/materialize, the hosted metadata account scope is either passed explicitly with
+External hosted alpha testers should use the account-session HTTP API instead of a shared metadata
+DB:
+
+- `devbox sync publish-snapshot ... --metadata-mode hosted-api --metadata-api <URL> [--metadata-session-token-env DEVBOX_SESSION_TOKEN]`
+- `devbox sync import-snapshot ... --metadata-mode hosted-api --metadata-api <URL> --metadata-project <PROJECT_ID> [--metadata-session-token-env DEVBOX_SESSION_TOKEN]`
+- `devbox sync materialize ... --metadata-mode hosted-api --metadata-api <URL> --metadata-project <PROJECT_ID> [--metadata-session-token-env DEVBOX_SESSION_TOKEN]`
+- `devbox-daemon sync --remote-kind hosted ... --metadata-mode hosted-api --metadata-api <URL> --metadata-project <PROJECT_ID> ...`
+
+For local/mock import/materialize, the mock-dev metadata account scope is either passed explicitly with
 `--metadata-account <ACCOUNT_ID>` or derived from `--mock-key-source-db <PUBLISHER_DB>` for the
 legacy local/mock trust bootstrap. New paired receiver flows should run `devices join`,
 `devices approve-join`, and `devices complete` first; after completion the receiver can decrypt with
@@ -116,8 +126,10 @@ its own local key state and does not need `--mock-key-source-db`. Invite-based h
 session-auth hosted metadata request handling, and server-mediated object-access prefix grants now
 exist. The grant is the authorization boundary for a shared bucket; raw R2/S3 credentials are not
 returned to tester clients. Live daemon sync with `--remote-kind hosted` transfers encrypted object
-bytes through the metadata API using only the tester's session token on the client. Trusted operators
-can still use `--remote-kind s3` for direct S3/R2 smoke tests with local bucket env keys.
+bytes and resolves metadata through the metadata API using only the tester's session token on the
+client; hosted API mode rejects tester-supplied `--metadata-account` and uses the authenticated
+server session account. Trusted operators can still use `--remote-kind s3` for direct S3/R2 smoke
+tests with local bucket env keys.
 Railway/Postgres deployment is wired for the hosted metadata backend; OAuth, UI onboarding, and
 multi-region/observability hardening remain deferred.
 
