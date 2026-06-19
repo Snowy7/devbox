@@ -12,3 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 loom-core = { path = "../loom-core" }
+loom-store = { path = "../loom-store" }
+loom-sync = { path = "../loom-sync" }
+loom-worktree = { path = "../loom-worktree" }
+notify = "6"
+
+[dev-dependencies]
+tempfile = "3"

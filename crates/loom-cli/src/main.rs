@@ -1,4 +1,5 @@
 use loom_core::RevisionBoundary;
+use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
 use loom_store::{
     path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore, RemoteConfig,
     ResolvedRevisionTarget,
@@ -79,10 +80,11 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "sync",
-        usage: "loom sync [FOLDER]",
+        usage: "loom sync [FOLDER]\n       loom sync start [FOLDER]\n       loom sync stop [FOLDER]\n       loom sync status [FOLDER]",
         summary: "Synchronize a shared folder",
         implemented: true,
-        planned_behavior: "reconcile local and remote folder revisions through Loom cursors",
+        planned_behavior:
+            "reconcile local and remote folder revisions through Loom cursors, once or in the background",
     },
     CommandSpec {
         name: "clone",
@@ -358,6 +360,18 @@ fn run_remote_add(name: &str, location: &str, folder: Option<PathBuf>) -> Result
 }
 
 fn run_sync(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("start") => return run_sync_start(&args[1..]),
+        Some("stop") => return run_sync_stop(&args[1..]),
+        Some("status") => return run_sync_daemon_status(&args[1..]),
+        Some("run-loop") => return run_sync_run_loop(&args[1..]),
+        _ => {}
+    }
+
+    run_sync_once(args)
+}
+
+fn run_sync_once(args: &[String]) -> Result<(), String> {
     let store = match args {
         [] => open_store_for_sync_source(None)?,
         [folder] => open_store_for_sync_source(Some(PathBuf::from(folder)))?,
@@ -404,12 +418,63 @@ fn run_sync(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn run_sync_start(args: &[String]) -> Result<(), String> {
+    let parsed = parse_sync_daemon_args(args, "start")?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let mut options = DaemonStartOptions::new(store.folder_root());
+    options.debounce_ms = parsed.debounce_ms;
+    options.poll_ms = parsed.poll_ms;
+    let report = loom_daemon::start_background(&options).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", report.folder.display());
+    println!("Background sync: starting");
+    println!("Daemon pid: {}", report.pid);
+    println!("Status: {}", report.status_path.display());
+    println!("Log: {}", report.log_path.display());
+    Ok(())
+}
+
+fn run_sync_stop(args: &[String]) -> Result<(), String> {
+    let folder = parse_optional_folder(args, "stop")?;
+    let store = open_store_from_optional_folder(folder)?;
+    let report =
+        loom_daemon::request_stop(store.folder_root()).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", report.folder.display());
+    println!("Background sync: {}", report.status.state);
+    println!("Stop request: {}", report.stop_path.display());
+    print_daemon_status(&report.status);
+    Ok(())
+}
+
+fn run_sync_daemon_status(args: &[String]) -> Result<(), String> {
+    let folder = parse_optional_folder(args, "status")?;
+    let store = open_store_from_optional_folder(folder)?;
+    let status =
+        loom_daemon::read_status(store.folder_root()).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", status.folder.display());
+    print_daemon_status(&status);
+    Ok(())
+}
+
+fn run_sync_run_loop(args: &[String]) -> Result<(), String> {
+    let parsed = parse_sync_daemon_args(args, "run-loop")?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let mut options = DaemonLoopOptions::new(store.folder_root());
+    options.debounce_ms = parsed.debounce_ms;
+    options.poll_ms = parsed.poll_ms;
+    options.max_cycles = parsed.max_cycles;
+    loom_daemon::run_loop(&options).map_err(|error| error.to_string())
+}
+
 fn run_clone(args: &[String]) -> Result<(), String> {
     let (remote_path, target) = match args {
         [remote_path, target] => (PathBuf::from(remote_path), PathBuf::from(target)),
         _ => return Err("clone requires a remote path and target folder".to_string()),
     };
-    let remote = LocalFilesystemRemote::new(remote_path);
+    let remote_path = absolute_path_from_path(&remote_path)?;
+    let remote = LocalFilesystemRemote::new(&remote_path);
     let remote_revision_id = remote
         .get_cursor(loom_sync::DEFAULT_CURSOR_ID)
         .map_err(|error| error.to_string())?
@@ -446,9 +511,20 @@ fn run_clone(args: &[String]) -> Result<(), String> {
     store
         .coalesce_folder_revision(RevisionBoundary::Sync, restored_capture.file_versions())
         .map_err(|error| error.to_string())?;
+    store
+        .upsert_remote(
+            RemoteConfig::new(
+                DEFAULT_REMOTE_NAME,
+                LOCAL_FILESYSTEM_REMOTE_KIND,
+                remote_path.to_string_lossy().into_owned(),
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
 
     println!("Cloned revision: {}", report.revision_id());
     println!("Target: {}", store.folder_root().display());
+    println!("Remote: {}", remote.root().display());
     println!("Imported objects: {}", import_report.imported_objects);
     println!(
         "Imported metadata: {} file versions, {} revisions, {} checkpoints, {} pins",
@@ -736,8 +812,12 @@ fn open_store_for_sync_source(folder: Option<PathBuf>) -> Result<LocalStore, Str
 
 fn absolute_path(path: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(path);
+    absolute_path_from_path(&path)
+}
+
+fn absolute_path_from_path(path: &Path) -> Result<PathBuf, String> {
     if path.is_absolute() {
-        return Ok(path);
+        return Ok(path.to_path_buf());
     }
 
     Ok(std::env::current_dir()
@@ -761,6 +841,14 @@ struct DiffArgs {
 struct RestoreArgs {
     folder: Option<PathBuf>,
     target: String,
+}
+
+#[derive(Debug, Clone)]
+struct SyncDaemonArgs {
+    folder: Option<PathBuf>,
+    debounce_ms: u64,
+    poll_ms: u64,
+    max_cycles: Option<usize>,
 }
 
 fn parse_checkpoint_args(args: &[String]) -> Result<CheckpointArgs, String> {
@@ -833,6 +921,80 @@ fn parse_restore_args(args: &[String]) -> Result<RestoreArgs, String> {
     }
 }
 
+fn parse_sync_daemon_args(args: &[String], command: &str) -> Result<SyncDaemonArgs, String> {
+    let mut folder = None;
+    let mut debounce_ms = loom_daemon::DEFAULT_DEBOUNCE_MS;
+    let mut poll_ms = loom_daemon::DEFAULT_POLL_MS;
+    let mut max_cycles = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--debounce-ms" => {
+                index += 1;
+                debounce_ms = parse_u64_flag(
+                    "--debounce-ms",
+                    args.get(index)
+                        .ok_or_else(|| "--debounce-ms requires a value".to_string())?,
+                )?;
+            }
+            "--poll-ms" => {
+                index += 1;
+                poll_ms = parse_u64_flag(
+                    "--poll-ms",
+                    args.get(index)
+                        .ok_or_else(|| "--poll-ms requires a value".to_string())?,
+                )?;
+            }
+            "--max-cycles" if command == "run-loop" => {
+                index += 1;
+                max_cycles = Some(parse_usize_flag(
+                    "--max-cycles",
+                    args.get(index)
+                        .ok_or_else(|| "--max-cycles requires a value".to_string())?,
+                )?);
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("sync {command} unknown option '{value}'"));
+            }
+            value => {
+                if folder.replace(PathBuf::from(value)).is_some() {
+                    return Err(format!("sync {command} accepts at most one folder"));
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    Ok(SyncDaemonArgs {
+        folder,
+        debounce_ms,
+        poll_ms,
+        max_cycles,
+    })
+}
+
+fn parse_optional_folder(args: &[String], command: &str) -> Result<Option<PathBuf>, String> {
+    match args {
+        [] => Ok(None),
+        [folder] => Ok(Some(PathBuf::from(folder))),
+        _ => Err(format!("sync {command} accepts at most one folder")),
+    }
+}
+
+fn parse_u64_flag(flag: &str, value: &str) -> Result<u64, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} requires a non-negative integer"))
+}
+
+fn parse_usize_flag(flag: &str, value: &str) -> Result<usize, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} requires a non-negative integer"))
+}
+
 fn looks_like_folder_arg(value: &str) -> bool {
     Path::new(value).is_dir()
 }
@@ -855,6 +1017,37 @@ fn ensure_no_blocked_or_deferred(capture: &WorktreeCapture, command: &str) -> Re
     }
 
     Ok(())
+}
+
+fn print_daemon_status(status: &loom_daemon::DaemonStatus) {
+    println!("Daemon state: {}", status.state);
+    println!(
+        "Daemon pid: {}",
+        status
+            .pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!("Remote: {}", status.remote_name.as_deref().unwrap_or("-"));
+    println!(
+        "Remote location: {}",
+        status.remote_location.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Local revision: {}",
+        status.last_local_revision.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Remote revision: {}",
+        status.last_remote_revision.as_deref().unwrap_or("-")
+    );
+    println!("Cycles: {}", status.cycles);
+    println!("Stop requested: {}", status.stop_requested);
+    println!(
+        "Last error: {}",
+        status.last_error.as_deref().unwrap_or("-")
+    );
+    println!("Updated: {}", status.updated_at);
 }
 
 fn result_to_exit(result: Result<(), String>) -> ExitCode {

@@ -1041,6 +1041,7 @@ name = "loom-cli"
 version = "0.1.0"
 dependencies = [
  "loom-core",
+ "loom-daemon",
  "loom-store",
  "loom-sync",
  "loom-worktree",
@@ -1056,6 +1057,11 @@ name = "loom-daemon"
 version = "0.1.0"
 dependencies = [
  "loom-core",
+ "loom-store",
+ "loom-sync",
+ "loom-worktree",
+ "notify",
+ "tempfile",
 ]
 
 [[package]]
