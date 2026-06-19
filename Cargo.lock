@@ -1041,6 +1041,9 @@ name = "loom-cli"
 version = "0.1.0"
 dependencies = [
  "loom-core",
+ "loom-store",
+ "loom-worktree",
+ "tempfile",
 ]
 
 [[package]]
@@ -1072,7 +1075,9 @@ dependencies = [
 name = "loom-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "loom-core",
+ "tempfile",
 ]
 
 [[package]]
@@ -1087,7 +1092,10 @@ dependencies = [
 name = "loom-worktree"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "loom-core",
+ "loom-store",
+ "tempfile",
 ]
 
 [[package]]
