@@ -18,4 +18,5 @@ loom-sync = { path = "../loom-sync" }
 loom-worktree = { path = "../loom-worktree" }
 
 [dev-dependencies]
+devbox-api = { path = "../devbox-api" }
 tempfile = "3"

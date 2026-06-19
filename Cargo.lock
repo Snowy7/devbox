@@ -343,8 +343,12 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 name = "devbox-api"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "devbox-platform",
  "loom-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1040,6 +1044,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 name = "loom-cli"
 version = "0.1.0"
 dependencies = [
+ "devbox-api",
  "loom-core",
  "loom-daemon",
  "loom-store",
@@ -1091,10 +1096,15 @@ dependencies = [
 name = "loom-sync"
 version = "0.1.0"
 dependencies = [
+ "devbox-api",
  "loom-core",
  "loom-pack",
  "loom-store",
+ "serde",
+ "serde_json",
  "tempfile",
+ "ureq",
+ "url",
 ]
 
 [[package]]

@@ -202,6 +202,56 @@ fn remote_sync_and_clone_move_folder_state() {
 }
 
 #[test]
+fn devbox_hosted_remote_sync_and_clone_move_folder_state() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let api =
+        devbox_api::spawn_local_test_server(dir.path().join("api")).expect("api server starts");
+    let api_url = api.base_url();
+    let source = dir.path().join("source");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("README.md"), "hello from hosted source\n").expect("readme writes");
+    std::fs::create_dir_all(source.join(".git")).expect("git dir creates");
+    std::fs::write(source.join(".git/config"), "local git metadata\n").expect("git writes");
+    std::fs::create_dir_all(source.join("node_modules/pkg")).expect("generated dir creates");
+    std::fs::write(source.join("node_modules/pkg/index.js"), "generated\n")
+        .expect("generated writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+
+    let remote_add = run_loom([
+        "remote",
+        "add",
+        "devbox",
+        &api_url,
+        source.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&remote_add);
+    let remote_add_stdout = stdout(&remote_add);
+    assert!(remote_add_stdout.contains("Kind: devbox"));
+    let clone_url = value_after(&remote_add_stdout, "Clone URL: ");
+
+    let sync = run_loom(["sync", source.to_str().expect("UTF-8 path")]);
+    assert_success(&sync);
+    let sync_stdout = stdout(&sync);
+    assert!(sync_stdout.contains("Remote: devbox"));
+    assert!(sync_stdout.contains("Synced revision:"));
+    assert!(sync_stdout.contains("Pack objects: 1"));
+
+    let clone = run_loom(["clone", &clone_url, target.to_str().expect("UTF-8 path")]);
+    assert_success(&clone);
+    let clone_stdout = stdout(&clone);
+    assert!(clone_stdout.contains("Cloned revision:"));
+    assert_eq!(
+        std::fs::read_to_string(target.join("README.md")).expect("readme reads"),
+        "hello from hosted source\n"
+    );
+    assert!(!target.join(".git").exists());
+    assert!(!target.join("node_modules/pkg/index.js").exists());
+    assert!(target.join(".loom").is_dir());
+}
+
+#[test]
 fn background_sync_start_stop_updates_materialized_target() {
     let dir = tempfile::tempdir().expect("temp dir");
     let source = dir.path().join("source");
