@@ -13,6 +13,7 @@ fn help_lists_the_mvp_commands() {
         "diff",
         "checkpoint",
         "restore",
+        "remote",
         "sync",
         "clone",
     ] {
@@ -22,14 +23,10 @@ fn help_lists_the_mvp_commands() {
 
 #[test]
 fn remaining_placeholder_commands_are_stable_and_successful() {
-    for command in ["sync", "clone"] {
-        let output = run_loom([command]);
+    let output = run_loom(["remote"]);
 
-        assert_success(&output);
-        let stdout = stdout(&output);
-        assert!(stdout.contains(&format!("loom {command}: not implemented yet")));
-        assert!(stdout.contains("Planned behavior:"));
-    }
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("remote command requires"));
 }
 
 #[test]
@@ -156,6 +153,151 @@ fn checkpoints_diff_and_restore_make_local_history_useful() {
 }
 
 #[test]
+fn remote_sync_and_clone_move_folder_state() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("README.md"), "hello from source\n").expect("readme writes");
+    std::fs::create_dir_all(source.join(".git")).expect("git dir creates");
+    std::fs::write(source.join(".git/config"), "local git metadata\n").expect("git writes");
+    std::fs::create_dir_all(source.join("node_modules/pkg")).expect("generated dir creates");
+    std::fs::write(source.join("node_modules/pkg/index.js"), "generated\n")
+        .expect("generated writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+
+    let remote_add = run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&remote_add);
+    assert!(stdout(&remote_add).contains("Kind: local-fs"));
+
+    let sync = run_loom(["sync", source.to_str().expect("UTF-8 path")]);
+    assert_success(&sync);
+    let sync_stdout = stdout(&sync);
+    assert!(sync_stdout.contains("Synced revision:"));
+    assert!(sync_stdout.contains("Pack objects: 1"));
+
+    let clone = run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&clone);
+    let clone_stdout = stdout(&clone);
+    assert!(clone_stdout.contains("Cloned revision:"));
+    assert_eq!(
+        std::fs::read_to_string(target.join("README.md")).expect("readme reads"),
+        "hello from source\n"
+    );
+    assert!(!target.join(".git").exists());
+    assert!(!target.join("node_modules/pkg/index.js").exists());
+    assert!(target.join(".loom").is_dir());
+}
+
+#[test]
+fn sync_refuses_divergent_remote_cursor() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("README.md"), "one\n").expect("readme writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+
+    std::fs::create_dir_all(remote.join("cursors")).expect("cursor dir creates");
+    std::fs::write(
+        remote.join("cursors").join("shared-folder.txt"),
+        "folder-revision-b3-other\n",
+    )
+    .expect("cursor writes");
+
+    let sync = run_loom(["sync", source.to_str().expect("UTF-8 path")]);
+
+    assert!(!sync.status.success());
+    assert!(stderr(&sync).contains("diverged"));
+}
+
+#[test]
+fn clone_refusal_leaves_existing_loom_target_unchanged() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::create_dir_all(&target).expect("target creates");
+    std::fs::write(source.join("README.md"), "remote source\n").expect("source readme writes");
+    std::fs::write(target.join("local.txt"), "local target\n").expect("target local writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    let sync = run_loom(["sync", source.to_str().expect("UTF-8 path")]);
+    assert_success(&sync);
+    let remote_revision = value_after(&stdout(&sync), "Synced revision: ");
+
+    assert_success(&run_loom(["track", target.to_str().expect("UTF-8 path")]));
+    let metadata_dir = target.join(".loom").join("metadata");
+    let shared_folder_before =
+        std::fs::read_to_string(metadata_dir.join("shared_folder.tsv")).expect("shared reads");
+    let file_versions_before =
+        std::fs::read_to_string(metadata_dir.join("file_versions.tsv")).expect("files read");
+    let revisions_before =
+        std::fs::read_to_string(metadata_dir.join("revisions.tsv")).expect("revisions read");
+    let object_count_before = count_files(&target.join(".loom").join("objects"));
+
+    let clone = run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!clone.status.success());
+    assert!(stderr(&clone).contains("already contains a Loom store"));
+    assert_eq!(
+        std::fs::read_to_string(metadata_dir.join("shared_folder.tsv")).expect("shared rereads"),
+        shared_folder_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(metadata_dir.join("file_versions.tsv")).expect("files reread"),
+        file_versions_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(metadata_dir.join("revisions.tsv")).expect("revisions reread"),
+        revisions_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join("local.txt")).expect("local reads"),
+        "local target\n"
+    );
+    assert_eq!(
+        count_files(&target.join(".loom").join("objects")),
+        object_count_before
+    );
+    assert!(!std::fs::read_to_string(metadata_dir.join("revisions.tsv"))
+        .expect("revisions reread")
+        .contains(&remote_revision));
+}
+
+#[test]
 fn restore_refuses_secret_blocked_working_files() {
     let dir = tempfile::tempdir().expect("temp dir");
     let fixture = dir.path().join("fixture");
@@ -233,4 +375,23 @@ fn value_after(output: &str, prefix: &str) -> String {
         .expect("prefixed line exists")
         .trim()
         .to_string()
+}
+
+fn count_files(path: &std::path::Path) -> usize {
+    let mut count = 0;
+    let mut stack = vec![path.to_path_buf()];
+
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(path).expect("directory reads") {
+            let entry = entry.expect("directory entry reads");
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+
+    count
 }

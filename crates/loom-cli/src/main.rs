@@ -1,12 +1,17 @@
 use loom_core::RevisionBoundary;
 use loom_store::{
-    path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore,
+    path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore, RemoteConfig,
     ResolvedRevisionTarget,
 };
-use loom_worktree::{
-    diff_revision_to_capture, CaptureEngine, CaptureRequest, RestoreEngine, WorktreeCapture,
-    WorktreeDiff,
+use loom_sync::{
+    import_pack, sync_store_to_remote, LocalFilesystemRemote, LoomRemote, DEFAULT_REMOTE_NAME,
+    LOCAL_FILESYSTEM_REMOTE_KIND,
 };
+use loom_worktree::{
+    diff_revision_to_capture, evaluate_directory_policy, CaptureEngine, CaptureRequest,
+    DirectoryPolicyDecision, RestoreEngine, WorktreeCapture, WorktreeDiff,
+};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -66,17 +71,24 @@ const COMMANDS: &[CommandSpec] = &[
         planned_behavior: "materialize a previous folder revision with safety checks",
     },
     CommandSpec {
+        name: "remote",
+        usage: "loom remote add <NAME> <LOCAL_PATH> [FOLDER]",
+        summary: "Configure a Loom remote endpoint",
+        implemented: true,
+        planned_behavior: "remember a named Loom folder-state endpoint",
+    },
+    CommandSpec {
         name: "sync",
         usage: "loom sync [FOLDER]",
         summary: "Synchronize a shared folder",
-        implemented: false,
+        implemented: true,
         planned_behavior: "reconcile local and remote folder revisions through Loom cursors",
     },
     CommandSpec {
         name: "clone",
-        usage: "loom clone <REMOTE> [FOLDER]",
+        usage: "loom clone <REMOTE> <FOLDER>",
         summary: "Materialize a shared folder on this machine",
-        implemented: false,
+        implemented: true,
         planned_behavior: "create a local shared folder from a Loom remote without assuming Git",
     },
 ];
@@ -123,6 +135,9 @@ fn run_command(command: &CommandSpec, args: &[String]) -> ExitCode {
         "diff" => result_to_exit(run_diff(args)),
         "checkpoint" => result_to_exit(run_checkpoint(args)),
         "restore" => result_to_exit(run_restore(args)),
+        "remote" => result_to_exit(run_remote(args)),
+        "sync" => result_to_exit(run_sync(args)),
+        "clone" => result_to_exit(run_clone(args)),
         _ => {
             run_placeholder(command);
             ExitCode::SUCCESS
@@ -310,6 +325,206 @@ fn run_restore(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn run_remote(args: &[String]) -> Result<(), String> {
+    match args {
+        [subcommand, name, location] if subcommand == "add" => {
+            run_remote_add(name, location, None)
+        }
+        [subcommand, name, location, folder] if subcommand == "add" => {
+            run_remote_add(name, location, Some(PathBuf::from(folder)))
+        }
+        _ => Err(
+            "remote command requires 'add <NAME> <LOCAL_PATH> [FOLDER]'\nUsage: loom remote add <NAME> <LOCAL_PATH> [FOLDER]"
+                .to_string(),
+        ),
+    }
+}
+
+fn run_remote_add(name: &str, location: &str, folder: Option<PathBuf>) -> Result<(), String> {
+    let store = open_store_for_sync_source(folder)?;
+    let location = absolute_path(location)?;
+    let location = location.to_string_lossy().into_owned();
+    let remote = RemoteConfig::new(name, LOCAL_FILESYSTEM_REMOTE_KIND, location.clone())
+        .map_err(|error| error.to_string())?;
+    store
+        .upsert_remote(remote)
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Remote: {name}");
+    println!("Kind: {LOCAL_FILESYSTEM_REMOTE_KIND}");
+    println!("Location: {location}");
+    Ok(())
+}
+
+fn run_sync(args: &[String]) -> Result<(), String> {
+    let store = match args {
+        [] => open_store_for_sync_source(None)?,
+        [folder] => open_store_for_sync_source(Some(PathBuf::from(folder)))?,
+        _ => return Err("sync accepts at most one folder argument".to_string()),
+    };
+    let remote_config = store
+        .remote(DEFAULT_REMOTE_NAME)
+        .map_err(|error| error.to_string())?
+        .or_else(|| store.remotes().ok().and_then(|mut remotes| remotes.pop()))
+        .ok_or_else(|| {
+            "no Loom remote configured; run 'loom remote add local <PATH>' first".to_string()
+        })?;
+    if remote_config.kind() != LOCAL_FILESYSTEM_REMOTE_KIND {
+        return Err(format!(
+            "remote {} uses unsupported kind {}",
+            remote_config.name(),
+            remote_config.kind()
+        ));
+    }
+
+    let (capture, coalesced) = capture_and_coalesce_with_boundary(&store, RevisionBoundary::Sync)?;
+    ensure_no_blocked_or_deferred(&capture, "sync")?;
+    let remote = LocalFilesystemRemote::new(remote_config.location());
+    let report = sync_store_to_remote(&store, &remote).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Remote: {}", remote_config.name());
+    println!("Location: {}", remote.root().display());
+    if coalesced.created() {
+        println!("Captured sync revision: {}", coalesced.revision().id());
+    } else {
+        println!("Current folder revision: {}", coalesced.revision().id());
+    }
+    println!("Synced revision: {}", report.latest_revision_id);
+    println!(
+        "Remote cursor advanced from {}",
+        report
+            .previous_remote_revision_id
+            .map(|revision| revision.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!("Pack objects: {}", report.uploaded_objects);
+    print_policy_summary(&capture);
+    Ok(())
+}
+
+fn run_clone(args: &[String]) -> Result<(), String> {
+    let (remote_path, target) = match args {
+        [remote_path, target] => (PathBuf::from(remote_path), PathBuf::from(target)),
+        _ => return Err("clone requires a remote path and target folder".to_string()),
+    };
+    let remote = LocalFilesystemRemote::new(remote_path);
+    let remote_revision_id = remote
+        .get_cursor(loom_sync::DEFAULT_CURSOR_ID)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "remote has no shared-folder cursor; run 'loom sync' first".to_string())?;
+    let pack = remote
+        .get_pack(&remote_revision_id)
+        .map_err(|error| error.to_string())?;
+
+    validate_clone_target_before_mutation(&target)?;
+    fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+    let store = LocalStore::init_clone(
+        &target,
+        pack.manifest.shared_folder_id.clone(),
+        pack.manifest.display_name.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let import_report = import_pack(&store, &pack).map_err(|error| error.to_string())?;
+    let current = capture_worktree(&store, RevisionBoundary::Restore)?;
+    ensure_no_blocked_or_deferred(&current, "clone")?;
+    if !current.file_versions().is_empty() {
+        return Err(
+            "clone refused because the target already contains source files; choose an empty folder"
+                .to_string(),
+        );
+    }
+    let revision = store
+        .revision_by_id(&remote_revision_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("imported pack did not contain revision {remote_revision_id}"))?;
+    let report = RestoreEngine::new(&store)
+        .restore(&revision, &current)
+        .map_err(|error| error.to_string())?;
+    let restored_capture = capture_worktree(&store, RevisionBoundary::Sync)?;
+    store
+        .coalesce_folder_revision(RevisionBoundary::Sync, restored_capture.file_versions())
+        .map_err(|error| error.to_string())?;
+
+    println!("Cloned revision: {}", report.revision_id());
+    println!("Target: {}", store.folder_root().display());
+    println!("Imported objects: {}", import_report.imported_objects);
+    println!(
+        "Imported metadata: {} file versions, {} revisions, {} checkpoints, {} pins",
+        import_report.imported_file_versions,
+        import_report.imported_revisions,
+        import_report.imported_checkpoints,
+        import_report.imported_pins
+    );
+    println!(
+        "Materialized: {} created, {} modified, {} removed",
+        report.diff().deleted().len(),
+        report.diff().modified().len(),
+        report.diff().created().len()
+    );
+    Ok(())
+}
+
+fn validate_clone_target_before_mutation(target: &Path) -> Result<(), String> {
+    if !target.exists() {
+        return Ok(());
+    }
+    if !target.is_dir() {
+        return Err(format!(
+            "clone target is not a folder: {}",
+            target.display()
+        ));
+    }
+    if target.join(".loom").exists() {
+        return Err(
+            "clone refused because the target already contains a Loom store; choose an untracked folder"
+                .to_string(),
+        );
+    }
+    if let Some(source_path) = first_clone_source_entry(target, target)? {
+        return Err(format!(
+            "clone refused because the target already contains source files; choose an empty folder: {}",
+            path_to_store_string(&source_path)
+        ));
+    }
+
+    Ok(())
+}
+
+fn first_clone_source_entry(root: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("could not inspect clone target {}: {error}", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("could not inspect clone target {}: {error}", path.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let entry_path = entry.path();
+        let relative_path = entry_path
+            .strip_prefix(root)
+            .map_err(|error| error.to_string())?
+            .to_path_buf();
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
+            format!(
+                "could not inspect clone target entry {}: {error}",
+                entry_path.display()
+            )
+        })?;
+
+        if metadata.is_dir() {
+            match evaluate_directory_policy(&relative_path) {
+                DirectoryPolicyDecision::Ignore { .. } => continue,
+                DirectoryPolicyDecision::Include => return Ok(Some(relative_path)),
+            }
+        }
+
+        return Ok(Some(relative_path));
+    }
+
+    Ok(None)
+}
+
 fn capture_and_coalesce(
     store: &LocalStore,
 ) -> Result<(WorktreeCapture, CoalescedRevision), String> {
@@ -482,6 +697,52 @@ fn open_store_from_optional_folder(folder: Option<PathBuf>) -> Result<LocalStore
             LocalStore::discover_from(current_dir).map_err(|error| error.to_string())
         }
     }
+}
+
+fn open_store_for_sync_source(folder: Option<PathBuf>) -> Result<LocalStore, String> {
+    if folder.is_some() {
+        return open_store_from_optional_folder(folder);
+    }
+
+    let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
+    match LocalStore::discover_from(&current_dir) {
+        Ok(store) => Ok(store),
+        Err(discover_error) => {
+            let mut candidates = Vec::new();
+            for entry in fs::read_dir(&current_dir).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let path = entry.path();
+                if path.is_dir()
+                    && path
+                        .join(".loom")
+                        .join("metadata")
+                        .join("shared_folder.tsv")
+                        .is_file()
+                {
+                    candidates.push(path);
+                }
+            }
+            match candidates.as_slice() {
+                [candidate] => LocalStore::open(candidate).map_err(|error| error.to_string()),
+                [] => Err(discover_error.to_string()),
+                _ => Err(
+                    "multiple tracked child folders found; pass the folder path explicitly"
+                        .to_string(),
+                ),
+            }
+        }
+    }
+}
+
+fn absolute_path(path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+
+    Ok(std::env::current_dir()
+        .map_err(|error| error.to_string())?
+        .join(path))
 }
 
 #[derive(Debug, Clone)]
@@ -660,6 +921,7 @@ mod tests {
                 "diff",
                 "checkpoint",
                 "restore",
+                "remote",
                 "sync",
                 "clone"
             ]

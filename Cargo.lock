@@ -1042,6 +1042,7 @@ version = "0.1.0"
 dependencies = [
  "loom-core",
  "loom-store",
+ "loom-sync",
  "loom-worktree",
  "tempfile",
 ]
@@ -1086,6 +1087,8 @@ version = "0.1.0"
 dependencies = [
  "loom-core",
  "loom-pack",
+ "loom-store",
+ "tempfile",
 ]
 
 [[package]]
