@@ -112,9 +112,10 @@ legacy local/mock trust bootstrap. New paired receiver flows should run `devices
 its own local key state and does not need `--mock-key-source-db`. Invite-based hosted alpha login,
 session-auth hosted metadata request handling, and server-mediated object-access prefix grants now
 exist. The grant is the authorization boundary for a shared bucket; raw R2/S3 credentials are still
-not returned to tester clients. Live daemon sync with `--remote-kind s3` requires an object-access
-API/lease preflight and an explicit `--s3-prefix` matching the grant, while direct manual
-`devbox sync` S3 commands remain a trusted-operator smoke path. OAuth, object proxy/signed URL
+not returned to tester clients. Live daemon sync with `--remote-kind s3` currently uses the grant as
+a hosted scope/prefix preflight and still requires trusted-operator local S3 env credentials for
+object transfer. External testers can validate login/grants now, but R2 object transfer without
+local bucket keys waits for the hosted object proxy or signed URL path. OAuth, object proxy/signed URL
 transfer, production deployment hardening, and UI onboarding remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot

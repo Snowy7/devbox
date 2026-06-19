@@ -50,12 +50,16 @@ mkdir -p "$evidence_dir"
 
 if [[ -n "${DEVBOX_BIN:-}" ]]; then
   devbox_cmd=("$DEVBOX_BIN")
+elif [[ -x "$repo_root/devbox" ]]; then
+  devbox_cmd=("$repo_root/devbox")
 else
   devbox_cmd=(cargo run --quiet -p devbox-cli --)
 fi
 
 if [[ -n "${DEVBOX_DAEMON_BIN:-}" ]]; then
   daemon_cmd=("$DEVBOX_DAEMON_BIN")
+elif [[ -x "$repo_root/devbox-daemon" ]]; then
+  daemon_cmd=("$repo_root/devbox-daemon")
 else
   daemon_cmd=(cargo run --quiet -p devbox-daemon --)
 fi

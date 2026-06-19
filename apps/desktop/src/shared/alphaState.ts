@@ -383,7 +383,7 @@ function buildLiveSyncState(
   const notes = [
     "No sync starts from the desktop until a local daemon bridge is wired.",
     remoteKind === "s3-compatible"
-      ? "S3 mode requires object-access grant preflight and prefix match."
+      ? "S3 mode validates the object-access grant and prefix, then still uses trusted-operator S3 env credentials for object transfer."
       : "Local remote mode uses the configured remote directory.",
     "Pending receiver identities fail closed until devices complete installs the local key envelope."
   ];

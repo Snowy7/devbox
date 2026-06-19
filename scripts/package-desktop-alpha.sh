@@ -48,8 +48,37 @@ npm run build
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 
-cp package.json package-lock.json README.md "$stage_dir/"
+cp package.json package-lock.json "$stage_dir/"
 cp -R dist "$stage_dir/dist"
+
+cat > "$stage_dir/README.md" <<'README'
+# Devbox Desktop Alpha
+
+This is an unsigned alpha Electron control surface. It reads redacted Devbox alpha state from
+environment variables and shows commands/state only; it does not start live sync by itself.
+
+## Run
+
+```bash
+npm ci
+npm run start:built
+```
+
+Useful env:
+
+```text
+DEVBOX_LIVE_DB
+DEVBOX_LIVE_CACHE
+DEVBOX_LIVE_PROJECT_ROOT
+DEVBOX_REMOTE_KIND
+DEVBOX_METADATA_API
+DEVBOX_METADATA_PROJECT
+DEVBOX_SESSION_TOKEN
+```
+
+Source-only commands such as `npm run typecheck`, `npm run test:safety`, and `npm run build` are run
+before packaging and are not expected to work from this trimmed release archive.
+README
 
 cat > "$stage_dir/RUNNING.txt" <<'RUNNING'
 Devbox Desktop Alpha
@@ -70,6 +99,10 @@ Useful env:
   DEVBOX_METADATA_API
   DEVBOX_METADATA_PROJECT
   DEVBOX_SESSION_TOKEN
+
+Source-only commands such as npm run typecheck, npm run test:safety, and npm run
+build are run before packaging and are not expected to work from this trimmed
+release archive.
 RUNNING
 
 tar -czf "$archive" -C "$dist_dir" "$package_name"
