@@ -135,9 +135,9 @@ scripts/devbox-live-sync-alpha.sh
 ```
 
 For shared-bucket R2 alpha testing, set `DEVBOX_REMOTE_KIND=s3`,
-`DEVBOX_METADATA_API`, `DEVBOX_SESSION_TOKEN`, `DEVBOX_OBJECT_ACCESS_LEASE`, and
-`DEVBOX_R2_PREFIX=accounts/<account-id>/projects/<project-id>`. The live daemon resolves the
-object-access grant before S3 work and refuses a prefix mismatch.
+`DEVBOX_METADATA_API`, `DEVBOX_METADATA_DB`, `DEVBOX_METADATA_PROJECT`, `DEVBOX_SESSION_TOKEN`,
+`DEVBOX_OBJECT_ACCESS_LEASE`, and `DEVBOX_R2_PREFIX=accounts/<account-id>/projects/<project-id>`.
+The live daemon resolves the object-access grant before S3 work and refuses a prefix mismatch.
 
 The current real-R2 smoke path is split:
 

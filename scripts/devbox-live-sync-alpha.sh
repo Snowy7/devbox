@@ -23,6 +23,8 @@ args=(
 )
 
 if [[ "$remote_kind" == "s3" ]]; then
+  : "${DEVBOX_METADATA_DB:?set DEVBOX_METADATA_DB for s3 live sync}"
+  : "${DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT for s3 object-access scope}"
   args+=(
     --remote-kind s3
     --s3-endpoint "${DEVBOX_R2_ENDPOINT:?set DEVBOX_R2_ENDPOINT}"

@@ -887,56 +887,78 @@ fn run_sync_cycle(args: &SyncArgs, cycle_index: usize) -> Result<(), String> {
         ));
     }
 
+    let mut prechecked_pull_snapshot = None;
+    if args.push && args.pull {
+        let remote_snapshot = discover_pull_snapshot(args, &account_id, &project_id)?;
+        if scan.pending_operations() > 0 {
+            ensure_two_way_remote_base_is_safe(
+                scan.base_snapshot_id(),
+                remote_snapshot.as_deref(),
+                &project_id,
+            )?;
+        } else {
+            prechecked_pull_snapshot = remote_snapshot;
+        }
+    }
+
     let mut local_pending_after_push = scan.pending_operations();
     if args.push {
-        let persisted = persist_live_snapshot(args)?;
-        if persisted.project_id != project_id {
-            return Err(format!(
-                "published project {} does not match metadata project {}",
-                persisted.project_id, project_id
-            ));
-        }
-        let (provider, remote_description) = open_remote_provider(&args.remote)?;
-        let published = if args.metadata.mode == SyncMetadataMode::MockDevSqlite {
-            let mut metadata_store = open_metadata_store(&args.metadata)?;
-            publish_snapshot_with_metadata(
-                &PublishSnapshotRequest {
-                    db_path: args.db_path.clone(),
-                    cache_root: args.cache_root.clone(),
-                    snapshot_id: persisted.snapshot_id.clone(),
-                },
-                provider.as_ref(),
-                &mut metadata_store,
-            )
-            .map_err(|error| error.to_string())?
+        if scan.pending_operations() == 0 {
+            println!(
+                "sync cycle={} action=publish status=skipped reason=no_local_pending project_id={}",
+                cycle_index,
+                script_value(&project_id)
+            );
         } else {
-            publish_snapshot(
-                &PublishSnapshotRequest {
-                    db_path: args.db_path.clone(),
-                    cache_root: args.cache_root.clone(),
-                    snapshot_id: persisted.snapshot_id.clone(),
-                },
-                provider.as_ref(),
-            )
-            .map_err(|error| error.to_string())?
-        };
-        clear_pending_for_project(&args.db_path, &published.project_id)?;
-        local_pending_after_push = 0;
-        println!(
-            "sync cycle={} action=publish status=ok account_id={} device_id={} project_id={} snapshot_id={} reused_snapshot={} manifest_uploaded={} blobs={} uploaded_blobs={} plaintext_bytes={} remote_bytes={}",
-            cycle_index,
-            script_value(&published.account_id),
-            script_value(&published.device_id),
-            script_value(&published.project_id),
-            script_value(&published.snapshot_id),
-            persisted.reused,
-            published.manifest_uploaded,
-            published.blob_count,
-            published.uploaded_blob_count,
-            published.plaintext_blob_bytes,
-            published.remote_blob_bytes
-        );
-        print_remote_description(&remote_description);
+            let persisted = persist_live_snapshot(args)?;
+            if persisted.project_id != project_id {
+                return Err(format!(
+                    "published project {} does not match metadata project {}",
+                    persisted.project_id, project_id
+                ));
+            }
+            let (provider, remote_description) = open_remote_provider(&args.remote)?;
+            let published = if args.metadata.mode == SyncMetadataMode::MockDevSqlite {
+                let mut metadata_store = open_metadata_store(&args.metadata)?;
+                publish_snapshot_with_metadata(
+                    &PublishSnapshotRequest {
+                        db_path: args.db_path.clone(),
+                        cache_root: args.cache_root.clone(),
+                        snapshot_id: persisted.snapshot_id.clone(),
+                    },
+                    provider.as_ref(),
+                    &mut metadata_store,
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                publish_snapshot(
+                    &PublishSnapshotRequest {
+                        db_path: args.db_path.clone(),
+                        cache_root: args.cache_root.clone(),
+                        snapshot_id: persisted.snapshot_id.clone(),
+                    },
+                    provider.as_ref(),
+                )
+                .map_err(|error| error.to_string())?
+            };
+            clear_pending_for_project(&args.db_path, &published.project_id)?;
+            local_pending_after_push = 0;
+            println!(
+                "sync cycle={} action=publish status=ok account_id={} device_id={} project_id={} snapshot_id={} reused_snapshot={} manifest_uploaded={} blobs={} uploaded_blobs={} plaintext_bytes={} remote_bytes={}",
+                cycle_index,
+                script_value(&published.account_id),
+                script_value(&published.device_id),
+                script_value(&published.project_id),
+                script_value(&published.snapshot_id),
+                persisted.reused,
+                published.manifest_uploaded,
+                published.blob_count,
+                published.uploaded_blob_count,
+                published.plaintext_blob_bytes,
+                published.remote_blob_bytes
+            );
+            print_remote_description(&remote_description);
+        }
     }
 
     if args.pull {
@@ -952,7 +974,12 @@ fn run_sync_cycle(args: &SyncArgs, cycle_index: usize) -> Result<(), String> {
                 "live sync pull refused: {blocked_secrets} secret-blocked entries require policy"
             ));
         }
-        let Some(snapshot_id) = discover_pull_snapshot(args, &account_id, &project_id)? else {
+        let pull_snapshot = if let Some(snapshot_id) = prechecked_pull_snapshot {
+            Some(snapshot_id)
+        } else {
+            discover_pull_snapshot(args, &account_id, &project_id)?
+        };
+        let Some(snapshot_id) = pull_snapshot else {
             println!(
                 "sync cycle={} action=pull status=no_remote_snapshot account_id={} project_id={}",
                 cycle_index,
@@ -1009,6 +1036,26 @@ fn run_sync_cycle(args: &SyncArgs, cycle_index: usize) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn ensure_two_way_remote_base_is_safe(
+    local_base_snapshot_id: Option<&str>,
+    remote_snapshot_id: Option<&str>,
+    project_id: &str,
+) -> Result<(), String> {
+    let Some(remote_snapshot_id) = remote_snapshot_id else {
+        return Ok(());
+    };
+    if local_base_snapshot_id == Some(remote_snapshot_id) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "live sync two-way refused before publish: remote latest {} for project {} does not match local base {}; pull or resolve before publishing local changes",
+        remote_snapshot_id,
+        project_id,
+        local_base_snapshot_id.unwrap_or("-")
+    ))
 }
 
 fn run_scan_for_sync(args: &SyncArgs, scan_index: usize) -> Result<LocalChangeFeedScan, String> {

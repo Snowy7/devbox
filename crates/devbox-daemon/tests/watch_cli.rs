@@ -249,6 +249,54 @@ fn sync_pull_refuses_divergent_cursor_before_downloading_blobs() {
 }
 
 #[test]
+fn sync_two_way_refuses_remote_latest_before_publish_when_local_has_pending_changes() {
+    let fixture = LiveFixture::new();
+    let source_identity = fixture.init_identity(&fixture.source_db, "Desk");
+    fixture.write("README.md", "base\n");
+    assert_success(&fixture.run_sync_push_once(&fixture.source_db, &fixture.source_cache));
+    fixture.pair_receiver_with_source();
+    fixture.import_latest_into_receiver(&source_identity.account_id);
+
+    fixture.write("README.md", "other device edit\n");
+    assert_success(&fixture.run_sync_push_once(&fixture.receiver_db, &fixture.receiver_cache));
+    let remote_latest_before = fixture
+        .latest_snapshot_id(&source_identity.account_id)
+        .expect("remote latest exists");
+
+    fixture.write("README.md", "local device edit\n");
+    let blocked = run_devbox_daemon_vec(vec![
+        "sync".to_string(),
+        "--db".to_string(),
+        path_string(&fixture.source_db),
+        "--cache".to_string(),
+        path_string(&fixture.source_cache),
+        "--remote".to_string(),
+        path_string(&fixture.remote),
+        "--metadata-mode".to_string(),
+        "mock-dev-sqlite".to_string(),
+        "--metadata-db".to_string(),
+        path_string(&fixture.metadata_db),
+        "--metadata-account".to_string(),
+        source_identity.account_id.clone(),
+        "--metadata-project".to_string(),
+        fixture.project_id(),
+        "--two-way".to_string(),
+        "--once".to_string(),
+        path_string(&fixture.project),
+    ]);
+
+    assert_failure(&blocked);
+    let stdout = stdout(&blocked);
+    assert!(stdout.contains("sync discovery=latest"));
+    assert!(!stdout.contains("action=publish status=ok"));
+    assert!(stderr(&blocked).contains("two-way%20refused%20before%20publish"));
+    assert_eq!(
+        fixture.latest_snapshot_id(&source_identity.account_id),
+        Some(remote_latest_before)
+    );
+}
+
+#[test]
 fn sync_s3_live_mode_requires_object_access_and_env_names() {
     let missing_object_access = run_devbox_daemon([
         "sync",
@@ -302,6 +350,20 @@ fn sync_s3_live_mode_requires_object_access_and_env_names() {
     assert_failure(&raw_env_name);
     assert!(stderr(&raw_env_name).contains("--s3-access-key-env"));
     assert!(!stderr(&raw_env_name).contains("DEVBOX_R2_SECRET_ACCESS_KEY"));
+}
+
+#[test]
+fn live_sync_script_documents_required_s3_metadata_project() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repo root exists");
+    let env_example = fs::read_to_string(repo.join(".env.example")).expect("env example reads");
+    let script = fs::read_to_string(repo.join("scripts/devbox-live-sync-alpha.sh"))
+        .expect("live sync script reads");
+
+    assert!(env_example.contains("DEVBOX_METADATA_PROJECT="));
+    assert!(script.contains("DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT"));
 }
 
 struct WatchFixture {
@@ -525,6 +587,14 @@ impl LiveFixture {
             },
         )
         .expect("latest imports into receiver");
+    }
+
+    fn latest_snapshot_id(&self, account_id: &str) -> Option<String> {
+        SqliteMetadataStore::open_file(&self.metadata_db)
+            .expect("metadata opens")
+            .latest_snapshot(account_id, &self.project_id())
+            .expect("latest query succeeds")
+            .map(|record| record.snapshot_id)
     }
 }
 
