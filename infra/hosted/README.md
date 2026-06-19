@@ -23,8 +23,9 @@ Railway injects service variables as environment variables at build/runtime. Bin
 service and set the metadata service variable `DATABASE_URL=${{Postgres.DATABASE_URL}}`. The server
 also accepts `DEVBOX_METADATA_DATABASE_URL`, but `DATABASE_URL` is the Railway-shaped default.
 
-The server listens on `0.0.0.0:$PORT` when Railway provides `PORT`. `/ready` reports the storage
-label, auth policy, and object broker status.
+The server listens on `0.0.0.0:$PORT` when Railway provides `PORT`; `PORT` takes precedence over
+`DEVBOX_METADATA_LISTEN` so Railway can route to the injected runtime port. `/ready` reports the
+storage label, auth policy, and object broker status.
 
 Mock-dev header auth is disabled by default in the server binary. Only enable it for local tests:
 

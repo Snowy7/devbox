@@ -65,8 +65,12 @@ devbox metadata object-access resolve ...
 ```
 
 `mock-create` bootstraps a dev verified account/session in the metadata DB when needed, upserts the
-optional project scope, and writes a mock managed lease. `check` resolves the lease through the
-presented session token and rejects expired, revoked, cross-scope, or under-capable leases.
+optional project scope, and writes a mock managed lease. When the supplied session token already has
+an account session, the lease is seeded under that authenticated session account; an explicit
+`--account` must match it. For the Postgres admin selector, the session must already exist and
+authenticate successfully, so the command cannot create or relink mock identity in the hosted store.
+`check` resolves the lease through the presented session token and rejects expired, revoked,
+cross-scope, or under-capable leases.
 
 Output prints only lease ids, provider kind, endpoint host, bucket, region, prefix, capabilities,
 generation, expiry/revocation state, and redacted credential references. It does not print raw

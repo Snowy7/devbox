@@ -23,13 +23,10 @@ async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut postgres_url = std::env::var("DEVBOX_METADATA_DATABASE_URL")
         .ok()
         .or_else(|| std::env::var("DATABASE_URL").ok());
-    let mut listen = std::env::var("DEVBOX_METADATA_LISTEN")
+    let mut listen = std::env::var("PORT")
         .ok()
-        .or_else(|| {
-            std::env::var("PORT")
-                .ok()
-                .map(|port| format!("0.0.0.0:{port}"))
-        })
+        .map(|port| format!("0.0.0.0:{port}"))
+        .or_else(|| std::env::var("DEVBOX_METADATA_LISTEN").ok())
         .unwrap_or_else(|| "127.0.0.1:8787".to_string());
     let mut config = HostedApiConfig::hosted_alpha();
     if std::env::var("DEVBOX_ALLOW_MOCK_AUTH")

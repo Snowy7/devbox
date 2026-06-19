@@ -5100,30 +5100,58 @@ fn metadata_credential_lease_mock_create(
     let mut store = open_metadata_admin_store(&args.store)?;
     let now_unix = now_unix_seconds();
     let now = format!("unix:{now_unix}");
-    let account_id = args.account_id.clone().unwrap_or_else(|| {
-        dev_mock_account_id(
+    let session_hash = devbox_auth::hash_session_token_hex(&args.session_token);
+    let existing_session = store.account_session_by_hash(&session_hash)?;
+    let existing_context = if existing_session.is_some() {
+        Some(authenticate_account_session(
+            &*store,
+            &args.session_token,
+            now_unix,
+        )?)
+    } else {
+        None
+    };
+    if existing_context.is_none()
+        && matches!(
+            args.store,
+            MetadataAdminStoreSelector::PostgresUrlEnv { .. }
+        )
+    {
+        return Err(
+            "metadata credential-lease mock-create with --postgres-url-env requires an existing authenticated session for --session-token"
+                .into(),
+        );
+    }
+    let account_id = match (&args.account_id, &existing_context) {
+        (Some(account_id), Some(session)) if account_id != &session.account_id => {
+            return Err(format!(
+                "metadata credential-lease account mismatch: --account {account_id} does not match authenticated session account {}",
+                session.account_id
+            )
+            .into());
+        }
+        (Some(account_id), _) => account_id.clone(),
+        (None, Some(session)) => session.account_id.clone(),
+        (None, None) => dev_mock_account_id(
             args.verified_email
                 .as_deref()
                 .or(args.verified_domain.as_deref())
                 .unwrap_or("dev-account"),
-        )
-    });
-    let provider_subject = format!("managed-object-dev:{account_id}");
-    let proof = create_account_ownership_proof(AccountOwnershipProofInput {
-        account_id: &account_id,
-        provider_kind: "oidc-dev",
-        provider_issuer: "https://devbox.local/mock-managed-object-lease",
-        provider_subject: &provider_subject,
-        verified_email: args.verified_email.as_deref(),
-        verified_domain: args.verified_domain.as_deref(),
-        proof_issued_at: &now,
-        proof_expires_at_unix: now_unix + 86_400,
-    })?;
-    store.upsert_account_ownership_proof(proof.clone())?;
-    if store
-        .account_session_by_hash(&devbox_auth::hash_session_token_hex(&args.session_token))?
-        .is_none()
-    {
+        ),
+    };
+    if existing_context.is_none() {
+        let provider_subject = format!("managed-object-dev:{account_id}");
+        let proof = create_account_ownership_proof(AccountOwnershipProofInput {
+            account_id: &account_id,
+            provider_kind: "oidc-dev",
+            provider_issuer: "https://devbox.local/mock-managed-object-lease",
+            provider_subject: &provider_subject,
+            verified_email: args.verified_email.as_deref(),
+            verified_domain: args.verified_domain.as_deref(),
+            proof_issued_at: &now,
+            proof_expires_at_unix: now_unix + 86_400,
+        })?;
+        store.upsert_account_ownership_proof(proof.clone())?;
         let session = create_account_session(
             &proof,
             &args.session_token,

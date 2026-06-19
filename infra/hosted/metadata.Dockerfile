@@ -15,7 +15,6 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/devbox-metadata /usr/local/bin/devbox-metadata
 
-ENV DEVBOX_METADATA_LISTEN=0.0.0.0:8787
 ENV DEVBOX_ALLOW_MOCK_AUTH=false
 
 VOLUME ["/data"]

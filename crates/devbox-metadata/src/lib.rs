@@ -5950,20 +5950,27 @@ mod tests {
 
     #[test]
     fn postgres_store_matches_sqlite_core_semantics_when_configured() {
-        let Some(mut postgres) = PostgresTestContext::open() else {
+        let Some(mut postgres_core) = PostgresTestContext::open() else {
             eprintln!(
                 "skipping Postgres metadata parity test; DEVBOX_TEST_POSTGRES_URL is not set"
             );
             return;
         };
-        let mut sqlite = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        let mut postgres_leases =
+            PostgresTestContext::open().expect("postgres lease parity context opens");
+        let mut postgres_sentinel =
+            PostgresTestContext::open().expect("postgres sentinel parity context opens");
+        let mut sqlite_core = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        let mut sqlite_leases = SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
+        let mut sqlite_sentinel =
+            SqliteMetadataStore::open_in_memory().expect("sqlite store opens");
 
-        assert_store_round_trips_devices_projects_snapshots_and_cursors(&mut sqlite);
-        assert_store_round_trips_devices_projects_snapshots_and_cursors(&mut postgres.store);
-        assert_managed_object_credential_lease_store_semantics(&mut sqlite);
-        assert_managed_object_credential_lease_store_semantics(&mut postgres.store);
-        assert_managed_object_project_scope_sentinel_is_reserved(&mut sqlite);
-        assert_managed_object_project_scope_sentinel_is_reserved(&mut postgres.store);
+        assert_store_round_trips_devices_projects_snapshots_and_cursors(&mut sqlite_core);
+        assert_store_round_trips_devices_projects_snapshots_and_cursors(&mut postgres_core.store);
+        assert_managed_object_credential_lease_store_semantics(&mut sqlite_leases);
+        assert_managed_object_credential_lease_store_semantics(&mut postgres_leases.store);
+        assert_managed_object_project_scope_sentinel_is_reserved(&mut sqlite_sentinel);
+        assert_managed_object_project_scope_sentinel_is_reserved(&mut postgres_sentinel.store);
     }
 
     #[test]

@@ -177,6 +177,13 @@ cargo run -p devbox-cli -- metadata credential-lease mock-create \
   --prefix "accounts/<printed-account-id>/projects/project-devbox"
 ```
 
+When `DEVBOX_SESSION_TOKEN` already belongs to a hosted tester session, `mock-create` seeds the lease
+under that authenticated session account even if `--verified-email` differs from the original
+bootstrap. If you pass `--account`, it must match the existing session account printed by
+the auth/login bootstrap output; otherwise the command fails instead of storing a lease that hosted
+object access cannot resolve. With `--postgres-url-env`, the session must already exist and be
+active; the command will not create or relink a mock account identity in the hosted Postgres store.
+
 `object-access resolve` prints the authorized prefix, endpoint, bucket, capabilities, expiration,
 and rotation generation. It does not print or return raw R2 credentials.
 

@@ -24,6 +24,9 @@ The service can run locally with SQLite, in CI with an in-memory store for fast 
 Railway-style hosted alpha deployments with Postgres selected by `DATABASE_URL` or
 `DEVBOX_METADATA_DATABASE_URL`. SQLite remains the local/dev store.
 
+Hosted deployments bind to `0.0.0.0:$PORT` when the platform injects `PORT`; that platform port
+takes precedence over `DEVBOX_METADATA_LISTEN`.
+
 ## Metadata Model
 
 The first service schema tracks:
