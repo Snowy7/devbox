@@ -102,7 +102,7 @@ This is personal-alpha wiring, not a production SaaS backend. Deferred work rema
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
 - live managed object credential provisioning and rotation against provider APIs
-- production deployment hardening and observability
+- multi-region deployment hardening and observability
 - Electron tray/status UI
 - automatic conflict merge/apply resolution
 - user-facing conflict UI

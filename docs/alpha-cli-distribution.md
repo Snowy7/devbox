@@ -1,7 +1,7 @@
 # Alpha Tool Distribution
 
 Devbox alpha testers need downloadable command-line tools and a runnable desktop control surface
-before signed installers and hosted deployment hardening exist. For now, publishing is local: build the
+before signed installers and polished hosted operations exist. For now, publishing is local: build the
 macOS/Linux alpha archives on matching hosts and upload them to a GitHub Release with `gh`.
 
 GitHub Packages is not the right first home for raw native binaries. Packages is useful for npm,
@@ -35,6 +35,7 @@ DEVBOX_R2_SECRET_ACCESS_KEY=replace-me
 DEVBOX_METADATA_API=http://127.0.0.1:8787
 DEVBOX_METADATA_ACCOUNT=account-example
 DEVBOX_METADATA_PROJECT=project-example
+DEVBOX_METADATA_DATABASE_URL=postgres://devbox:devbox@127.0.0.1:5432/devbox_metadata
 DEVBOX_OBJECT_ACCESS_LEASE=lease-alpha
 DEVBOX_ALPHA_INVITE_CODE=replace-after-invite-create
 DEVBOX_SESSION_TOKEN=replace-after-hosted-login
@@ -89,9 +90,9 @@ place local bucket credentials on their own machine.
 ## Current Deployment Boundary
 
 The local trusted-operator real-R2 smoke path does not require deploying the Devbox API. The external
-multi-user hosted-transfer path does: run the hosted metadata API with server-side bucket credentials
-and have testers use their session token against the object-access transfer endpoints. Raw bucket
-credentials stay server-side.
+multi-user hosted-transfer path does: run the hosted metadata API with Railway/Postgres metadata
+storage and server-side bucket credentials, then have testers use their session token against the
+object-access transfer endpoints. Raw bucket credentials stay server-side.
 
 The repo has a deployable hosted metadata alpha API with:
 
@@ -99,6 +100,8 @@ The repo has a deployable hosted metadata alpha API with:
 - one-time alpha invite login
 - bearer account-session status and logout
 - hosted metadata handlers that reject mock-dev headers unless explicitly enabled
+- Postgres metadata storage selected by `DATABASE_URL` or `DEVBOX_METADATA_DATABASE_URL`, with
+  SQLite preserved for local/dev `--db` smoke tests
 - server-mediated object-access prefix grants for one shared R2 bucket when server-managed R2 env
   credentials are configured
 - hosted object transfer endpoints for encrypted put/get/head/list under the authorized prefix
@@ -125,6 +128,14 @@ cargo run -p devbox-cli -- auth hosted-status \
   --api http://127.0.0.1:8787
 ```
 
+For a Railway-shaped local/Postgres server, set `DATABASE_URL` or `DEVBOX_METADATA_DATABASE_URL`
+instead of `--db`/`DEVBOX_METADATA_DB`:
+
+```bash
+DATABASE_URL=postgres://devbox:devbox@127.0.0.1:5432/devbox_metadata \
+cargo run -p devbox-metadata -- --listen 127.0.0.1:8787
+```
+
 Create a managed object lease in the metadata DB and resolve the hosted shared-bucket grant:
 
 ```bash
@@ -143,6 +154,27 @@ cargo run -p devbox-cli -- metadata object-access resolve \
   --session-token-env DEVBOX_SESSION_TOKEN \
   --project project-devbox \
   --lease lease-alpha
+```
+
+For Railway/Postgres admin seeding, put the Postgres connection string in an environment variable and
+reference the variable name instead of passing the raw URL on argv:
+
+```bash
+export DEVBOX_METADATA_DATABASE_URL='<railway-postgres-url>'
+
+cargo run -p devbox-cli -- metadata alpha-invite create \
+  --postgres-url-env DEVBOX_METADATA_DATABASE_URL \
+  --email dev@example.com
+
+cargo run -p devbox-cli -- metadata credential-lease mock-create \
+  --postgres-url-env DEVBOX_METADATA_DATABASE_URL \
+  --session-token "$DEVBOX_SESSION_TOKEN" \
+  --verified-email dev@example.com \
+  --project project-devbox \
+  --lease lease-alpha \
+  --endpoint "$DEVBOX_R2_ENDPOINT" \
+  --bucket "$DEVBOX_R2_BUCKET" \
+  --prefix "accounts/<printed-account-id>/projects/project-devbox"
 ```
 
 `object-access resolve` prints the authorized prefix, endpoint, bucket, capabilities, expiration,

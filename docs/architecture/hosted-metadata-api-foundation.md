@@ -20,9 +20,9 @@ handlers for:
 - account-session-only object-access grant resolution for one shared object bucket with
   per-account/project prefixes
 
-The service can run locally with SQLite and has an in-memory store for fast unit tests. That keeps
-normal CI free of Docker, Postgres, cloud credentials, and network services while preserving a clear
-future boundary for Postgres-backed hosted metadata.
+The service can run locally with SQLite, in CI with an in-memory store for fast unit tests, and in
+Railway-style hosted alpha deployments with Postgres selected by `DATABASE_URL` or
+`DEVBOX_METADATA_DATABASE_URL`. SQLite remains the local/dev store.
 
 ## Metadata Model
 
@@ -128,16 +128,18 @@ sanitized endpoint, not raw input, keys, or object credentials.
 
 Public API errors are sanitized. Client-domain ordering mistakes, such as writing a project before
 registering the account/device or writing a cursor before registering the project, return 4xx
-precondition errors rather than raw SQLite messages.
+precondition errors rather than raw database messages.
 
 ## CLI Boundary
 
 `devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]` validates
 the local metadata service configuration without making a network request.
 
-`devbox metadata alpha-invite create --db <METADATA_DB> --email <EMAIL>|--domain <DOMAIN>` creates
-a one-time invite in the hosted metadata SQLite DB. `devbox auth hosted-login --api <URL> --email
-<EMAIL> --invite-code-env <ENV>` exchanges it for a bearer session token.
+`devbox metadata alpha-invite create (--db <METADATA_DB>|--postgres-url-env <ENV>) --email
+<EMAIL>|--domain <DOMAIN>` creates a one-time invite in the hosted metadata store.
+`--postgres-url-env` accepts an environment variable name, not a raw database URL, so Railway
+connection strings do not land in shell history. `devbox auth hosted-login --api <URL> --email
+<EMAIL> --invite-code-env <ENV>` exchanges the invite for a bearer session token.
 
 `devbox metadata object-access resolve --api <URL> --session-token-env DEVBOX_SESSION_TOKEN
 --project <PROJECT_ID> --lease <LEASE_ID>` calls the hosted grant endpoint and prints only redacted
@@ -148,19 +150,24 @@ metadata store. That wiring registers published snapshot metadata, discovers man
 project/snapshot id, and advances device/project cursors with hosted compare-and-set semantics while
 keeping normal CI free of live network services.
 
-## Future Postgres Boundary
+## Postgres Store
 
-The SQLite schema is deliberately small and maps one-to-one to future Postgres tables:
+The SQLite schema maps one-to-one to the Postgres migration used for the hosted alpha:
 
 - `metadata_accounts`
+- `metadata_alpha_invites`
+- `metadata_account_ownership_proofs`
+- `metadata_account_sessions`
 - `metadata_devices`
 - `metadata_projects`
 - `metadata_snapshots`
 - `metadata_device_project_cursors`
 - `metadata_managed_object_credential_leases`
 
-Moving to Postgres should replace the `MetadataStore` implementation, not the project-scoped API
-models, cursor compare-and-set contract, or object-access grant contract.
+The Postgres implementation preserves the `MetadataStore` project-scoped API models, session hash
+lookup, lease expiration/revocation/rotation semantics, and cursor compare-and-set contract. CI runs
+a Postgres service and a SQLite/Postgres parity test; local developers can run
+`scripts/test-postgres-metadata.sh` with Docker/OrbStack or `DEVBOX_TEST_POSTGRES_URL`.
 
 ## Deferred
 
@@ -171,4 +178,4 @@ Remaining Phase 1 work includes:
 - production pairing UX and live recovery/rotation flows
 - automatic conflict merge/apply resolution and user-facing conflict UI
 - Electron tray/status integration
-- production deployment hardening, observability, and abuse protection
+- multi-region hardening, observability, and abuse protection

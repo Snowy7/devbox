@@ -44,7 +44,7 @@ Rust daemon
   -> sync client + encrypted object transport
 Rust backend
   -> metadata API foundation for accounts/devices/projects/manifests/cursors/object grants
-  -> SQLite dev/test store now, Postgres production boundary later
+  -> SQLite for local/dev and Postgres for Railway hosted alpha
   -> shared-bucket R2 encrypted blob packs with account/project prefixes
 Release evidence
   -> macOS/Linux alpha tool archives
@@ -122,6 +122,7 @@ Release evidence
           <li>The hosted metadata server can run as a single-instance alpha API with `/ready`, one-time invite login, bearer session status/logout, and mock-dev auth disabled by default.</li>
           <li>Hosted metadata now models managed object credential leases and object-access grants with authenticated account/session lookup, project scope, R2/S3/MinIO-compatible provider references, canonical shared-bucket prefixes, capabilities, expiration, revocation, and rotation generation.</li>
           <li>Hosted object transfer proxies encrypted object bytes through the metadata API for external testers, keeping raw bucket credentials on the server side.</li>
+          <li>The hosted metadata backend now supports Railway-shaped Postgres via DATABASE_URL while preserving SQLite for local/dev tests.</li>
           <li>Production-shaped pairing recovery and rotation primitives model receiver-generated join/complete handoff, recovery grant references, device rotation intents, revocation, and key-envelope rotation generation without live recovery UX.</li>
           <li>The local/mock materialization foundation proves encrypted snapshot publish/import into a paired second SQLite/cache context, decrypt without publisher DB access, deferred materialize cursor commit, and safe restore-engine apply.</li>
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
@@ -129,7 +130,7 @@ Release evidence
           <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>
           <li>The private-alpha Electron shell reads redacted `DEVBOX_*` setup state for local paths, hosted session/project config, object-access lease, shared bucket prefix, pairing, live sync command state, and safety records.</li>
           <li>Alpha release scripts package CLI/daemon/metadata tools and an unsigned desktop bundle; the deterministic smoke harness proves two-device pairing, fail-closed pending receivers, live publish, latest pull, and materialization.</li>
-          <li>OAuth/OIDC login, live recovery UX, signed installers, live Cloudflare/AWS object credential provisioning, automatic merge/apply resolution, paid/team/agent/Git replacement work, and deployment hardening remain deferred.</li>
+          <li>OAuth/OIDC login, live recovery UX, signed installers, live Cloudflare/AWS object credential provisioning, automatic merge/apply resolution, paid/team/agent/Git replacement work, and multi-region/observability hardening remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>
         </ul>
       </section>

@@ -37,13 +37,14 @@ and server-mediated object-access grants with redacted provider references, cano
 prefixes, expiration, revocation, rotation generation, hosted CLI resolution, and no-network
 mock/dev CLI smoke commands. Hosted object transfer now proxies encrypted object put/get/head/list
 through the metadata API so external tester clients use account-session auth without local R2/S3
-bucket keys. Local pairing now includes no-network recovery grant references,
+bucket keys. The hosted metadata backend now has a Railway-shaped Postgres store selected by
+`DATABASE_URL`/`DEVBOX_METADATA_DATABASE_URL`, with SQLite retained for local/dev tests. Local pairing now includes no-network recovery grant references,
 receiver-generated join/complete handoff, revocation, device rotation intents, and key-envelope
 rotation generation. Paired receivers can now materialize with their own local key state instead of
 opening the publisher DB. The final private-alpha surface now adds an env-backed redacted Electron
 control surface, explicit path-scoped secret policy records, guarded manual conflict resolution
 records, macOS/Linux alpha release scripts, and a deterministic two-device smoke harness with
 redacted evidence logs. OAuth/OIDC provider login, signed installers, live Cloudflare/AWS credential
-provisioning, production pairing UX, automatic
+provisioning, production pairing UX, multi-region/observability hardening, automatic
 merge/apply resolution, paid/team/agent/Git
-replacement work, and production deployment hardening remain deferred.
+replacement work remain deferred.

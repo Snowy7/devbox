@@ -108,6 +108,6 @@ This is not production sign-in UI. Remaining Phase 1 work still includes:
 - hosted login/callback handling
 - production pairing UX and live recovery/rotation flows
 - live managed object-storage credential provisioning and rotation against Cloudflare/AWS APIs
-- production deployment hardening and abuse protection
+- multi-region deployment hardening and abuse protection
 - Electron onboarding/status UI
 - automatic conflict merge/apply resolution and conflict UI
