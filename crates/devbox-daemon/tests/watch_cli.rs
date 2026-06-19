@@ -1,11 +1,16 @@
 use devbox_auth::{
-    approve_pairing_join_request, create_pairing_invitation, create_pairing_join_request,
-    pairing_completion_from_approval, LocalIdentityView,
+    approve_pairing_join_request, create_account_ownership_proof, create_account_session,
+    create_pairing_invitation, create_pairing_join_request, pairing_completion_from_approval,
+    AccountOwnershipProofInput, LocalIdentityView,
 };
 use devbox_materialize::{
     import_snapshot_with_metadata, HostedMetadataImportOptions, ImportSnapshotRequest,
 };
-use devbox_metadata::{MetadataStore, SqliteMetadataStore};
+use devbox_metadata::{
+    app_with_config, HostedApiConfig, ManagedObjectAccessBrokerConfig, ManagedObjectCapability,
+    ManagedObjectCredentialLeaseRequest, ManagedObjectProviderKind, MetadataStore,
+    SqliteMetadataStore, UpsertProjectRequest,
+};
 use devbox_snapshot::SnapshotManifestBuilder;
 use devbox_store::{
     local_project_id, BlobCache, EnsureLocalIdentityOptions, NewProject, NewSnapshot,
@@ -366,6 +371,56 @@ fn live_sync_script_documents_required_s3_metadata_project() {
     assert!(script.contains("DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT"));
 }
 
+#[test]
+fn sync_hosted_object_transfer_push_and_materialize_without_client_r2_keys() {
+    let fixture = LiveFixture::new();
+    let source_identity = fixture.init_identity(&fixture.source_db, "Desk");
+    let session_token = "raw-live-hosted-session-token";
+    fixture.seed_hosted_object_access(&source_identity.account_id, session_token);
+    let server = fixture.start_hosted_object_server();
+    fixture.write("README.md", "hosted transfer path\n");
+
+    let push = run_devbox_daemon_vec_with_env(
+        fixture.hosted_sync_args(
+            &fixture.source_db,
+            &fixture.source_cache,
+            &server.url,
+            &source_identity.account_id,
+            true,
+        ),
+        &[("DEVBOX_TEST_SESSION_TOKEN", session_token)],
+    );
+    assert_success(&push);
+    let push_stdout = stdout(&push);
+    assert!(push_stdout.contains("remote_kind=hosted"));
+    assert!(push_stdout.contains("client_bucket_credentials=false"));
+    assert!(!push_stdout.contains("DEVBOX_R2_ACCESS_KEY_ID"));
+    assert!(!push_stdout.contains("DEVBOX_R2_SECRET_ACCESS_KEY"));
+    assert!(fixture
+        .hosted_object_root
+        .join("objects")
+        .join("accounts")
+        .join(&source_identity.account_id)
+        .join("projects")
+        .join(fixture.project_id())
+        .exists());
+
+    fixture.pair_receiver_with_source();
+    fs::create_dir_all(&fixture.target).expect("target creates");
+    let pull = run_devbox_daemon_vec_with_env(
+        fixture.hosted_pull_args(&server.url, &source_identity.account_id),
+        &[("DEVBOX_TEST_SESSION_TOKEN", session_token)],
+    );
+    assert_success(&pull);
+    let pull_stdout = stdout(&pull);
+    assert!(pull_stdout.contains("action=materialize status=ok"));
+    assert!(pull_stdout.contains("remote provider=hosted-object-transfer"));
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("README.md")).expect("target file reads"),
+        "hosted transfer path\n"
+    );
+}
+
 struct WatchFixture {
     _dir: tempfile::TempDir,
     project: std::path::PathBuf,
@@ -432,6 +487,7 @@ struct LiveFixture {
     receiver_cache: PathBuf,
     metadata_db: PathBuf,
     remote: PathBuf,
+    hosted_object_root: PathBuf,
 }
 
 impl LiveFixture {
@@ -446,6 +502,7 @@ impl LiveFixture {
             receiver_cache: dir.path().join("receiver-cache"),
             metadata_db: dir.path().join("metadata.sqlite3"),
             remote: dir.path().join("remote"),
+            hosted_object_root: dir.path().join("hosted-objects"),
             _dir: dir,
         };
         fs::create_dir_all(&fixture.project).expect("project creates");
@@ -596,6 +653,175 @@ impl LiveFixture {
             .expect("latest query succeeds")
             .map(|record| record.snapshot_id)
     }
+
+    fn seed_hosted_object_access(&self, account_id: &str, raw_session_token: &str) {
+        let mut metadata =
+            SqliteMetadataStore::open_file(&self.metadata_db).expect("metadata opens");
+        let proof = create_account_ownership_proof(AccountOwnershipProofInput {
+            account_id,
+            provider_kind: "oidc-dev",
+            provider_issuer: "https://issuer.devbox.local",
+            provider_subject: "provider-subject-live",
+            verified_email: Some("user@example.com"),
+            verified_domain: Some("example.com"),
+            proof_issued_at: "2026-06-19T10:00:00Z",
+            proof_expires_at_unix: 4_000_000_000,
+        })
+        .expect("proof creates");
+        metadata
+            .upsert_account_ownership_proof(proof.clone())
+            .expect("proof upserts");
+        metadata
+            .upsert_account_session(
+                create_account_session(
+                    &proof,
+                    raw_session_token,
+                    "2026-06-19T10:01:00Z",
+                    101,
+                    4_000_000_000,
+                )
+                .expect("session creates"),
+            )
+            .expect("session upserts");
+        metadata
+            .upsert_project(UpsertProjectRequest {
+                account_id: account_id.to_string(),
+                project_id: self.project_id(),
+                display_name: "project".to_string(),
+                root_hint: path_string(&self.project),
+                project_kind: "local".to_string(),
+                updated_at: "2026-06-19T10:02:00Z".to_string(),
+            })
+            .expect("project upserts");
+        metadata
+            .upsert_managed_object_credential_lease(ManagedObjectCredentialLeaseRequest {
+                account_id: account_id.to_string(),
+                project_id: Some(self.project_id()),
+                lease_id: "lease-alpha".to_string(),
+                provider_kind: ManagedObjectProviderKind::R2,
+                endpoint: "https://account.r2.cloudflarestorage.com".to_string(),
+                bucket: "devbox-alpha".to_string(),
+                region: "auto".to_string(),
+                prefix: Some(format!(
+                    "accounts/{}/projects/{}",
+                    account_id,
+                    self.project_id()
+                )),
+                credential_reference: "mock-managed-object-ref:lease-alpha:generation-0"
+                    .to_string(),
+                credential_fingerprint: None,
+                capabilities: vec![
+                    ManagedObjectCapability::Read,
+                    ManagedObjectCapability::Write,
+                    ManagedObjectCapability::Head,
+                    ManagedObjectCapability::List,
+                ],
+                issued_at: "2026-06-19T10:03:00Z".to_string(),
+                expires_at_unix: 4_000_000_000,
+                rotation_generation: 0,
+            })
+            .expect("lease upserts");
+    }
+
+    fn start_hosted_object_server(&self) -> HostedServer {
+        fs::create_dir_all(&self.hosted_object_root).expect("hosted object root creates");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("hosted listener binds");
+        listener
+            .set_nonblocking(true)
+            .expect("listener set nonblocking");
+        let addr = listener.local_addr().expect("listener addr reads");
+        let metadata_db = self.metadata_db.clone();
+        let object_root = self.hosted_object_root.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime creates");
+            runtime.block_on(async move {
+                let mut config = HostedApiConfig::local_dev();
+                config.object_access_broker =
+                    ManagedObjectAccessBrokerConfig::server_managed_local(
+                        object_root.display().to_string(),
+                    )
+                    .expect("broker config validates");
+                let store = SqliteMetadataStore::open_file(metadata_db).expect("metadata opens");
+                let listener =
+                    tokio::net::TcpListener::from_std(listener).expect("tokio listener wraps");
+                axum::serve(listener, app_with_config(store, config))
+                    .await
+                    .expect("hosted object server runs");
+            });
+        });
+        let server = HostedServer {
+            url: format!("http://{addr}"),
+        };
+        for _ in 0..50 {
+            if ureq::get(&format!("{}/health", server.url)).call().is_ok() {
+                return server;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("hosted object server did not become ready");
+    }
+
+    fn hosted_sync_args(
+        &self,
+        db_path: &Path,
+        cache_root: &Path,
+        api: &str,
+        account_id: &str,
+        push: bool,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "sync".to_string(),
+            "--db".to_string(),
+            path_string(db_path),
+            "--cache".to_string(),
+            path_string(cache_root),
+            "--remote-kind".to_string(),
+            "hosted".to_string(),
+            "--object-access-api".to_string(),
+            api.to_string(),
+            "--object-access-lease".to_string(),
+            "lease-alpha".to_string(),
+            "--object-access-session-token-env".to_string(),
+            "DEVBOX_TEST_SESSION_TOKEN".to_string(),
+            "--metadata-mode".to_string(),
+            "mock-dev-sqlite".to_string(),
+            "--metadata-db".to_string(),
+            path_string(&self.metadata_db),
+            "--metadata-account".to_string(),
+            account_id.to_string(),
+            "--metadata-project".to_string(),
+            self.project_id(),
+        ];
+        if push {
+            args.push("--push".to_string());
+        } else {
+            args.push("--pull".to_string());
+        }
+        args.push("--once".to_string());
+        args.push(path_string(&self.project));
+        args
+    }
+
+    fn hosted_pull_args(&self, api: &str, account_id: &str) -> Vec<String> {
+        let mut args = self.hosted_sync_args(
+            &self.receiver_db,
+            &self.receiver_cache,
+            api,
+            account_id,
+            false,
+        );
+        let last = args.len() - 1;
+        args[last] = path_string(&self.target);
+        let insert_at = args.len() - 1;
+        args.insert(insert_at, "--to".to_string());
+        args.insert(insert_at + 1, path_string(&self.target));
+        args.insert(insert_at + 2, "--apply".to_string());
+        args
+    }
+}
+
+struct HostedServer {
+    url: String,
 }
 
 fn run_devbox_daemon<const N: usize>(args: [&str; N]) -> Output {
@@ -608,6 +834,21 @@ fn run_devbox_daemon<const N: usize>(args: [&str; N]) -> Output {
 fn run_devbox_daemon_vec(args: Vec<String>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_devbox-daemon"))
         .args(args)
+        .output()
+        .expect("devbox-daemon command runs")
+}
+
+fn run_devbox_daemon_vec_with_env(args: Vec<String>, envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_devbox-daemon"));
+    command.args(args);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    command
+        .env_remove("DEVBOX_R2_ACCESS_KEY_ID")
+        .env_remove("DEVBOX_R2_SECRET_ACCESS_KEY")
+        .env_remove("AWS_ACCESS_KEY_ID")
+        .env_remove("AWS_SECRET_ACCESS_KEY")
         .output()
         .expect("devbox-daemon command runs")
 }

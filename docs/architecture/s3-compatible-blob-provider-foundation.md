@@ -117,7 +117,6 @@ path, not the external-tester permission boundary.
 Remaining Phase 1 work includes:
 
 - live OAuth/OIDC sign-in and hosted account ownership proof verification
-- hosted object proxy or signed URL transport that consumes object-access grants
 - live managed R2/S3 credential provisioning and rotation against provider APIs
 - production pairing UX and recovery flows
 - conflict UI and automatic merge/apply resolution

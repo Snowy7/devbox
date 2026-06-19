@@ -430,6 +430,38 @@ fn sync_remote_check_s3_validate_only_redacts_credentials() {
 }
 
 #[test]
+fn sync_remote_check_hosted_validate_only_uses_no_bucket_credentials() {
+    let check = run_devbox([
+        "sync",
+        "remote",
+        "check",
+        "--remote-kind",
+        "hosted",
+        "--object-access-api",
+        "https://metadata.example",
+        "--object-access-project",
+        "project-devbox",
+        "--object-access-lease",
+        "lease-alpha",
+        "--object-access-session-token-env",
+        "DEVBOX_SESSION_TOKEN",
+        "--validate-only",
+    ]);
+    assert_success(&check);
+    let output = stdout(&check);
+
+    assert!(output.contains("Remote provider: hosted-object-transfer"));
+    assert!(output.contains("Remote API host: metadata.example"));
+    assert!(output.contains("Remote project id: project-devbox"));
+    assert!(output.contains("Object access lease: lease-alpha"));
+    assert!(output.contains("Session token env: DEVBOX_SESSION_TOKEN"));
+    assert!(output.contains("Client bucket credentials: not used"));
+    assert!(output.contains("Credentials redacted: true"));
+    assert!(!output.contains("DEVBOX_R2_ACCESS_KEY_ID"));
+    assert!(!output.contains("DEVBOX_R2_SECRET_ACCESS_KEY"));
+}
+
+#[test]
 fn sync_remote_check_local_validate_only_does_not_create_remote_root() {
     let fixture = SnapshotCliFixture::new();
 

@@ -322,6 +322,7 @@ version = "0.1.0"
 name = "devbox-daemon"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "devbox-auth",
  "devbox-materialize",
  "devbox-metadata",
@@ -332,6 +333,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+ "tokio",
  "ureq",
 ]
 
@@ -365,6 +367,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "devbox-auth",
+ "devbox-sync",
  "http",
  "rusqlite",
  "serde",
@@ -409,6 +412,9 @@ dependencies = [
  "getrandom 0.2.17",
  "hmac",
  "percent-encoding",
+ "quick-xml",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "time",
@@ -1014,6 +1020,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]

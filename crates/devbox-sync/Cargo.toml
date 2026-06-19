@@ -14,6 +14,9 @@ devbox-store = { path = "../devbox-store" }
 getrandom = "0.2"
 hmac = "0.12"
 percent-encoding = "2"
+quick-xml = { version = "0.31", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "macros"] }
 ureq = "2"

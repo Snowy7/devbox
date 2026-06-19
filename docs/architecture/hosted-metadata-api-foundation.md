@@ -167,7 +167,6 @@ models, cursor compare-and-set contract, or object-access grant contract.
 Remaining Phase 1 work includes:
 
 - OAuth/OIDC sign-in and hosted provider proof verification beyond one-time alpha invites
-- hosted object proxy or signed URL transport for encrypted object bytes
 - live managed R2/S3 credential provisioning and rotation against provider APIs
 - production pairing UX and live recovery/rotation flows
 - automatic conflict merge/apply resolution and user-facing conflict UI

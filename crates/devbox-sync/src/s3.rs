@@ -1,6 +1,7 @@
 use crate::{ObjectKey, ObjectMetadata, PutOutcome, RemoteBlobProvider, SyncError, SyncResult};
 use hmac::{Hmac, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fmt;
@@ -131,6 +132,42 @@ impl S3CompatibleConfig {
             base.push_str(&encode_path_segment(segment));
         }
         base
+    }
+
+    fn list_url(&self, prefix: Option<&ObjectKey>) -> String {
+        let mut url = self.endpoint.clone();
+        url.set_path(&format!("/{}", encode_path_segment(&self.bucket)));
+        url.set_query(None);
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("list-type", "2");
+            if let Some(prefix) = self.effective_list_prefix(prefix) {
+                query.append_pair("prefix", &prefix);
+            }
+        }
+        url.to_string()
+    }
+
+    fn effective_list_prefix(&self, prefix: Option<&ObjectKey>) -> Option<String> {
+        match (&self.prefix, prefix) {
+            (Some(config_prefix), Some(prefix)) => {
+                Some(format!("{config_prefix}/{}", prefix.as_str()))
+            }
+            (Some(config_prefix), None) => Some(format!("{config_prefix}/")),
+            (None, Some(prefix)) => Some(prefix.as_str().to_string()),
+            (None, None) => None,
+        }
+    }
+
+    fn strip_config_prefix(&self, key: &str) -> Option<String> {
+        if let Some(prefix) = &self.prefix {
+            let scoped_prefix = format!("{prefix}/");
+            return key
+                .strip_prefix(&scoped_prefix)
+                .map(str::to_string)
+                .filter(|relative| !relative.is_empty());
+        }
+        Some(key.to_string())
     }
 }
 
@@ -315,6 +352,10 @@ impl S3CompatibleBlobProvider {
         self.send_with_headers(method, key, body, &[])
     }
 
+    fn send_url(&self, method: &str, url: &str, body: Option<&[u8]>) -> SyncResult<S3Response> {
+        self.send_url_with_headers(method, url, body, &[])
+    }
+
     fn send_with_headers(
         &self,
         method: &str,
@@ -323,6 +364,16 @@ impl S3CompatibleBlobProvider {
         extra_headers: &[(&str, &str)],
     ) -> SyncResult<S3Response> {
         let url = self.config.object_url(key);
+        self.send_url_with_headers(method, &url, body, extra_headers)
+    }
+
+    fn send_url_with_headers(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&[u8]>,
+        extra_headers: &[(&str, &str)],
+    ) -> SyncResult<S3Response> {
         let body = body.unwrap_or_default();
         let payload_hash = sha256_hex(body);
         let signed = sign_request(
@@ -463,6 +514,36 @@ impl RemoteBlobProvider for S3CompatibleBlobProvider {
             ))),
         }
     }
+
+    fn list(&self, prefix: Option<&ObjectKey>) -> SyncResult<Vec<ObjectMetadata>> {
+        let url = self.config.list_url(prefix);
+        let response = self.send_url("GET", &url, None)?;
+        match response.status {
+            200 => {
+                let body = String::from_utf8(response.bytes)
+                    .map_err(|error| SyncError::RemoteTransport(error.to_string()))?;
+                let parsed: S3ListBucketResult = quick_xml::de::from_str(&body)
+                    .map_err(|error| SyncError::RemoteTransport(error.to_string()))?;
+                parsed
+                    .contents
+                    .into_iter()
+                    .filter_map(|object| {
+                        self.config
+                            .strip_config_prefix(&object.key)
+                            .map(|relative| {
+                                Ok(ObjectMetadata {
+                                    key: ObjectKey::new(relative)?,
+                                    size_bytes: object.size,
+                                })
+                            })
+                    })
+                    .collect()
+            }
+            status => Err(SyncError::RemoteTransport(format!(
+                "S3 LIST failed with HTTP status {status}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -470,6 +551,20 @@ struct S3Response {
     status: u16,
     bytes: Vec<u8>,
     content_length: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct S3ListBucketResult {
+    #[serde(rename = "Contents", default)]
+    contents: Vec<S3ListObject>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct S3ListObject {
+    key: String,
+    size: u64,
 }
 
 #[derive(Debug)]
@@ -806,5 +901,49 @@ mod tests {
 
         assert!(signed.authorization.contains("Credential=AKIDEXAMPLE/"));
         assert!(!signed.authorization.contains("wJalrXUtnFEMI"));
+    }
+
+    #[test]
+    fn s3_list_response_strips_config_prefix_and_ignores_out_of_scope_objects() {
+        let config = S3CompatibleConfig::new(
+            "https://example.com",
+            "devbox-alpha",
+            "auto",
+            Some("accounts/account-alpha/projects/project-devbox"),
+            S3CredentialsSource::default(),
+        )
+        .expect("config parses");
+        let parsed: S3ListBucketResult = quick_xml::de::from_str(
+            r#"
+            <ListBucketResult>
+              <Contents>
+                <Key>accounts/account-alpha/projects/project-devbox/encrypted/blobs/a</Key>
+                <Size>10</Size>
+              </Contents>
+              <Contents>
+                <Key>accounts/account-alpha/projects/project-other/encrypted/blobs/b</Key>
+                <Size>20</Size>
+              </Contents>
+            </ListBucketResult>
+            "#,
+        )
+        .expect("list response parses");
+
+        let objects = parsed
+            .contents
+            .into_iter()
+            .filter_map(|object| {
+                config
+                    .strip_config_prefix(&object.key)
+                    .map(|relative| ObjectMetadata {
+                        key: ObjectKey::new(relative).expect("relative key parses"),
+                        size_bytes: object.size,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].key.as_str(), "encrypted/blobs/a");
+        assert_eq!(objects[0].size_bytes, 10);
     }
 }

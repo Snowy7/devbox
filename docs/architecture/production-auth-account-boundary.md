@@ -107,7 +107,6 @@ This is not production sign-in UI. Remaining Phase 1 work still includes:
 - live OAuth/OIDC provider integration
 - hosted login/callback handling
 - production pairing UX and live recovery/rotation flows
-- hosted object proxy or signed URL data transfer for managed object-access grants
 - live managed object-storage credential provisioning and rotation against Cloudflare/AWS APIs
 - production deployment hardening and abuse protection
 - Electron onboarding/status UI

@@ -30,7 +30,16 @@ args=(
   --cache "$cache"
 )
 
-if [[ "$remote_kind" == "s3" ]]; then
+if [[ "$remote_kind" == "hosted" ]]; then
+  : "${DEVBOX_METADATA_DB:?set DEVBOX_METADATA_DB for hosted live sync metadata}"
+  : "${DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT for hosted object-access scope}"
+  args+=(
+    --remote-kind hosted
+    --object-access-api "${DEVBOX_METADATA_API:?set DEVBOX_METADATA_API}"
+    --object-access-session-token-env DEVBOX_SESSION_TOKEN
+    --object-access-lease "${DEVBOX_OBJECT_ACCESS_LEASE:?set DEVBOX_OBJECT_ACCESS_LEASE}"
+  )
+elif [[ "$remote_kind" == "s3" ]]; then
   : "${DEVBOX_METADATA_DB:?set DEVBOX_METADATA_DB for s3 live sync}"
   : "${DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT for s3 object-access scope}"
   args+=(
@@ -48,8 +57,11 @@ if [[ "$remote_kind" == "s3" ]]; then
   if [[ -n "${DEVBOX_R2_SESSION_TOKEN:-}" ]]; then
     args+=(--s3-session-token-env DEVBOX_R2_SESSION_TOKEN)
   fi
-else
+elif [[ "$remote_kind" == "local" ]]; then
   args+=(--remote "${DEVBOX_REMOTE_DIR:?set DEVBOX_REMOTE_DIR for local remote mode}")
+else
+  echo "DEVBOX_REMOTE_KIND must be local, hosted, or s3" >&2
+  exit 2
 fi
 
 if [[ -n "${DEVBOX_METADATA_DB:-}" ]]; then
