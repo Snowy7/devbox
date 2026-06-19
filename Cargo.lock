@@ -340,6 +340,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
+name = "devbox-api"
+version = "0.1.0"
+dependencies = [
+ "devbox-platform",
+ "loom-core",
+]
+
+[[package]]
 name = "devbox-auth"
 version = "0.1.0"
 dependencies = [
@@ -442,6 +450,13 @@ dependencies = [
  "tokio",
  "tower",
  "url",
+]
+
+[[package]]
+name = "devbox-platform"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
 ]
 
 [[package]]
@@ -1020,6 +1035,60 @@ name = "log"
 version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
+
+[[package]]
+name = "loom-cli"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+]
+
+[[package]]
+name = "loom-core"
+version = "0.1.0"
+
+[[package]]
+name = "loom-daemon"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+]
+
+[[package]]
+name = "loom-git"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+]
+
+[[package]]
+name = "loom-pack"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+]
+
+[[package]]
+name = "loom-store"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+]
+
+[[package]]
+name = "loom-sync"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+ "loom-pack",
+]
+
+[[package]]
+name = "loom-worktree"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+]
 
 [[package]]
 name = "matchit"

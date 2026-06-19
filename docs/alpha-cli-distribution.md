@@ -1,5 +1,8 @@
 # Alpha Tool Distribution
 
+> Legacy alpha note: this page records the pre-Loom alpha implementation and may use `project` or `snapshot` for compatibility-era concepts. New work should say shared folder, file version, folder revision, checkpoint, pin, and cursor.
+
+
 Devbox alpha testers need downloadable command-line tools and a runnable desktop control surface
 before signed installers and polished hosted operations exist. For now, publishing is local: build the
 macOS/Linux alpha archives on matching hosts and upload them to a GitHub Release with `gh`.
