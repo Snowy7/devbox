@@ -260,8 +260,8 @@ The current object-transfer paths are split:
 
 ## Local Alpha Tools Package
 
-Build a host package containing `devbox`, `devbox-daemon`, `devbox-metadata`, docs, a user CLI env
-template, an operator env template, and alpha helper scripts:
+Build a host package containing `loom`, `devbox`, `devbox-daemon`, `devbox-metadata`, docs, a user
+CLI env template, an operator env template, and alpha helper scripts:
 
 ```bash
 scripts/package-cli.sh v0.1.0-alpha.1
@@ -336,6 +336,7 @@ Linux:
 tar -xzf devbox-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz
 cd devbox-v0.1.0-alpha.1-x86_64-unknown-linux-gnu
 ./devbox --help
+./loom --help
 ./devbox-daemon --help
 ./devbox-metadata --help
 ```
@@ -345,8 +346,9 @@ macOS:
 ```bash
 tar -xzf devbox-v0.1.0-alpha.1-aarch64-apple-darwin.tar.gz
 cd devbox-v0.1.0-alpha.1-aarch64-apple-darwin
-xattr -dr com.apple.quarantine ./devbox ./devbox-daemon ./devbox-metadata
+xattr -dr com.apple.quarantine ./loom ./devbox ./devbox-daemon ./devbox-metadata
 ./devbox --help
+./loom --help
 ./devbox-daemon --help
 ./devbox-metadata --help
 ```

@@ -216,7 +216,7 @@ Alpha helper scripts:
 
 - `scripts/alpha-two-device-smoke.sh` runs a local two-device proof with pairing, pending receiver refusal, live publish, latest pull, materialization, and redacted evidence logs.
 - `scripts/devbox-live-sync-alpha.sh` maps `.env` values into a live daemon command for local, hosted object-transfer, or trusted direct-S3 remotes.
-- `scripts/package-cli.sh <VERSION>` builds macOS/Linux alpha tool archives with CLI, daemon, metadata server, docs, separate user/operator env templates, and helper scripts.
+- `scripts/package-cli.sh <VERSION>` builds macOS/Linux alpha tool archives with Loom, Devbox CLI, daemon, metadata server, docs, separate user/operator env templates, and helper scripts.
 - `scripts/package-desktop-alpha.sh <VERSION>` builds an unsigned Electron alpha control-surface bundle for macOS/Linux.
 
 Hosted metadata sync wiring is explicit opt-in. Local deterministic smoke tests can use the

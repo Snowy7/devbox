@@ -68,11 +68,13 @@ mkdir -p "$stage_dir"
 
 rustup target add "$target"
 cargo build --release --locked \
+  -p loom-cli \
   -p devbox-cli \
   -p devbox-daemon \
   -p devbox-metadata \
   --target "$target"
 
+cp "$repo_root/target/$target/release/loom" "$stage_dir/loom"
 cp "$repo_root/target/$target/release/devbox" "$stage_dir/devbox"
 cp "$repo_root/target/$target/release/devbox-daemon" "$stage_dir/devbox-daemon"
 cp "$repo_root/target/$target/release/devbox-metadata" "$stage_dir/devbox-metadata"
