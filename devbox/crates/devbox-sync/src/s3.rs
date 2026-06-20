@@ -382,6 +382,7 @@ impl S3CompatibleBlobProvider {
             &payload_hash,
             &self.config.region,
             &self.credentials,
+            extra_headers,
             OffsetDateTime::now_utc(),
         )?;
 
@@ -570,6 +571,7 @@ fn sign_request(
     payload_hash: &str,
     region: &str,
     credentials: &S3Credentials,
+    extra_headers: &[(&str, &str)],
     now: OffsetDateTime,
 ) -> SyncResult<SignedRequest> {
     let url = Url::parse(url).map_err(|error| SyncError::RemoteConfig(error.to_string()))?;
@@ -581,13 +583,36 @@ fn sign_request(
         .format(SHORT_DATE_FORMAT)
         .map_err(|error| SyncError::RemoteTransport(error.to_string()))?;
 
-    let mut canonical_headers =
-        format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
-    let mut signed_headers = "host;x-amz-content-sha256;x-amz-date".to_string();
+    let mut headers = vec![
+        ("host".to_string(), host.clone()),
+        (
+            "x-amz-content-sha256".to_string(),
+            payload_hash.to_string(),
+        ),
+        ("x-amz-date".to_string(), amz_date.clone()),
+    ];
     if let Some(token) = &credentials.session_token {
-        canonical_headers.push_str(&format!("x-amz-security-token:{token}\n"));
-        signed_headers.push_str(";x-amz-security-token");
+        headers.push(("x-amz-security-token".to_string(), token.to_string()));
     }
+    for (name, value) in extra_headers {
+        let name = canonical_header_name(name)?;
+        if headers.iter().any(|(existing, _)| existing == &name) {
+            return Err(SyncError::RemoteConfig(format!(
+                "duplicate signed header {name}"
+            )));
+        }
+        headers.push((name, canonical_header_value(value)));
+    }
+    headers.sort_by(|left, right| left.0.cmp(&right.0));
+    let canonical_headers = headers
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect::<String>();
+    let signed_headers = headers
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
 
     let canonical_request = format!(
         "{method}\n{}\n{}\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
@@ -717,6 +742,24 @@ fn validate_env_name(value: String, label: &str) -> SyncResult<String> {
         )));
     }
     Ok(value)
+}
+
+fn canonical_header_name(name: &str) -> SyncResult<String> {
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty()
+        || name
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'-'))
+    {
+        return Err(SyncError::RemoteConfig(
+            "signed header names must contain only ASCII letters, digits, or '-'".to_string(),
+        ));
+    }
+    Ok(name)
+}
+
+fn canonical_header_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn load_required_env(name: &str, label: &str) -> SyncResult<String> {
@@ -974,12 +1017,34 @@ mod tests {
             EMPTY_SHA256,
             "us-east-1",
             &credentials,
+            &[],
             OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("timestamp parses"),
         )
         .expect("request signs");
 
         assert!(signed.authorization.contains("Credential=AKIDEXAMPLE/"));
         assert!(!signed.authorization.contains("wJalrXUtnFEMI"));
+    }
+
+    #[test]
+    fn sigv4_signs_conditional_put_headers() {
+        let credentials = S3Credentials::new("AKIDEXAMPLE", "SECRET", None::<String>)
+            .expect("credentials parse");
+        let signed = sign_request(
+            "PUT",
+            "https://example.com/bucket/key",
+            EMPTY_SHA256,
+            "auto",
+            &credentials,
+            &[("If-None-Match", "*")],
+            OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("timestamp parses"),
+        )
+        .expect("request signs");
+
+        assert!(signed.authorization.contains(
+            "SignedHeaders=host;if-none-match;x-amz-content-sha256;x-amz-date"
+        ));
+        assert!(!signed.authorization.contains("SECRET"));
     }
 
     #[test]
