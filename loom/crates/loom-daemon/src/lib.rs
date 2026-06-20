@@ -1116,13 +1116,25 @@ fn process_is_running(pid: u32) -> bool {
         .any(|line| line.contains(&format!("\",\"{pid}\",")) || line.contains(&format!(",{pid},")))
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn process_is_running(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
     }
 
-    Path::new("/proc").join(pid.to_string()).exists()
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(all(not(windows), not(unix)))]
+fn process_is_running(pid: u32) -> bool {
+    pid == std::process::id()
 }
 
 #[cfg(windows)]
