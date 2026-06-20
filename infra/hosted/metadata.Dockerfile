@@ -8,9 +8,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && useradd --system --home /nonexistent --shell /usr/sbin/nologin devbox \
     && mkdir -p /data \
-    && chown devbox:devbox /data \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/devbox-metadata /usr/local/bin/devbox-metadata
@@ -18,7 +16,5 @@ COPY --from=builder /app/target/release/devbox-metadata /usr/local/bin/devbox-me
 ENV DEVBOX_ALLOW_MOCK_AUTH=false
 
 EXPOSE 8787
-
-USER devbox
 
 CMD ["devbox-metadata"]

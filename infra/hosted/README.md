@@ -35,6 +35,10 @@ Railway setup:
 The Dockerfile intentionally does not include a Docker `VOLUME` instruction. Railway rejects
 Dockerfile-declared volumes; create Railway Volumes in Railway instead.
 
+The hosted images currently run as the default container user so Railway-mounted `/data` volumes are
+writeable at startup. A later hardening pass should add an entrypoint that fixes mounted-volume
+ownership and then drops privileges.
+
 Local container smoke:
 
 ```bash
