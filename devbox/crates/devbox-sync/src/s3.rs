@@ -585,10 +585,7 @@ fn sign_request(
 
     let mut headers = vec![
         ("host".to_string(), host.clone()),
-        (
-            "x-amz-content-sha256".to_string(),
-            payload_hash.to_string(),
-        ),
+        ("x-amz-content-sha256".to_string(), payload_hash.to_string()),
         ("x-amz-date".to_string(), amz_date.clone()),
     ];
     if let Some(token) = &credentials.session_token {
@@ -958,10 +955,7 @@ mod tests {
         assert!(outcome.uploaded);
         assert_eq!(outcome.size_bytes, 4);
         server.join().expect("server exits");
-        assert_eq!(
-            methods.lock().expect("methods lock").as_slice(),
-            ["PUT"]
-        );
+        assert_eq!(methods.lock().expect("methods lock").as_slice(), ["PUT"]);
     }
 
     #[test]
@@ -1028,8 +1022,8 @@ mod tests {
 
     #[test]
     fn sigv4_signs_conditional_put_headers() {
-        let credentials = S3Credentials::new("AKIDEXAMPLE", "SECRET", None::<String>)
-            .expect("credentials parse");
+        let credentials =
+            S3Credentials::new("AKIDEXAMPLE", "SECRET", None::<String>).expect("credentials parse");
         let signed = sign_request(
             "PUT",
             "https://example.com/bucket/key",
@@ -1041,9 +1035,9 @@ mod tests {
         )
         .expect("request signs");
 
-        assert!(signed.authorization.contains(
-            "SignedHeaders=host;if-none-match;x-amz-content-sha256;x-amz-date"
-        ));
+        assert!(signed
+            .authorization
+            .contains("SignedHeaders=host;if-none-match;x-amz-content-sha256;x-amz-date"));
         assert!(!signed.authorization.contains("SECRET"));
     }
 
