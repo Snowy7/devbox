@@ -1,0 +1,50 @@
+# VCS and local agent state
+.git/
+.github/
+.agents/
+.plans/
+.product/
+.codex-pets/
+
+# Rust build outputs
+target/
+**/target/
+
+# JavaScript and app build outputs
+node_modules/
+**/node_modules/
+dist/
+build/
+out/
+.next/
+.turbo/
+.cache/
+coverage/
+
+# Python/local environments
+__pycache__/
+**/__pycache__/
+.venv/
+venv/
+
+# Devbox local runtime/evidence data
+.devbox/
+.devbox-alpha-evidence/
+.devbox-cache/
+
+# Logs and local secrets
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

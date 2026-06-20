@@ -1,8 +1,8 @@
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 WORKDIR /app
 COPY . .
-RUN cargo build --release -p devbox-metadata
+RUN cargo build --release --locked -p devbox-metadata
 
 FROM debian:bookworm-slim
 
