@@ -454,16 +454,6 @@ fn read_response_bytes(response: ureq::Response) -> SyncResult<Vec<u8>> {
 
 impl RemoteBlobProvider for S3CompatibleBlobProvider {
     fn put(&self, key: &ObjectKey, bytes: &[u8]) -> SyncResult<PutOutcome> {
-        if let Some(existing) = self.get(key)? {
-            if existing == bytes {
-                return Ok(PutOutcome {
-                    uploaded: false,
-                    size_bytes: existing.len() as u64,
-                });
-            }
-            return Err(SyncError::RemoteObjectAlreadyExists { key: key.clone() });
-        }
-
         let response =
             self.send_with_headers("PUT", key, Some(bytes), &[("If-None-Match", "*")])?;
         if (200..300).contains(&response.status) {
@@ -839,6 +829,95 @@ mod tests {
         assert_eq!(
             config.object_url(&key),
             "https://example.com/root/bucket/prefix/encrypted/blobs/a%20b"
+        );
+    }
+
+    #[test]
+    fn s3_put_does_not_require_read_before_create() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test server binds");
+        let endpoint = format!("http://{}", listener.local_addr().expect("server addr"));
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let server_methods = Arc::clone(&methods);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request accepted");
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let header_end = loop {
+                let read = stream.read(&mut buffer).expect("request reads");
+                assert_ne!(read, 0, "request ended before headers");
+                bytes.extend_from_slice(&buffer[..read]);
+                if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index;
+                }
+            };
+
+            let headers = std::str::from_utf8(&bytes[..header_end]).expect("headers are utf8");
+            let request_line = headers.lines().next().expect("request line exists");
+            let method = request_line
+                .split_whitespace()
+                .next()
+                .expect("method exists")
+                .to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            while bytes.len() < body_start + content_length {
+                let read = stream.read(&mut buffer).expect("body reads");
+                assert_ne!(read, 0, "request ended before body");
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+
+            server_methods
+                .lock()
+                .expect("methods lock")
+                .push(method.clone());
+            if method == "GET" {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .expect("403 writes");
+            } else {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .expect("200 writes");
+            }
+        });
+
+        let config = S3CompatibleConfig::new(
+            endpoint,
+            "bucket",
+            "auto",
+            None::<String>,
+            S3CredentialsSource::default(),
+        )
+        .expect("config parses");
+        let credentials =
+            S3Credentials::new("access", "secret", None::<String>).expect("credentials parse");
+        let provider = S3CompatibleBlobProvider::new(config, credentials);
+        let key = ObjectKey::new("packs/revision.loompack").expect("key parses");
+
+        let outcome = provider.put(&key, b"pack").expect("put succeeds");
+
+        assert!(outcome.uploaded);
+        assert_eq!(outcome.size_bytes, 4);
+        server.join().expect("server exits");
+        assert_eq!(
+            methods.lock().expect("methods lock").as_slice(),
+            ["PUT"]
         );
     }
 
