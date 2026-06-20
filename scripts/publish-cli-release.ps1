@@ -19,7 +19,8 @@ Set-Location $RepoRoot
 
 gh auth status | Out-Null
 
-if ((git status --porcelain).Trim()) {
+$Status = git status --porcelain
+if ($Status) {
     throw "working tree has uncommitted changes; commit before publishing a release"
 }
 
