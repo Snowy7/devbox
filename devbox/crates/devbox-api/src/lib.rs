@@ -5,9 +5,14 @@
 //! cursor metadata. Loom still owns folder-state semantics inside the packs.
 
 use devbox_platform::{AccountId, DeviceId, SharedFolderRole};
+use devbox_sync::{
+    ObjectKey, RemoteBlobProvider, S3CompatibleBlobProvider, S3CompatibleConfig,
+    S3CredentialsSource, SyncError,
+};
 use loom_core::{CursorId, FolderRevisionId, SharedFolderId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::env;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -111,6 +116,7 @@ pub enum ApiError {
         expected: Option<String>,
         actual: Option<String>,
     },
+    RemoteStorage(String),
     Json(String),
 }
 
@@ -122,6 +128,7 @@ impl ApiError {
             Self::Forbidden(_) => 403,
             Self::NotFound(_) => 404,
             Self::Conflict { .. } => 409,
+            Self::RemoteStorage(_) => 502,
             Self::Io { .. } => 500,
         }
     }
@@ -141,6 +148,7 @@ impl fmt::Display for ApiError {
                 expected.as_deref().unwrap_or("-"),
                 actual.as_deref().unwrap_or("-")
             ),
+            Self::RemoteStorage(message) => write!(f, "hosted pack storage error: {message}"),
             Self::Json(message) => write!(f, "{message}"),
         }
     }
@@ -155,6 +163,7 @@ impl std::error::Error for ApiError {
             | Self::Forbidden(_)
             | Self::NotFound(_)
             | Self::Conflict { .. }
+            | Self::RemoteStorage(_)
             | Self::Json(_) => None,
         }
     }
@@ -165,6 +174,138 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(Debug, Clone)]
 pub struct LocalDevboxApi {
     root: Arc<PathBuf>,
+    pack_storage: Arc<dyn PackStorage>,
+}
+
+trait PackStorage: fmt::Debug + Send + Sync {
+    fn label(&self) -> &'static str;
+    fn put_pack(&self, folder_id: &str, revision_id: &str, bytes: &[u8]) -> ApiResult<bool>;
+    fn get_pack(&self, folder_id: &str, revision_id: &str) -> ApiResult<Vec<u8>>;
+}
+
+#[derive(Debug, Clone)]
+struct LocalFilePackStorage {
+    root: PathBuf,
+}
+
+impl LocalFilePackStorage {
+    fn open(root: impl AsRef<Path>) -> ApiResult<Self> {
+        let root = root.as_ref().to_path_buf();
+        create_dir_all(root.join("packs"))?;
+        Ok(Self { root })
+    }
+
+    fn pack_path(&self, folder_id: &str, revision_id: &str) -> ApiResult<PathBuf> {
+        let folder_id = validate_id(folder_id, "shared folder id")?;
+        let revision_id = validate_id(revision_id, "folder revision id")?;
+        Ok(self
+            .root
+            .join("packs")
+            .join(folder_id)
+            .join(format!("{revision_id}.loompack")))
+    }
+}
+
+impl PackStorage for LocalFilePackStorage {
+    fn label(&self) -> &'static str {
+        "local-file"
+    }
+
+    fn put_pack(&self, folder_id: &str, revision_id: &str, bytes: &[u8]) -> ApiResult<bool> {
+        let revision_id = validate_id(revision_id, "folder revision id")?;
+        let path = self.pack_path(folder_id, &revision_id)?;
+        if let Ok(existing) = fs::read(&path) {
+            return if existing == bytes {
+                Ok(false)
+            } else {
+                Err(ApiError::Conflict {
+                    expected: Some(revision_id),
+                    actual: Some("different pack bytes".to_string()),
+                })
+            };
+        }
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent)?;
+        }
+        fs::write(&path, bytes).map_err(|source| ApiError::Io { path, source })?;
+        Ok(true)
+    }
+
+    fn get_pack(&self, folder_id: &str, revision_id: &str) -> ApiResult<Vec<u8>> {
+        let path = self.pack_path(folder_id, revision_id)?;
+        fs::read(&path).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                ApiError::NotFound("pack not found".to_string())
+            } else {
+                ApiError::Io { path, source }
+            }
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RemotePackStorage {
+    provider: S3CompatibleBlobProvider,
+}
+
+impl RemotePackStorage {
+    fn from_r2_env() -> ApiResult<Self> {
+        let endpoint = optional_env_value("DEVBOX_R2_ENDPOINT");
+        let bucket = optional_env_value("DEVBOX_R2_BUCKET");
+        let (endpoint, bucket) = match (endpoint, bucket) {
+            (Some(endpoint), Some(bucket)) => (endpoint, bucket),
+            (None, None) => {
+                return Err(ApiError::BadRequest(
+                    "DEVBOX_R2_ENDPOINT and DEVBOX_R2_BUCKET are not configured".to_string(),
+                ));
+            }
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "DEVBOX_R2_ENDPOINT and DEVBOX_R2_BUCKET must be set together".to_string(),
+                ));
+            }
+        };
+        let region = optional_env_value("DEVBOX_R2_REGION").unwrap_or_else(|| "auto".to_string());
+        let prefix = optional_env_value("DEVBOX_R2_PREFIX");
+        let credentials = S3CredentialsSource::env(
+            "DEVBOX_R2_ACCESS_KEY_ID",
+            "DEVBOX_R2_SECRET_ACCESS_KEY",
+            Some("DEVBOX_R2_SESSION_TOKEN"),
+        )
+        .map_err(sync_error)?;
+        let config = S3CompatibleConfig::new(endpoint, bucket, region, prefix, credentials)
+            .map_err(sync_error)?;
+        let provider = S3CompatibleBlobProvider::from_env(config).map_err(sync_error)?;
+        Ok(Self { provider })
+    }
+
+    fn pack_key(folder_id: &str, revision_id: &str) -> ApiResult<ObjectKey> {
+        let folder_id = validate_id(folder_id, "shared folder id")?;
+        let revision_id = validate_id(revision_id, "folder revision id")?;
+        ObjectKey::new(format!("packs/{folder_id}/{revision_id}.loompack")).map_err(sync_error)
+    }
+}
+
+impl PackStorage for RemotePackStorage {
+    fn label(&self) -> &'static str {
+        "r2-packs"
+    }
+
+    fn put_pack(&self, folder_id: &str, revision_id: &str, bytes: &[u8]) -> ApiResult<bool> {
+        let key = Self::pack_key(folder_id, revision_id)?;
+        self.provider
+            .put(&key, bytes)
+            .map(|outcome| outcome.uploaded)
+            .map_err(sync_error)
+    }
+
+    fn get_pack(&self, folder_id: &str, revision_id: &str) -> ApiResult<Vec<u8>> {
+        let key = Self::pack_key(folder_id, revision_id)?;
+        self.provider
+            .get(&key)
+            .map_err(sync_error)?
+            .ok_or_else(|| ApiError::NotFound("pack not found".to_string()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,18 +399,44 @@ struct ErrorWire {
 impl LocalDevboxApi {
     pub fn open(root: impl AsRef<Path>) -> ApiResult<Self> {
         let root = root.as_ref().to_path_buf();
+        let pack_storage = Arc::new(LocalFilePackStorage::open(&root)?);
+        Self::open_with_pack_storage(root, pack_storage)
+    }
+
+    pub fn open_from_env(root: impl AsRef<Path>) -> ApiResult<Self> {
+        let root = root.as_ref().to_path_buf();
+        let pack_storage: Arc<dyn PackStorage> = if optional_env_value("DEVBOX_R2_ENDPOINT")
+            .is_some()
+            || optional_env_value("DEVBOX_R2_BUCKET").is_some()
+        {
+            Arc::new(RemotePackStorage::from_r2_env()?)
+        } else {
+            Arc::new(LocalFilePackStorage::open(&root)?)
+        };
+        Self::open_with_pack_storage(root, pack_storage)
+    }
+
+    fn open_with_pack_storage(
+        root: impl AsRef<Path>,
+        pack_storage: Arc<dyn PackStorage>,
+    ) -> ApiResult<Self> {
+        let root = root.as_ref().to_path_buf();
         create_dir_all(&root)?;
         create_dir_all(root.join("metadata"))?;
-        create_dir_all(root.join("packs"))?;
         create_dir_all(root.join("objects"))?;
         create_dir_all(root.join("cursors"))?;
         Ok(Self {
             root: Arc::new(root),
+            pack_storage,
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn pack_storage_label(&self) -> &'static str {
+        self.pack_storage.label()
     }
 
     pub fn create_dev_session(
@@ -480,23 +647,7 @@ impl LocalDevboxApi {
         bytes: &[u8],
     ) -> ApiResult<bool> {
         self.require_membership(auth, folder_id)?;
-        let revision_id = validate_id(revision_id, "folder revision id")?;
-        let path = self.pack_path(folder_id, &revision_id)?;
-        if let Ok(existing) = fs::read(&path) {
-            return if existing == bytes {
-                Ok(false)
-            } else {
-                Err(ApiError::Conflict {
-                    expected: Some(revision_id),
-                    actual: Some("different pack bytes".to_string()),
-                })
-            };
-        }
-        if let Some(parent) = path.parent() {
-            create_dir_all(parent)?;
-        }
-        fs::write(&path, bytes).map_err(|source| ApiError::Io { path, source })?;
-        Ok(true)
+        self.pack_storage.put_pack(folder_id, revision_id, bytes)
     }
 
     pub fn get_pack(
@@ -506,14 +657,7 @@ impl LocalDevboxApi {
         revision_id: &str,
     ) -> ApiResult<Vec<u8>> {
         self.require_membership(auth, folder_id)?;
-        let path = self.pack_path(folder_id, revision_id)?;
-        fs::read(&path).map_err(|source| {
-            if source.kind() == io::ErrorKind::NotFound {
-                ApiError::NotFound("pack not found".to_string())
-            } else {
-                ApiError::Io { path, source }
-            }
-        })
+        self.pack_storage.get_pack(folder_id, revision_id)
     }
 
     pub fn get_cursor(
@@ -755,16 +899,6 @@ impl LocalDevboxApi {
         )
     }
 
-    fn pack_path(&self, folder_id: &str, revision_id: &str) -> ApiResult<PathBuf> {
-        let folder_id = validate_id(folder_id, "shared folder id")?;
-        let revision_id = validate_id(revision_id, "folder revision id")?;
-        Ok(self
-            .root
-            .join("packs")
-            .join(folder_id)
-            .join(format!("{revision_id}.loompack")))
-    }
-
     fn cursor_path(&self, folder_id: &str, cursor_id: &str) -> ApiResult<PathBuf> {
         let folder_id = validate_id(folder_id, "shared folder id")?;
         let cursor_id = validate_id(cursor_id, "cursor id")?;
@@ -885,7 +1019,7 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
             &serde_json::json!({
                 "status": "ok",
                 "service": "devbox-api",
-                "storage": "local-file"
+                "storage": api.pack_storage_label()
             }),
         ),
         ("POST", ["v1", "auth", "dev-session"]) => {
@@ -1327,6 +1461,17 @@ fn create_dir_all(path: impl AsRef<Path>) -> ApiResult<()> {
     })
 }
 
+fn optional_env_value(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn sync_error(error: SyncError) -> ApiError {
+    ApiError::RemoteStorage(error.to_string())
+}
+
 fn digest_hex(value: &str) -> String {
     blake3::hash(value.as_bytes()).to_hex().to_string()
 }
@@ -1341,6 +1486,54 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct MemoryPackStorage {
+        packs: Mutex<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl MemoryPackStorage {
+        fn key(folder_id: &str, revision_id: &str) -> String {
+            format!("{folder_id}/{revision_id}")
+        }
+    }
+
+    impl PackStorage for MemoryPackStorage {
+        fn label(&self) -> &'static str {
+            "test-remote"
+        }
+
+        fn put_pack(&self, folder_id: &str, revision_id: &str, bytes: &[u8]) -> ApiResult<bool> {
+            validate_id(folder_id, "shared folder id")?;
+            validate_id(revision_id, "folder revision id")?;
+            let key = Self::key(folder_id, revision_id);
+            let mut packs = self.packs.lock().expect("memory storage lock");
+            if let Some(existing) = packs.get(&key) {
+                return if existing.as_slice() == bytes {
+                    Ok(false)
+                } else {
+                    Err(ApiError::Conflict {
+                        expected: Some(revision_id.to_string()),
+                        actual: Some("different pack bytes".to_string()),
+                    })
+                };
+            }
+            packs.insert(key, bytes.to_vec());
+            Ok(true)
+        }
+
+        fn get_pack(&self, folder_id: &str, revision_id: &str) -> ApiResult<Vec<u8>> {
+            validate_id(folder_id, "shared folder id")?;
+            validate_id(revision_id, "folder revision id")?;
+            self.packs
+                .lock()
+                .expect("memory storage lock")
+                .get(&Self::key(folder_id, revision_id))
+                .cloned()
+                .ok_or_else(|| ApiError::NotFound("pack not found".to_string()))
+        }
+    }
 
     #[test]
     fn api_boundary_delegates_folder_state_to_loom() {
@@ -1417,6 +1610,43 @@ mod tests {
     }
 
     #[test]
+    fn api_can_use_non_local_pack_storage() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open_with_pack_storage(
+            dir.path(),
+            Arc::new(MemoryPackStorage::default()),
+        )
+        .expect("api opens");
+        let session = api
+            .create_dev_session(Some("alice"), Some("laptop"), Some("Laptop"))
+            .expect("session creates");
+        let auth = api
+            .authenticate(&session.session_token, &session.device_id)
+            .expect("auth works");
+        api.ensure_shared_folder(&auth, "shared-folder-1", "Code")
+            .expect("folder creates");
+
+        assert_eq!(api.pack_storage_label(), "test-remote");
+        assert!(api
+            .put_pack(
+                &auth,
+                "shared-folder-1",
+                "folder-revision-1",
+                b"remote-pack"
+            )
+            .expect("pack writes"));
+        assert_eq!(
+            api.get_pack(&auth, "shared-folder-1", "folder-revision-1")
+                .expect("pack reads"),
+            b"remote-pack"
+        );
+        assert!(
+            !dir.path().join("packs").exists(),
+            "custom pack storage should not create local pack files"
+        );
+    }
+
+    #[test]
     fn wrong_session_and_wrong_account_fail_closed() {
         let dir = tempfile::tempdir().expect("temp dir");
         let api = LocalDevboxApi::open(dir.path()).expect("api opens");
@@ -1467,5 +1697,6 @@ mod tests {
 
         assert!(text.starts_with("HTTP/1.1 200 OK"));
         assert!(text.contains("\"service\":\"devbox-api\""));
+        assert!(text.contains("\"storage\":\"local-file\""));
     }
 }
