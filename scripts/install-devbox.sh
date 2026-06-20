@@ -17,9 +17,43 @@ detect_target() {
 }
 
 latest_tag() {
-  curl -fsSL "https://api.github.com/repos/$repo/releases" \
+  curl_github "https://api.github.com/repos/$repo/releases" \
     | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' \
     | head -n 1
+}
+
+curl_github() {
+  token="${DEVBOX_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [ -n "$token" ]; then
+    curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" "$@"
+  else
+    curl -fsSL -H "Accept: application/vnd.github+json" "$@"
+  fi
+}
+
+curl_github_asset() {
+  token="${DEVBOX_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [ -n "$token" ]; then
+    curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/octet-stream" "$@"
+  else
+    curl -fsSL -H "Accept: application/octet-stream" "$@"
+  fi
+}
+
+asset_url() {
+  asset_name="$1"
+  curl_github "https://api.github.com/repos/$repo/releases/tags/$tag" \
+    | awk -v name="$asset_name" '
+      /"url":/ {
+        url=$0
+        sub(/^[[:space:]]*"url": "/, "", url)
+        sub(/",?$/, "", url)
+      }
+      /"name":/ && index($0, "\"" name "\"") {
+        print url
+        exit
+      }
+    '
 }
 
 add_path_hint() {
@@ -56,7 +90,12 @@ if [ -z "$tag" ]; then
 fi
 
 asset="devbox-$tag-$target.tar.gz"
-base_url="https://github.com/$repo/releases/download/$tag"
+asset_api_url="$(asset_url "$asset")"
+checksum_api_url="$(asset_url "$asset.sha256")"
+if [ -z "$asset_api_url" ] || [ -z "$checksum_api_url" ]; then
+  echo "Release $tag does not have $asset and checksum assets" >&2
+  exit 1
+fi
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/devbox-install.XXXXXX")"
 
 cleanup() {
@@ -64,8 +103,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-curl -fL "$base_url/$asset" -o "$tmp_dir/$asset"
-curl -fL "$base_url/$asset.sha256" -o "$tmp_dir/$asset.sha256"
+curl_github_asset "$asset_api_url" -o "$tmp_dir/$asset"
+curl_github_asset "$checksum_api_url" -o "$tmp_dir/$asset.sha256"
 
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$tmp_dir" && sha256sum -c "$asset.sha256")
@@ -95,8 +134,14 @@ if [ "$(uname -s)" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
     "$install_dir/devbox-metadata" 2>/dev/null || true
 fi
 
-add_path_hint
+if [ "${DEVBOX_NO_PATH:-}" != "1" ]; then
+  add_path_hint
+fi
 
 echo "Devbox $tag installed to $install_dir"
-echo "Open a new terminal, then run: devbox --help"
+if [ "${DEVBOX_NO_PATH:-}" = "1" ]; then
+  echo "PATH was not changed because DEVBOX_NO_PATH=1 was set."
+else
+  echo "Open a new terminal, then run: devbox --help"
+fi
 echo "To update later, rerun this script."
