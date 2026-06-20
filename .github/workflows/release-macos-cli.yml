@@ -1,0 +1,63 @@
+name: Release macOS CLI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to package"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  DEVBOX_DEFAULT_API_URL: https://devbox-staging.up.railway.app
+
+jobs:
+  macos-cli:
+    name: macOS ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Package CLI
+        env:
+          DEVBOX_RELEASE_TARGET: ${{ matrix.target }}
+        run: scripts/package-cli.sh "${{ github.event.inputs.tag || github.ref_name }}"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          assets=(
+            "dist/devbox-$RELEASE_TAG-${{ matrix.target }}.tar.gz"
+            "dist/devbox-$RELEASE_TAG-${{ matrix.target }}.tar.gz.sha256"
+          )
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            flags=()
+            case "$RELEASE_TAG" in
+              *-*) flags+=(--prerelease) ;;
+            esac
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "Devbox CLI $RELEASE_TAG" \
+              --notes "Alpha command-line tools for Loom and Devbox. The default API is https://devbox-staging.up.railway.app. OAuth, signed installers, and production hardening are not included yet." \
+              "${flags[@]}"
+          fi

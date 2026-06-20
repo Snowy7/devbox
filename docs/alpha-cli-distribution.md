@@ -279,12 +279,22 @@ Supported local packaging targets:
 - `x86_64-unknown-linux-gnu`
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
+- `x86_64-pc-windows-msvc` through `scripts/package-cli.ps1`
 
 Set a target explicitly when needed:
 
 ```bash
 DEVBOX_RELEASE_TARGET=x86_64-unknown-linux-gnu scripts/package-cli.sh v0.1.0-alpha.1
 ```
+
+On Windows:
+
+```powershell
+.\scripts\package-cli.ps1 -Version v0.1.0-alpha.1
+```
+
+Packages bake in `https://devbox-staging.up.railway.app` as the default Devbox API unless
+`DEVBOX_DEFAULT_API_URL` or `-ApiUrl` is supplied at package time.
 
 ## Local Desktop Package
 
@@ -323,10 +333,54 @@ The publish script:
 5. Creates or updates the GitHub Release.
 6. Uploads the archive and its `.sha256` file.
 
-Run the same command from a Linux machine and a Mac if you want both platform archives on the same
-release. Build/upload the desktop archive separately with `scripts/package-desktop-alpha.sh` until a
-single release orchestrator exists. The CLI publish script uses `--clobber`, so rerunning replaces
-the same target asset.
+For the current alpha release flow:
+
+- run `scripts/publish-cli-release.ps1` from Windows to build and upload the Windows zip
+- push the same `v*` tag to trigger `.github/workflows/release-macos-cli.yml`, which builds and
+  uploads both macOS archives from GitHub Actions
+- run the bash publish script from Linux only if a Linux archive is needed
+
+The publish scripts and macOS workflow use `--clobber`, so rerunning replaces the same target asset.
+
+Windows local publish:
+
+```powershell
+git switch main
+git pull --ff-only
+.\scripts\publish-cli-release.ps1 -Tag v0.1.0-alpha.1
+```
+
+Monitor macOS packaging after the tag is pushed:
+
+```bash
+gh run list --workflow "Release macOS CLI" --limit 5
+gh run watch <RUN_ID> --exit-status
+```
+
+## Install Or Update
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-devbox.ps1 | iex
+```
+
+macOS/Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-devbox.sh | sh
+```
+
+Rerun the same command to update. To install a specific version:
+
+```powershell
+irm https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-devbox.ps1 -OutFile install-devbox.ps1
+.\install-devbox.ps1 -Version v0.1.0-alpha.1
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-devbox.sh | sh -s -- v0.1.0-alpha.1
+```
 
 ## Tester Install Notes
 

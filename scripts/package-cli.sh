@@ -9,6 +9,7 @@ Builds and packages Devbox alpha command-line tools for the current macOS/Linux 
 
 Environment:
   DEVBOX_RELEASE_TARGET   Optional Rust target triple.
+  DEVBOX_DEFAULT_API_URL  Optional default Devbox API URL baked into the CLI.
 
 Examples:
   scripts/package-cli.sh v0.1.0-alpha.1
@@ -26,6 +27,7 @@ cd "$repo_root"
 
 version="${1:-$(git rev-parse --short HEAD)}"
 target="${DEVBOX_RELEASE_TARGET:-}"
+export DEVBOX_DEFAULT_API_URL="${DEVBOX_DEFAULT_API_URL:-https://devbox-staging.up.railway.app}"
 
 if [[ -z "$target" ]]; then
   os="$(uname -s)"
@@ -84,11 +86,13 @@ cat > "$stage_dir/.env.example" <<'ENV'
 # Devbox CLI local/dev overrides.
 # Packaged production builds should already know the Devbox API endpoint.
 
-# DEVBOX_API_URL=https://api.devbox.example
+# DEVBOX_API_URL=https://devbox-staging.up.railway.app
 DEVBOX_CONFIG_DIR=.devbox
 ENV
 cp "$repo_root/.env.example" "$stage_dir/.env.operator.example"
 mkdir -p "$stage_dir/scripts" "$stage_dir/docs"
+cp "$repo_root/scripts/install-devbox.sh" "$stage_dir/scripts/install-devbox.sh"
+cp "$repo_root/scripts/install-devbox.ps1" "$stage_dir/scripts/install-devbox.ps1"
 cp "$repo_root/scripts/load-r2-env.sh" "$stage_dir/scripts/load-r2-env.sh"
 cp "$repo_root/scripts/devbox-live-sync-alpha.sh" "$stage_dir/scripts/devbox-live-sync-alpha.sh"
 cp "$repo_root/scripts/alpha-two-device-smoke.sh" "$stage_dir/scripts/alpha-two-device-smoke.sh"
