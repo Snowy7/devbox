@@ -78,7 +78,14 @@ cp "$repo_root/target/$target/release/devbox-daemon" "$stage_dir/devbox-daemon"
 cp "$repo_root/target/$target/release/devbox-metadata" "$stage_dir/devbox-metadata"
 cp "$repo_root/README.md" "$stage_dir/README.md"
 cp "$repo_root/LICENSE" "$stage_dir/LICENSE"
-cp "$repo_root/.env.example" "$stage_dir/.env.example"
+cat > "$stage_dir/.env.example" <<'ENV'
+# Devbox CLI local/dev overrides.
+# Packaged production builds should already know the Devbox API endpoint.
+
+# DEVBOX_API_URL=https://api.devbox.example
+DEVBOX_CONFIG_DIR=.devbox
+ENV
+cp "$repo_root/.env.example" "$stage_dir/.env.operator.example"
 mkdir -p "$stage_dir/scripts" "$stage_dir/docs"
 cp "$repo_root/scripts/load-r2-env.sh" "$stage_dir/scripts/load-r2-env.sh"
 cp "$repo_root/scripts/devbox-live-sync-alpha.sh" "$stage_dir/scripts/devbox-live-sync-alpha.sh"

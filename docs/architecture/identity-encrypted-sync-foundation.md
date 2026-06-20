@@ -54,7 +54,7 @@ device rows. Store tests explicitly insert multiple non-local devices for one ac
 
 ## Encrypted Object Transport
 
-`crates/devbox-sync` defines a small remote object provider boundary:
+`devbox/crates/devbox-sync` defines a small remote object provider boundary:
 
 - `put`
 - `get`

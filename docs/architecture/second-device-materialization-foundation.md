@@ -40,7 +40,7 @@ not a production key exchange.
 
 ## Domain Boundary
 
-`crates/devbox-materialize` composes the existing foundations:
+`devbox/crates/devbox-materialize` composes the existing foundations:
 
 - `devbox-store` loads and persists snapshot/project/manifest metadata
 - `devbox-store::BlobCache` owns local plaintext cache bytes

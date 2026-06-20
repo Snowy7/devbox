@@ -1,32 +1,74 @@
 [area]
 name = "devbox"
-status = "intended-home"
+status = "active-home"
 description = "Hosted product platform for Loom-powered shared folders."
 
 [[crate]]
-name = "devbox-cli"
-current_path = "../crates/devbox-cli"
-intended_path = "crates/devbox-cli"
-owns = ["product CLI", "login", "share", "clone", "machine management"]
-
-[[crate]]
-name = "devbox-api"
-current_path = "../crates/devbox-api"
-intended_path = "crates/devbox-api"
-owns = ["hosted API boundary", "auth routes", "device routes", "shared-folder routes", "Loom remote API facade"]
+name = "devbox-auth"
+path = "crates/devbox-auth"
+owns = ["accounts", "sessions", "device trust", "tokens"]
 
 [[crate]]
 name = "devbox-platform"
-current_path = "../crates/devbox-platform"
-intended_path = "crates/devbox-platform"
-owns = ["accounts", "machines", "shared-folder membership", "hosted discovery"]
+path = "crates/devbox-platform"
+owns = ["machines", "shared-folder membership", "hosted discovery"]
 
-[[legacy_crate]]
-name = "devbox-auth"
-current_path = "../crates/devbox-auth"
-compatibility_note = "Alpha account/session/device trust implementation; migrate platform pieces into Devbox crates without breaking tests."
+[[crate]]
+name = "devbox-remote"
+path = "crates/devbox-remote"
+owns = ["Devbox-hosted Loom remote implementation", "Devbox remote clone URLs"]
 
-[[legacy_crate]]
+[[crate]]
+name = "devbox-api"
+path = "crates/devbox-api"
+owns = ["hosted API boundary", "auth routes", "device routes", "shared-folder routes", "Loom remote API facade"]
+
+[[crate]]
+name = "devbox-cli"
+path = "crates/devbox-cli"
+owns = ["product CLI", "login", "share", "clone", "machine management"]
+
+[[compatibility_crate]]
+name = "devbox-core"
+path = "crates/devbox-core"
+compatibility_note = "Legacy alpha project/snapshot domain types kept compileable while Loom absorbs folder-state concepts."
+
+[[compatibility_crate]]
+name = "devbox-store"
+path = "crates/devbox-store"
+compatibility_note = "Legacy alpha SQLite local store."
+
+[[compatibility_crate]]
+name = "devbox-snapshot"
+path = "crates/devbox-snapshot"
+compatibility_note = "Legacy alpha snapshot builder."
+
+[[compatibility_crate]]
+name = "devbox-sync"
+path = "crates/devbox-sync"
+compatibility_note = "Legacy encrypted object transfer and hosted object-transfer provider."
+
+[[compatibility_crate]]
+name = "devbox-materialize"
+path = "crates/devbox-materialize"
+compatibility_note = "Legacy alpha import/materialization composition."
+
+[[compatibility_crate]]
+name = "devbox-conflict"
+path = "crates/devbox-conflict"
+compatibility_note = "Legacy alpha divergent snapshot comparison."
+
+[[compatibility_crate]]
+name = "devbox-daemon"
+path = "crates/devbox-daemon"
+compatibility_note = "Legacy alpha daemon binary retained for alpha scripts."
+
+[[compatibility_crate]]
+name = "devbox-git"
+path = "crates/devbox-git"
+compatibility_note = "Legacy Git metadata safety report."
+
+[[compatibility_crate]]
 name = "devbox-metadata"
-current_path = "../crates/devbox-metadata"
-compatibility_note = "Alpha hosted metadata implementation; future work should split platform API from Loom remote behavior."
+path = "crates/devbox-metadata"
+compatibility_note = "Deployable hosted metadata alpha API; future work should fold product API pieces into the main Devbox platform."

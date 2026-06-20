@@ -19,13 +19,13 @@ focused crates for auth, CLI, conflict metadata, core scanning/policy, daemon li
 boundaries, materialization, hosted metadata, snapshot/restore, local store, and encrypted sync.
 The original skeleton boundaries were:
 
-- `crates/devbox-core`: shared domain types for projects, snapshots, blobs, manifests, policy decisions, and read-only project scanning.
-- `crates/devbox-daemon`: daemon binary that now owns watch/debounce and live sync orchestration.
-- `crates/devbox-cli`: `devbox` CLI binary that now exposes local snapshots, auth/session,
+- `devbox/crates/devbox-core`: shared domain types for projects, snapshots, blobs, manifests, policy decisions, and read-only project scanning.
+- `devbox/crates/devbox-daemon`: daemon binary that now owns watch/debounce and live sync orchestration.
+- `devbox/crates/devbox-cli`: `devbox` CLI binary that now exposes local snapshots, auth/session,
   pairing, hosted metadata, sync, conflict, and secret-policy commands.
-- `crates/devbox-git`: Git adapter boundary. Git repositories must be inspected and reconstructed
+- `devbox/crates/devbox-git`: Git adapter boundary. Git repositories must be inspected and reconstructed
   through a dedicated adapter rather than by syncing `.git` as ordinary files.
-- `crates/devbox-store`: SQLite local metadata boundary with idempotent migrations, foreign-key
+- `devbox/crates/devbox-store`: SQLite local metadata boundary with idempotent migrations, foreign-key
   enforcement, schema summary reporting, project/snapshot metadata, local identity, pairing state,
   cursors, conflicts, and secret policies.
 

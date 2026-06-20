@@ -1,6 +1,6 @@
 # Devbox Crates
 
-This folder is reserved for the physical crate move after PR 1.
+Compileable Devbox crates live here.
 
-For now, compileable Devbox crates live in the root workspace under `crates/devbox-*` and are mapped
-in [`../manifest.toml`](../manifest.toml).
+Keep product, hosted platform, account/device, and Devbox-specific remote behavior in this area.
+Generic folder-state semantics belong in [`../../loom/crates`](../../loom/crates).

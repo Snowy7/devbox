@@ -17,7 +17,6 @@ COPY --from=builder /app/target/release/devbox-metadata /usr/local/bin/devbox-me
 
 ENV DEVBOX_ALLOW_MOCK_AUTH=false
 
-VOLUME ["/data"]
 EXPOSE 8787
 
 USER devbox

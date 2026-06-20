@@ -7,7 +7,7 @@ Historical terminology note: this architecture slice may use `project` for an im
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
 source-control primitive underneath Devbox.
 
-This document describes the Phase 0 local storage boundary in `crates/devbox-store`.
+This document describes the Phase 0 local storage boundary in `devbox/crates/devbox-store`.
 
 The store is intentionally a metadata database, not a file-content database. It gives the daemon a transactional place to record what Devbox knows about projects, snapshots, manifests, policy decisions, and restore attempts while keeping actual source bytes in a local content-addressed cache.
 

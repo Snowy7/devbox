@@ -33,13 +33,13 @@ args=(
 if [[ "$remote_kind" == "hosted" ]]; then
   : "${DEVBOX_METADATA_API:?set DEVBOX_METADATA_API for hosted metadata/object-access API}"
   : "${DEVBOX_METADATA_PROJECT:?set DEVBOX_METADATA_PROJECT for hosted object-access scope}"
-  : "${DEVBOX_OBJECT_ACCESS_LEASE:?set DEVBOX_OBJECT_ACCESS_LEASE for hosted object access}"
   : "${DEVBOX_SESSION_TOKEN:?set DEVBOX_SESSION_TOKEN with devbox auth hosted-login}"
+  object_access_lease="${DEVBOX_OBJECT_ACCESS_LEASE:-devbox-managed}"
   args+=(
     --remote-kind hosted
     --object-access-api "$DEVBOX_METADATA_API"
     --object-access-session-token-env DEVBOX_SESSION_TOKEN
-    --object-access-lease "$DEVBOX_OBJECT_ACCESS_LEASE"
+    --object-access-lease "$object_access_lease"
     --metadata-mode hosted-api
     --metadata-api "$DEVBOX_METADATA_API"
     --metadata-session-token-env DEVBOX_SESSION_TOKEN

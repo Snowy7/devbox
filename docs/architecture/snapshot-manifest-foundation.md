@@ -8,7 +8,7 @@ shared folder and `snapshot` for the current implementation term for immutable f
 product language should say shared folder and Loom checkpoint/revision language when discussing the
 future source-control primitive.
 
-This slice introduces the Phase 0 snapshot manifest builder in `crates/devbox-snapshot`.
+This slice introduces the Phase 0 snapshot manifest builder in `devbox/crates/devbox-snapshot`.
 
 The builder walks a local project directory, applies the existing generated-artifact policy from `devbox-core`, writes included file bytes into the local `BlobCache`, and returns an in-memory draft snapshot manifest. The CLI can now either print that draft as a dry run or persist its metadata to SQLite.
 

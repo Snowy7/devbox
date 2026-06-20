@@ -1,6 +1,6 @@
 # Loom Crates
 
-This folder is reserved for the physical crate move after PR 1.
+Compileable Loom crates live here.
 
-For now, compileable Loom crates live in the root workspace under `crates/loom-*` and are mapped in
-[`../manifest.toml`](../manifest.toml).
+Keep source-control and sync engine concepts in this area. Devbox-specific hosted product behavior
+belongs in [`../../devbox/crates`](../../devbox/crates).

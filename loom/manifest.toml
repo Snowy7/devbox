@@ -1,52 +1,44 @@
 [area]
 name = "loom"
-status = "intended-home"
+status = "active-home"
 description = "Source-control and sync engine for shared folders."
 
 [[crate]]
 name = "loom-core"
-current_path = "../crates/loom-core"
-intended_path = "crates/loom-core"
+path = "crates/loom-core"
 owns = ["objects", "file versions", "folder revisions", "checkpoints", "pins", "cursors", "shared folders"]
 
 [[crate]]
 name = "loom-store"
-current_path = "../crates/loom-store"
-intended_path = "crates/loom-store"
+path = "crates/loom-store"
 owns = ["object store", "local metadata", "retention"]
 
 [[crate]]
 name = "loom-worktree"
-current_path = "../crates/loom-worktree"
-intended_path = "crates/loom-worktree"
+path = "crates/loom-worktree"
 owns = ["shared-folder scanning", "materialization", "restore safety"]
 
 [[crate]]
-name = "loom-cli"
-current_path = "../crates/loom-cli"
-intended_path = "crates/loom-cli"
-owns = ["human Loom command surface"]
-
-[[crate]]
 name = "loom-pack"
-current_path = "../crates/loom-pack"
-intended_path = "crates/loom-pack"
+path = "crates/loom-pack"
 owns = ["pack format", "import", "export"]
 
 [[crate]]
 name = "loom-sync"
-current_path = "../crates/loom-sync"
-intended_path = "crates/loom-sync"
-owns = ["remote protocol", "reconciliation", "sync", "clone"]
+path = "crates/loom-sync"
+owns = ["remote trait", "local filesystem remote", "reconciliation", "sync", "clone"]
 
 [[crate]]
 name = "loom-daemon"
-current_path = "../crates/loom-daemon"
-intended_path = "crates/loom-daemon"
+path = "crates/loom-daemon"
 owns = ["background capture", "background sync"]
 
 [[crate]]
+name = "loom-cli"
+path = "crates/loom-cli"
+owns = ["human Loom command surface"]
+
+[[crate]]
 name = "loom-git"
-current_path = "../crates/loom-git"
-intended_path = "crates/loom-git"
+path = "crates/loom-git"
 owns = ["Git compatibility analysis", ".git protection"]

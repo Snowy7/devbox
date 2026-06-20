@@ -2,10 +2,8 @@
 
 Loom is the source-control and sync engine underneath Devbox.
 
-This directory is the intended home for Loom-owned work. PR 1 keeps Rust crates in the existing
-root `crates/` workspace to avoid breaking alpha packaging, but the ownership boundary is explicit:
-new engine work should land in Loom crates and move here once the repository is ready for the
-physical reshuffle.
+This directory is the home for Loom-owned work. New engine code should land under
+[`crates/`](crates/), and it should keep Devbox product/platform concerns out of the core engine.
 
 Loom owns:
 

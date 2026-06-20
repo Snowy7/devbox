@@ -12,14 +12,14 @@ building Electron UI, live OAuth login, provider-backed recovery, or multi-regio
 
 ## Scope
 
-`crates/devbox-auth` now models deterministic lifecycle state for:
+`devbox/crates/devbox-auth` now models deterministic lifecycle state for:
 
 - recovery grant references with account/device scope
 - grant expiry, consumption, revocation, and audit labels
 - device rotation intents with optional account-session linkage
 - key-envelope rotation generation
 
-`crates/devbox-store` persists those primitives in local SQLite schema version `9`:
+`devbox/crates/devbox-store` persists those primitives in local SQLite schema version `9`:
 
 - `recovery_grants`
 - `device_rotation_intents`

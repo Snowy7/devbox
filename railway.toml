@@ -1,6 +1,6 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "infra/hosted/metadata.Dockerfile"
+dockerfilePath = "infra/hosted/devbox-api.Dockerfile"
 
 [deploy]
 healthcheckPath = "/ready"

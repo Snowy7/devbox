@@ -12,7 +12,7 @@ foundation without requiring a network service in normal development or CI.
 
 ## Scope
 
-`crates/devbox-materialize` now exposes a small `HostedMetadataClient` boundary implemented by any
+`devbox/crates/devbox-materialize` now exposes a small `HostedMetadataClient` boundary implemented by any
 `devbox-metadata::MetadataStore` and by an account-session HTTP client. The local deterministic
 opt-in mode uses `SqliteMetadataStore` in-process:
 

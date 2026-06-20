@@ -12,7 +12,7 @@ without wiring a live OAuth/OIDC provider or browser login flow.
 
 ## Scope
 
-`crates/devbox-auth` now owns provider-agnostic proof and session semantics:
+`devbox/crates/devbox-auth` now owns provider-agnostic proof and session semantics:
 
 - external provider kind, issuer, and subject
 - verified email and/or verified domain
@@ -51,7 +51,7 @@ The local store supports:
 
 ## Hosted Metadata Boundary
 
-`crates/devbox-metadata` now has matching SQLite and in-memory store primitives for:
+`devbox/crates/devbox-metadata` now has matching SQLite and in-memory store primitives for:
 
 - verified account proof upsert
 - provider-subject account lookup

@@ -28,8 +28,8 @@ The first screen is the actual control surface, not a landing page. It includes:
 - watched projects
 - sync activity
 - local DB/cache/project/receiver paths
-- hosted metadata API, session env, account/project, and object-access lease
-- shared bucket prefix and remote kind
+- hosted metadata API, session env, and shared-folder scope
+- server-owned object storage status
 - generated live sync, pairing, release, and smoke-test commands
 - manual conflict records
 - devices and pairing state

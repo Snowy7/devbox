@@ -15,14 +15,38 @@ underneath Devbox.
 GitHub Packages is not the right first home for raw native binaries. Packages is useful for npm,
 NuGet, Maven, RubyGems, and containers. Devbox alpha tools should start as GitHub Release assets.
 
-## Credentials
+## Tester Path
 
-R2 credentials belong in a local ignored file:
+Normal alpha testers should not receive Cloudflare/R2 endpoints, bucket names, prefixes, leases, or
+object credentials. A packaged CLI should include the production Devbox API endpoint. Local/dev
+packages can still point at a temporary API with `DEVBOX_API_URL` or `devbox login --api <URL>`.
+
+The tester flow is:
+
+```bash
+./devbox login
+./devbox share ~/code
+./devbox clone
+./devbox clone code ./code
+./devbox status
+```
+
+`devbox login` stores the session locally. `devbox share` and `devbox clone` configure Loom under the
+hood, but the user does not need to know about object storage, metadata projects, buckets, prefixes,
+or credential leases.
+
+## Operator Credentials
+
+R2 credentials are API/operator configuration. They belong in a local ignored file only when a
+trusted operator is deploying the API or running direct-R2 smoke tests:
 
 ```bash
 cp .env.example .env.r2.local
 $EDITOR .env.r2.local
 ```
+
+In a packaged release archive, copy `.env.operator.example` instead. The packaged `.env.example` is a
+small user/local-dev CLI override file and intentionally does not include R2 settings.
 
 `.env.r2.local` must never be committed. The repo ignores `.env` and `.env.*`.
 
@@ -32,19 +56,16 @@ Load it before running trusted-operator R2 smoke commands:
 source scripts/load-r2-env.sh .env.r2.local
 ```
 
-The current variables are:
+The operator variables are:
 
 ```bash
 DEVBOX_R2_ENDPOINT=https://example-account-id.r2.cloudflarestorage.com
 DEVBOX_R2_BUCKET=devbox-alpha
-DEVBOX_R2_PREFIX=accounts/account-example/projects/project-example
 DEVBOX_R2_ACCESS_KEY_ID=replace-me
 DEVBOX_R2_SECRET_ACCESS_KEY=replace-me
 DEVBOX_METADATA_API=http://127.0.0.1:8787
-DEVBOX_METADATA_ACCOUNT=account-example
 DEVBOX_METADATA_PROJECT=project-example
 DEVBOX_METADATA_DATABASE_URL=postgres://devbox:devbox@127.0.0.1:5432/devbox_metadata
-DEVBOX_OBJECT_ACCESS_LEASE=lease-alpha
 DEVBOX_ALPHA_INVITE_CODE=replace-after-invite-create
 DEVBOX_SESSION_TOKEN=replace-after-hosted-login
 DEVBOX_LIVE_DB=./devbox.sqlite3
@@ -70,9 +91,12 @@ the account-session/object-access boundary. The server enables object-access res
 object transfer when these server-side env vars are populated:
 
 ```bash
+DEVBOX_R2_ENDPOINT=https://example-account-id.r2.cloudflarestorage.com
+DEVBOX_R2_BUCKET=devbox-alpha
 DEVBOX_R2_ACCESS_KEY_ID=server-side-access-key
 DEVBOX_R2_SECRET_ACCESS_KEY=server-side-secret-key
 # optional:
+DEVBOX_R2_REGION=auto
 DEVBOX_R2_SESSION_TOKEN=server-side-session-token
 ```
 
@@ -82,7 +106,7 @@ that the referenced env vars have values before enabling grants. A Cloudflare AP
 required for the current broker; it does not call Cloudflare to mint temporary credentials.
 For local/dev hosted-transfer testing without R2, set `DEVBOX_OBJECT_LOCAL_ROOT` on the metadata
 server instead; this stores encrypted objects under a server-owned local object root and exercises the
-same session, lease, prefix, and capability checks.
+same session, derived-prefix, and capability checks.
 
 The prefix shape is the authorization boundary:
 
@@ -90,8 +114,8 @@ The prefix shape is the authorization boundary:
 accounts/<account-id>/projects/<project-id>
 ```
 
-Every grant is scoped to one account session, one folder scope, one lease, and one prefix. A tester should
-never be told to set a prefix outside their own account/folder path. External testers use
+Every grant is scoped to one account session, one folder scope, and one derived prefix. A tester should
+never be told to set a prefix, bucket, or R2 endpoint. External testers use
 `--remote-kind hosted`; trusted operators can still use `--remote-kind s3` when they intentionally
 place local bucket credentials on their own machine.
 
@@ -110,9 +134,10 @@ The repo has a deployable hosted metadata alpha API with:
 - hosted metadata handlers that reject mock-dev headers unless explicitly enabled
 - Postgres metadata storage selected by `DATABASE_URL` or `DEVBOX_METADATA_DATABASE_URL`, with
   SQLite preserved for local/dev `--db` smoke tests
-- server-mediated object-access prefix grants for one shared R2 bucket when server-managed R2 env
-  credentials are configured
-- hosted object transfer endpoints for encrypted put/get/head/list under the authorized prefix
+- server-mediated object access for one shared R2 bucket when server-managed R2 env credentials are
+  configured
+- hosted object transfer endpoints for encrypted put/get/head/list under the server-derived object
+  scope
 
 To test hosted login locally:
 
@@ -144,28 +169,21 @@ DATABASE_URL=postgres://devbox:devbox@127.0.0.1:5432/devbox_metadata \
 cargo run -p devbox-metadata -- --listen 127.0.0.1:8787
 ```
 
-Create a managed object lease in the metadata DB and resolve the hosted shared-bucket grant:
+The hosted server owns object storage. You do not need to seed a per-user bucket, prefix, or
+credential lease. If you are debugging the low-level hosted object path, resolve the server-derived
+grant with the stable internal lease id:
 
 ```bash
-cargo run -p devbox-cli -- metadata credential-lease mock-create \
-  --db ./metadata-alpha.sqlite3 \
-  --session-token "$DEVBOX_SESSION_TOKEN" \
-  --verified-email dev@example.com \
-  --project project-devbox \
-  --lease lease-alpha \
-  --endpoint "$DEVBOX_R2_ENDPOINT" \
-  --bucket "$DEVBOX_R2_BUCKET" \
-  --prefix "accounts/<printed-account-id>/projects/project-devbox"
-
 cargo run -p devbox-cli -- metadata object-access resolve \
   --api "$DEVBOX_METADATA_API" \
   --session-token-env DEVBOX_SESSION_TOKEN \
   --project project-devbox \
-  --lease lease-alpha
+  --lease devbox-managed
 ```
 
 For Railway/Postgres admin seeding, put the Postgres connection string in an environment variable and
-reference the variable name instead of passing the raw URL on argv:
+reference the variable name instead of passing the raw URL on argv. This is for invites only; object
+storage is configured on the API service with `DEVBOX_R2_*` env vars:
 
 ```bash
 export DEVBOX_METADATA_DATABASE_URL='<railway-postgres-url>'
@@ -173,24 +191,7 @@ export DEVBOX_METADATA_DATABASE_URL='<railway-postgres-url>'
 cargo run -p devbox-cli -- metadata alpha-invite create \
   --postgres-url-env DEVBOX_METADATA_DATABASE_URL \
   --email dev@example.com
-
-cargo run -p devbox-cli -- metadata credential-lease mock-create \
-  --postgres-url-env DEVBOX_METADATA_DATABASE_URL \
-  --session-token "$DEVBOX_SESSION_TOKEN" \
-  --verified-email dev@example.com \
-  --project project-devbox \
-  --lease lease-alpha \
-  --endpoint "$DEVBOX_R2_ENDPOINT" \
-  --bucket "$DEVBOX_R2_BUCKET" \
-  --prefix "accounts/<printed-account-id>/projects/project-devbox"
 ```
-
-When `DEVBOX_SESSION_TOKEN` already belongs to a hosted tester session, `mock-create` seeds the lease
-under that authenticated session account even if `--verified-email` differs from the original
-bootstrap. If you pass `--account`, it must match the existing session account printed by
-the auth/login bootstrap output; otherwise the command fails instead of storing a lease that hosted
-object access cannot resolve. With `--postgres-url-env`, the session must already exist and be
-active; the command will not create or relink a mock account identity in the hosted Postgres store.
 
 `object-access resolve` prints the authorized prefix, endpoint, bucket, capabilities, expiration,
 and rotation generation. It does not print or return raw R2 credentials.
@@ -219,18 +220,19 @@ DEVBOX_LIVE_ONCE=true \
 scripts/devbox-live-sync-alpha.sh
 ```
 
-For external tester hosted object transfer, set `DEVBOX_REMOTE_KIND=hosted`,
-`DEVBOX_METADATA_API`, `DEVBOX_METADATA_DB`, `DEVBOX_METADATA_PROJECT`, `DEVBOX_SESSION_TOKEN`, and
-`DEVBOX_OBJECT_ACCESS_LEASE`. Do not set `DEVBOX_R2_ACCESS_KEY_ID` or
-`DEVBOX_R2_SECRET_ACCESS_KEY` on tester machines:
+For product-level hosted testing, use `devbox login`, `devbox share`, and `devbox clone`; do not hand
+testers metadata project ids, object leases, bucket names, prefixes, or R2 endpoints.
+
+For low-level hosted object-transfer smoke testing, trusted operators may still set
+`DEVBOX_REMOTE_KIND=hosted`, `DEVBOX_METADATA_API`, `DEVBOX_METADATA_PROJECT`, and
+`DEVBOX_SESSION_TOKEN`. Do not set `DEVBOX_R2_ENDPOINT`, `DEVBOX_R2_BUCKET`,
+`DEVBOX_R2_ACCESS_KEY_ID`, or `DEVBOX_R2_SECRET_ACCESS_KEY` on tester machines:
 
 ```bash
 DEVBOX_REMOTE_KIND=hosted \
 DEVBOX_METADATA_API=http://127.0.0.1:8787 \
-DEVBOX_METADATA_DB=./metadata-alpha.sqlite3 \
 DEVBOX_METADATA_PROJECT=project-devbox \
 DEVBOX_SESSION_TOKEN='<tester-session-token>' \
-DEVBOX_OBJECT_ACCESS_LEASE=lease-alpha \
 DEVBOX_LIVE_MODE=push \
 DEVBOX_LIVE_ONCE=true \
 scripts/devbox-live-sync-alpha.sh
@@ -258,8 +260,8 @@ The current object-transfer paths are split:
 
 ## Local Alpha Tools Package
 
-Build a host package containing `devbox`, `devbox-daemon`, `devbox-metadata`, docs, env template,
-and alpha helper scripts:
+Build a host package containing `devbox`, `devbox-daemon`, `devbox-metadata`, docs, a user CLI env
+template, an operator env template, and alpha helper scripts:
 
 ```bash
 scripts/package-cli.sh v0.1.0-alpha.1
@@ -351,15 +353,15 @@ xattr -dr com.apple.quarantine ./devbox ./devbox-daemon ./devbox-metadata
 
 ## R2 Alpha Boundary
 
-For many external testers, use one shared R2 bucket with account/project prefixes, but do not share
-one long-lived bucket token across tester machines.
+For many external testers, the API can use one shared R2 bucket with account/project object scopes,
+but do not share one long-lived bucket token across tester machines.
 
 Current safe alpha setup:
 
 - server-side R2 credentials live only in the hosted metadata API environment for grant validation
   and hosted object transfer
-- each tester can log in through the hosted alpha session flow and resolve a grant for exactly one
-  `accounts/<account-id>/projects/<project-id>` prefix
+- each tester can log in through the hosted alpha session flow while the API derives the exact
+  `accounts/<account-id>/projects/<project-id>` object prefix internally
 - external testers use `--remote-kind hosted` so encrypted object bytes travel through the Devbox
   API without client bucket keys
 - direct `--remote-kind s3` with local R2 keys is trusted-operator smoke only
@@ -368,5 +370,5 @@ Current safe alpha setup:
 - `--mock-key-source-db` remains only for legacy local smoke tests where both SQLite DBs are on the
   same machine
 
-The prefix grant is now the hosted authorization boundary. Raw direct S3 credentials remain outside
-the external-tester path; they are only for trusted-operator direct-R2 smoke.
+The server-derived prefix is the hosted authorization boundary. Raw direct S3 credentials remain
+outside the external-tester path; they are only for trusted-operator direct-R2 smoke.

@@ -15,7 +15,8 @@ exist in the Rust crates.
 - Electron desktop shell with redacted `DEVBOX_*` alpha state and safe placeholder fallback.
 - Tray/status affordance for ready/needs-config/command-only/blocked style states.
 - Local DB/cache/project/receiver path visibility without workspace mutation from renderer code.
-- Hosted API/session/project, object-access lease, shared bucket prefix, and remote kind visibility.
+- Hosted API/session/shared-folder scope visibility; object leases, buckets, prefixes, and remote
+  kinds stay out of product UX.
 - Generated command-state for hosted login/status, object-access resolution, pairing, live sync,
   packaging, and deterministic smoke testing.
 - Deterministic local two-device smoke harness with redacted evidence logs.

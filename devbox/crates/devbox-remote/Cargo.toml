@@ -1,0 +1,21 @@
+[package]
+name = "devbox-remote"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+loom-core = { path = "../../../loom/crates/loom-core" }
+loom-pack = { path = "../../../loom/crates/loom-pack" }
+loom-sync = { path = "../../../loom/crates/loom-sync" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2"
+url = "2"
+
+[dev-dependencies]
+devbox-api = { path = "../devbox-api" }
+loom-store = { path = "../../../loom/crates/loom-store" }
+tempfile = "3"

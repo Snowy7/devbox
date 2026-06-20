@@ -15,27 +15,30 @@ Devbox decides who owns it, where it is hosted, and who can access it.
 
 ## Repository Shape
 
-PR 1 starts with these crates in the current flat Rust workspace:
+The Rust workspace is physically split by ownership:
 
 ```text
 loom/
+  crates/
+    loom-core
+    loom-store
+    loom-worktree
+    loom-pack
+    loom-sync
+    loom-daemon
+    loom-cli
+    loom-git
 devbox/
-crates/loom-core
-crates/loom-store
-crates/loom-worktree
-crates/loom-pack
-crates/loom-sync
-crates/loom-daemon
-crates/loom-cli
-crates/loom-git
-crates/devbox-api
-crates/devbox-platform
+  crates/
+    devbox-auth
+    devbox-platform
+    devbox-remote
+    devbox-api
+    devbox-cli
 ```
 
-The top-level `loom/` and `devbox/` areas contain manifests that make them the intended homes while
-the current flat workspace keeps alpha builds stable. That gives follow-up PRs a real compileable
-boundary before any deeper directory reshuffle. The longer-term target may still split Loom and
-Devbox into separate top-level folders:
+Legacy alpha compatibility crates also live under `devbox/crates/` until their responsibilities are
+absorbed or retired. The full repository shape is:
 
 ```text
 devbox/

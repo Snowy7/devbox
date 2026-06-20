@@ -12,7 +12,7 @@ hosted SaaS backend yet.
 
 ## Scope
 
-`crates/devbox-metadata` owns deterministic request/response models, store semantics, and HTTP
+`devbox/crates/devbox-metadata` owns deterministic request/response models, store semantics, and HTTP
 handlers for:
 
 - health checks
@@ -58,10 +58,11 @@ published record for an account/project so live receivers do not need a pasted s
 not store plaintext file bytes, sync keys, device keys, R2 secrets, object credentials, or manifest
 contents.
 
-Managed object credential lease records store redacted provider references, endpoint/bucket/region
-shape, optional project scope, capabilities, expiration, revocation, and rotation generation only.
-They do not store raw access keys, secret keys, session tokens, provider API tokens, OAuth tokens, or
-raw credential hashes.
+The hosted API can derive object-access grants directly from server-owned object storage config.
+Managed object credential lease records still exist for low-level admin/debug cases; when used, they
+store redacted provider references, endpoint/bucket/region shape, optional project scope,
+capabilities, expiration, revocation, and rotation generation only. They do not store raw access
+keys, secret keys, session tokens, provider API tokens, OAuth tokens, or raw credential hashes.
 
 Hosted object-access grants are resolved at:
 
@@ -73,7 +74,7 @@ The request carries required capabilities. The response carries endpoint/bucket/
 canonical prefix `accounts/<account-id>/projects/<project-id>`, capabilities, expiration, rotation
 generation, redacted credential reference, and `credential_delivery=server-mediated-broker`. It does
 not return object credentials. The handler refuses mock-dev headers, wildcard project scope,
-mismatched lease prefixes, expired/revoked leases, and missing broker configuration.
+mismatched debug lease prefixes, expired/revoked debug leases, and missing broker configuration.
 
 ## Cursor Safety
 
@@ -152,8 +153,9 @@ connection strings do not land in shell history. `devbox auth hosted-login --api
 <EMAIL> --invite-code-env <ENV>` exchanges the invite for a bearer session token.
 
 `devbox metadata object-access resolve --api <URL> --session-token-env DEVBOX_SESSION_TOKEN
---project <PROJECT_ID> --lease <LEASE_ID>` calls the hosted grant endpoint and prints only redacted
-object-access metadata plus the authorized shared-bucket prefix.
+--project <PROJECT_ID> --lease devbox-managed` calls the hosted grant endpoint and prints only
+redacted object-access metadata plus the authorized shared-bucket prefix. Product users should not
+need this command.
 
 The local/mock publish, import, and materialize flows can now opt into an in-process mock-dev SQLite
 metadata store. That wiring registers published snapshot metadata, discovers manifest object keys by

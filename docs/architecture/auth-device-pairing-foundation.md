@@ -39,7 +39,7 @@ not a cloud session and must not be treated as durable proof outside the local m
 
 ## Domain Boundary
 
-`crates/devbox-auth` owns deterministic auth and device-pairing state transitions:
+`devbox/crates/devbox-auth` owns deterministic auth and device-pairing state transitions:
 
 - create and parse pairing invitation tokens
 - reject malformed, expired, reused, or account-mismatched invitations

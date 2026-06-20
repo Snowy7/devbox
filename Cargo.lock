@@ -371,6 +371,7 @@ dependencies = [
  "devbox-core",
  "devbox-materialize",
  "devbox-metadata",
+ "devbox-remote",
  "devbox-snapshot",
  "devbox-store",
  "devbox-sync",
@@ -467,6 +468,22 @@ name = "devbox-platform"
 version = "0.1.0"
 dependencies = [
  "loom-core",
+]
+
+[[package]]
+name = "devbox-remote"
+version = "0.1.0"
+dependencies = [
+ "devbox-api",
+ "loom-core",
+ "loom-pack",
+ "loom-store",
+ "loom-sync",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+ "url",
 ]
 
 [[package]]
@@ -1051,6 +1068,7 @@ name = "loom-cli"
 version = "0.1.0"
 dependencies = [
  "devbox-api",
+ "devbox-remote",
  "loom-core",
  "loom-daemon",
  "loom-store",
@@ -1067,6 +1085,7 @@ version = "0.1.0"
 name = "loom-daemon"
 version = "0.1.0"
 dependencies = [
+ "devbox-remote",
  "loom-core",
  "loom-store",
  "loom-sync",
@@ -1102,15 +1121,10 @@ dependencies = [
 name = "loom-sync"
 version = "0.1.0"
 dependencies = [
- "devbox-api",
  "loom-core",
  "loom-pack",
  "loom-store",
- "serde",
- "serde_json",
  "tempfile",
- "ureq",
- "url",
 ]
 
 [[package]]

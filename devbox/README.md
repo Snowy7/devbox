@@ -2,9 +2,8 @@
 
 Devbox is the product and hosted platform.
 
-This directory is the intended home for Devbox-owned work. PR 1 keeps Rust crates in the existing
-root `crates/` workspace to avoid breaking alpha packaging, but product/platform ownership is now
-explicit.
+This directory is the home for Devbox-owned work. New product, platform, hosted API, and
+Devbox-specific remote code should land under [`crates/`](crates/).
 
 Devbox owns:
 
@@ -13,6 +12,7 @@ Devbox owns:
 - shared-folder discovery and permissions
 - hosted API surface
 - object-access brokering and platform metadata
+- the Devbox-hosted implementation of Loom's remote protocol
 - product CLI commands such as `login`, `share`, `clone`, `pause`, `resume`, and `unlink`
 
 Devbox configures and hosts Loom. It does not decide folder-state semantics, file-version capture,
