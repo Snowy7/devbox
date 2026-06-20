@@ -44,8 +44,12 @@ foreach ($asset in $Assets) {
 }
 
 $ReleaseExists = $true
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 gh release view $Tag *> $null
-if ($LASTEXITCODE -ne 0) {
+$releaseViewExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorActionPreference
+if ($releaseViewExitCode -ne 0) {
     $ReleaseExists = $false
 }
 
