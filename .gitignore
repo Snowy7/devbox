@@ -10,6 +10,7 @@ desktop.ini
 !.vscode/settings.json
 *.swp
 *.swo
+.codex-pets
 
 # Logs
 *.log
