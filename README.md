@@ -96,8 +96,9 @@ crates without silently deleting the alpha behavior.
   API/session/folder config, R2/shared-bucket prefix state, pairing, live sync command state,
   conflicts, devices, secret policy, and settings. It reads redacted `DEVBOX_*` setup state and
   does not start sync or mutate files directly. The default Railway deploy now builds the MVP
-  `devbox-api` product service for `devbox login/share/clone`; the legacy hosted metadata server
-  still has a Railway-shaped Postgres backend for compatibility/operator smoke paths. OAuth, live
+  `devbox-api` product service for `devbox login/share/clone`; product API metadata uses Railway
+  Postgres and Loom pack bytes use server-owned R2, while the legacy hosted metadata server remains
+  available for compatibility/operator smoke paths. OAuth, live
   Cloudflare/AWS credential provisioning, signed installers, multi-region/observability hardening,
   automatic conflict resolution, and paid/team/agent/Git-replacement work remain deferred.
 

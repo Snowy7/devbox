@@ -10,16 +10,17 @@ use devbox_sync::{
     S3CredentialsSource, SyncError,
 };
 use loom_core::{CursorId, FolderRevisionId, SharedFolderId};
+use postgres::{Client as PostgresClient, NoTls, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -117,6 +118,7 @@ pub enum ApiError {
         actual: Option<String>,
     },
     RemoteStorage(String),
+    Database(String),
     Json(String),
 }
 
@@ -129,7 +131,7 @@ impl ApiError {
             Self::NotFound(_) => 404,
             Self::Conflict { .. } => 409,
             Self::RemoteStorage(_) => 502,
-            Self::Io { .. } => 500,
+            Self::Io { .. } | Self::Database(_) => 500,
         }
     }
 }
@@ -149,6 +151,7 @@ impl fmt::Display for ApiError {
                 actual.as_deref().unwrap_or("-")
             ),
             Self::RemoteStorage(message) => write!(f, "hosted pack storage error: {message}"),
+            Self::Database(message) => write!(f, "metadata database error: {message}"),
             Self::Json(message) => write!(f, "{message}"),
         }
     }
@@ -164,6 +167,7 @@ impl std::error::Error for ApiError {
             | Self::NotFound(_)
             | Self::Conflict { .. }
             | Self::RemoteStorage(_)
+            | Self::Database(_)
             | Self::Json(_) => None,
         }
     }
@@ -174,7 +178,32 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(Debug, Clone)]
 pub struct LocalDevboxApi {
     root: Arc<PathBuf>,
+    metadata: Arc<dyn ApiMetadataStore>,
     pack_storage: Arc<dyn PackStorage>,
+}
+
+trait ApiMetadataStore: fmt::Debug + Send + Sync {
+    fn label(&self) -> &'static str;
+    fn upsert_session(&self, session: SessionRecord) -> ApiResult<()>;
+    fn session_by_token_hash(&self, token_hash: &str) -> ApiResult<Option<SessionRecord>>;
+    fn device(&self, device_id: &str) -> ApiResult<Option<DeviceRecord>>;
+    fn upsert_device(&self, device: DeviceRecord) -> ApiResult<()>;
+    fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>>;
+    fn insert_folder(&self, folder: FolderRecord) -> ApiResult<()>;
+    fn membership(&self, account_id: &str, folder_id: &str) -> ApiResult<Option<MembershipRecord>>;
+    fn insert_membership(&self, membership: MembershipRecord) -> ApiResult<()>;
+    fn folders_for_account(
+        &self,
+        account_id: &str,
+    ) -> ApiResult<Vec<(MembershipRecord, FolderRecord)>>;
+    fn get_cursor(&self, folder_id: &str, cursor_id: &str) -> ApiResult<Option<String>>;
+    fn compare_and_set_cursor(
+        &self,
+        folder_id: &str,
+        cursor_id: &str,
+        expected: Option<&str>,
+        next: &str,
+    ) -> ApiResult<()>;
 }
 
 trait PackStorage: fmt::Debug + Send + Sync {
@@ -346,6 +375,557 @@ struct MembershipRecord {
     role: String,
 }
 
+#[derive(Debug, Default)]
+struct MemoryMetadataStore {
+    state: Mutex<MemoryMetadataState>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryMetadataState {
+    sessions: Vec<SessionRecord>,
+    devices: Vec<DeviceRecord>,
+    folders: Vec<FolderRecord>,
+    memberships: Vec<MembershipRecord>,
+    cursors: BTreeMap<String, String>,
+}
+
+impl MemoryMetadataStore {
+    fn cursor_key(folder_id: &str, cursor_id: &str) -> String {
+        format!("{folder_id}/{cursor_id}")
+    }
+}
+
+impl ApiMetadataStore for MemoryMetadataStore {
+    fn label(&self) -> &'static str {
+        "memory"
+    }
+
+    fn upsert_session(&self, session: SessionRecord) -> ApiResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        if let Some(existing) = state
+            .sessions
+            .iter_mut()
+            .find(|existing| existing.session_id == session.session_id)
+        {
+            *existing = session;
+        } else {
+            state.sessions.push(session);
+        }
+        Ok(())
+    }
+
+    fn session_by_token_hash(&self, token_hash: &str) -> ApiResult<Option<SessionRecord>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .sessions
+            .iter()
+            .find(|session| session.token_hash == token_hash)
+            .cloned())
+    }
+
+    fn device(&self, device_id: &str) -> ApiResult<Option<DeviceRecord>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .devices
+            .iter()
+            .find(|device| device.device_id == device_id)
+            .cloned())
+    }
+
+    fn upsert_device(&self, device: DeviceRecord) -> ApiResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        if let Some(existing) = state
+            .devices
+            .iter_mut()
+            .find(|existing| existing.device_id == device.device_id)
+        {
+            *existing = device;
+        } else {
+            state.devices.push(device);
+        }
+        Ok(())
+    }
+
+    fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .folders
+            .iter()
+            .find(|folder| folder.folder_id == folder_id)
+            .cloned())
+    }
+
+    fn insert_folder(&self, folder: FolderRecord) -> ApiResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        if !state
+            .folders
+            .iter()
+            .any(|existing| existing.folder_id == folder.folder_id)
+        {
+            state.folders.push(folder);
+        }
+        Ok(())
+    }
+
+    fn membership(&self, account_id: &str, folder_id: &str) -> ApiResult<Option<MembershipRecord>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .memberships
+            .iter()
+            .find(|membership| {
+                membership.account_id == account_id && membership.folder_id == folder_id
+            })
+            .cloned())
+    }
+
+    fn insert_membership(&self, membership: MembershipRecord) -> ApiResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        if !state.memberships.iter().any(|existing| {
+            existing.account_id == membership.account_id
+                && existing.folder_id == membership.folder_id
+        }) {
+            state.memberships.push(membership);
+        }
+        Ok(())
+    }
+
+    fn folders_for_account(
+        &self,
+        account_id: &str,
+    ) -> ApiResult<Vec<(MembershipRecord, FolderRecord)>> {
+        let state = self.state.lock().map_err(lock_error)?;
+        Ok(state
+            .memberships
+            .iter()
+            .filter(|membership| membership.account_id == account_id)
+            .filter_map(|membership| {
+                state
+                    .folders
+                    .iter()
+                    .find(|folder| folder.folder_id == membership.folder_id)
+                    .cloned()
+                    .map(|folder| (membership.clone(), folder))
+            })
+            .collect())
+    }
+
+    fn get_cursor(&self, folder_id: &str, cursor_id: &str) -> ApiResult<Option<String>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .cursors
+            .get(&Self::cursor_key(folder_id, cursor_id))
+            .cloned())
+    }
+
+    fn compare_and_set_cursor(
+        &self,
+        folder_id: &str,
+        cursor_id: &str,
+        expected: Option<&str>,
+        next: &str,
+    ) -> ApiResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        let key = Self::cursor_key(folder_id, cursor_id);
+        let current = state.cursors.get(&key).cloned();
+        if current.as_deref() != expected {
+            return Err(ApiError::Conflict {
+                expected: expected.map(ToString::to_string),
+                actual: current,
+            });
+        }
+        state.cursors.insert(key, next.to_string());
+        Ok(())
+    }
+}
+
+struct PostgresMetadataStore {
+    client: Mutex<PostgresClient>,
+}
+
+impl fmt::Debug for PostgresMetadataStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PostgresMetadataStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PostgresMetadataStore {
+    fn connect(database_url: &str) -> ApiResult<Self> {
+        let attempts = optional_env_value("DEVBOX_API_DATABASE_CONNECT_ATTEMPTS")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|attempts| *attempts > 0)
+            .unwrap_or(20);
+        let mut last_error = None;
+        for attempt in 1..=attempts {
+            match PostgresClient::connect(database_url, NoTls) {
+                Ok(mut client) => {
+                    Self::migrate(&mut client)?;
+                    return Ok(Self {
+                        client: Mutex::new(client),
+                    });
+                }
+                Err(error) if attempt < attempts => {
+                    last_error = Some(error);
+                    thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(error) => return Err(postgres_error(error)),
+            }
+        }
+        Err(postgres_error(
+            last_error.expect("database connect attempts is nonzero"),
+        ))
+    }
+
+    fn migrate(client: &mut PostgresClient) -> ApiResult<()> {
+        client
+            .batch_execute(
+                "
+                CREATE TABLE IF NOT EXISTS api_schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS api_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS api_devices (
+                    device_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    registered_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS api_shared_folders (
+                    folder_id TEXT PRIMARY KEY,
+                    owner_account_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS api_memberships (
+                    account_id TEXT NOT NULL,
+                    folder_id TEXT NOT NULL REFERENCES api_shared_folders(folder_id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    PRIMARY KEY(account_id, folder_id)
+                );
+                CREATE TABLE IF NOT EXISTS api_cursors (
+                    folder_id TEXT NOT NULL,
+                    cursor_id TEXT NOT NULL,
+                    revision_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_id, cursor_id)
+                );
+                INSERT INTO api_schema_migrations(version, applied_at)
+                VALUES (1, 'devbox-api-postgres-v1')
+                ON CONFLICT (version) DO NOTHING;
+                ",
+            )
+            .map_err(postgres_error)
+    }
+
+    fn client(&self) -> ApiResult<std::sync::MutexGuard<'_, PostgresClient>> {
+        self.client.lock().map_err(lock_error)
+    }
+}
+
+impl ApiMetadataStore for PostgresMetadataStore {
+    fn label(&self) -> &'static str {
+        "postgres"
+    }
+
+    fn upsert_session(&self, session: SessionRecord) -> ApiResult<()> {
+        self.client()?
+            .execute(
+                "
+                INSERT INTO api_sessions(session_id, account_id, token_hash, created_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (session_id) DO UPDATE
+                SET account_id = EXCLUDED.account_id,
+                    token_hash = EXCLUDED.token_hash,
+                    created_at = EXCLUDED.created_at
+                ",
+                &[
+                    &session.session_id,
+                    &session.account_id,
+                    &session.token_hash,
+                    &session.created_at,
+                ],
+            )
+            .map_err(postgres_error)?;
+        Ok(())
+    }
+
+    fn session_by_token_hash(&self, token_hash: &str) -> ApiResult<Option<SessionRecord>> {
+        Ok(self
+            .client()?
+            .query_opt(
+                "
+                SELECT session_id, account_id, token_hash, created_at
+                FROM api_sessions
+                WHERE token_hash = $1
+                ",
+                &[&token_hash],
+            )
+            .map_err(postgres_error)?
+            .map(|row| SessionRecord {
+                session_id: row.get("session_id"),
+                account_id: row.get("account_id"),
+                token_hash: row.get("token_hash"),
+                created_at: row.get("created_at"),
+            }))
+    }
+
+    fn device(&self, device_id: &str) -> ApiResult<Option<DeviceRecord>> {
+        Ok(self
+            .client()?
+            .query_opt(
+                "
+                SELECT account_id, device_id, display_name, registered_at
+                FROM api_devices
+                WHERE device_id = $1
+                ",
+                &[&device_id],
+            )
+            .map_err(postgres_error)?
+            .map(device_from_row))
+    }
+
+    fn upsert_device(&self, device: DeviceRecord) -> ApiResult<()> {
+        self.client()?
+            .execute(
+                "
+                INSERT INTO api_devices(device_id, account_id, display_name, registered_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (device_id) DO UPDATE
+                SET account_id = EXCLUDED.account_id,
+                    display_name = EXCLUDED.display_name,
+                    registered_at = EXCLUDED.registered_at
+                ",
+                &[
+                    &device.device_id,
+                    &device.account_id,
+                    &device.display_name,
+                    &device.registered_at,
+                ],
+            )
+            .map_err(postgres_error)?;
+        Ok(())
+    }
+
+    fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>> {
+        Ok(self
+            .client()?
+            .query_opt(
+                "
+                SELECT folder_id, owner_account_id, display_name, created_at
+                FROM api_shared_folders
+                WHERE folder_id = $1
+                ",
+                &[&folder_id],
+            )
+            .map_err(postgres_error)?
+            .map(folder_from_row))
+    }
+
+    fn insert_folder(&self, folder: FolderRecord) -> ApiResult<()> {
+        self.client()?
+            .execute(
+                "
+                INSERT INTO api_shared_folders(folder_id, owner_account_id, display_name, created_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (folder_id) DO NOTHING
+                ",
+                &[
+                    &folder.folder_id,
+                    &folder.owner_account_id,
+                    &folder.display_name,
+                    &folder.created_at,
+                ],
+            )
+            .map_err(postgres_error)?;
+        Ok(())
+    }
+
+    fn membership(&self, account_id: &str, folder_id: &str) -> ApiResult<Option<MembershipRecord>> {
+        Ok(self
+            .client()?
+            .query_opt(
+                "
+                SELECT account_id, folder_id, role
+                FROM api_memberships
+                WHERE account_id = $1 AND folder_id = $2
+                ",
+                &[&account_id, &folder_id],
+            )
+            .map_err(postgres_error)?
+            .map(membership_from_row))
+    }
+
+    fn insert_membership(&self, membership: MembershipRecord) -> ApiResult<()> {
+        self.client()?
+            .execute(
+                "
+                INSERT INTO api_memberships(account_id, folder_id, role)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (account_id, folder_id) DO NOTHING
+                ",
+                &[
+                    &membership.account_id,
+                    &membership.folder_id,
+                    &membership.role,
+                ],
+            )
+            .map_err(postgres_error)?;
+        Ok(())
+    }
+
+    fn folders_for_account(
+        &self,
+        account_id: &str,
+    ) -> ApiResult<Vec<(MembershipRecord, FolderRecord)>> {
+        self.client()?
+            .query(
+                "
+                SELECT
+                    memberships.account_id,
+                    memberships.folder_id,
+                    memberships.role,
+                    folders.owner_account_id,
+                    folders.display_name,
+                    folders.created_at
+                FROM api_memberships memberships
+                INNER JOIN api_shared_folders folders
+                    ON folders.folder_id = memberships.folder_id
+                WHERE memberships.account_id = $1
+                ORDER BY folders.display_name, folders.folder_id
+                ",
+                &[&account_id],
+            )
+            .map_err(postgres_error)?
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    MembershipRecord {
+                        account_id: row.get("account_id"),
+                        folder_id: row.get("folder_id"),
+                        role: row.get("role"),
+                    },
+                    FolderRecord {
+                        folder_id: row.get("folder_id"),
+                        owner_account_id: row.get("owner_account_id"),
+                        display_name: row.get("display_name"),
+                        created_at: row.get("created_at"),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn get_cursor(&self, folder_id: &str, cursor_id: &str) -> ApiResult<Option<String>> {
+        Ok(self
+            .client()?
+            .query_opt(
+                "
+                SELECT revision_id
+                FROM api_cursors
+                WHERE folder_id = $1 AND cursor_id = $2
+                ",
+                &[&folder_id, &cursor_id],
+            )
+            .map_err(postgres_error)?
+            .map(|row| row.get("revision_id")))
+    }
+
+    fn compare_and_set_cursor(
+        &self,
+        folder_id: &str,
+        cursor_id: &str,
+        expected: Option<&str>,
+        next: &str,
+    ) -> ApiResult<()> {
+        let mut client = self.client()?;
+        let updated = match expected {
+            Some(expected) => client
+                .execute(
+                    "
+                    UPDATE api_cursors
+                    SET revision_id = $4,
+                        updated_at = $5
+                    WHERE folder_id = $1
+                        AND cursor_id = $2
+                        AND revision_id = $3
+                    ",
+                    &[&folder_id, &cursor_id, &expected, &next, &timestamp()],
+                )
+                .map_err(postgres_error)?,
+            None => client
+                .execute(
+                    "
+                    INSERT INTO api_cursors(folder_id, cursor_id, revision_id, updated_at)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (folder_id, cursor_id) DO NOTHING
+                    ",
+                    &[&folder_id, &cursor_id, &next, &timestamp()],
+                )
+                .map_err(postgres_error)?,
+        };
+        if updated == 1 {
+            return Ok(());
+        }
+        let actual = client
+            .query_opt(
+                "
+                SELECT revision_id
+                FROM api_cursors
+                WHERE folder_id = $1 AND cursor_id = $2
+                ",
+                &[&folder_id, &cursor_id],
+            )
+            .map_err(postgres_error)?
+            .map(|row| row.get("revision_id"));
+        Err(ApiError::Conflict {
+            expected: expected.map(ToString::to_string),
+            actual,
+        })
+    }
+}
+
+fn device_from_row(row: Row) -> DeviceRecord {
+    DeviceRecord {
+        account_id: row.get("account_id"),
+        device_id: row.get("device_id"),
+        display_name: row.get("display_name"),
+        registered_at: row.get("registered_at"),
+    }
+}
+
+fn folder_from_row(row: Row) -> FolderRecord {
+    FolderRecord {
+        folder_id: row.get("folder_id"),
+        owner_account_id: row.get("owner_account_id"),
+        display_name: row.get("display_name"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn membership_from_row(row: Row) -> MembershipRecord {
+    MembershipRecord {
+        account_id: row.get("account_id"),
+        folder_id: row.get("folder_id"),
+        role: row.get("role"),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct DevSessionRequest {
     account_hint: Option<String>,
@@ -399,12 +979,15 @@ struct ErrorWire {
 impl LocalDevboxApi {
     pub fn open(root: impl AsRef<Path>) -> ApiResult<Self> {
         let root = root.as_ref().to_path_buf();
+        let metadata = Arc::new(MemoryMetadataStore::default());
         let pack_storage = Arc::new(LocalFilePackStorage::open(&root)?);
-        Self::open_with_pack_storage(root, pack_storage)
+        Self::open_with_stores(root, metadata, pack_storage)
     }
 
     pub fn open_from_env(root: impl AsRef<Path>) -> ApiResult<Self> {
         let root = root.as_ref().to_path_buf();
+        let database_url = metadata_database_url()?;
+        let metadata = Arc::new(PostgresMetadataStore::connect(&database_url)?);
         let pack_storage: Arc<dyn PackStorage> = if optional_env_value("DEVBOX_R2_ENDPOINT")
             .is_some()
             || optional_env_value("DEVBOX_R2_BUCKET").is_some()
@@ -413,22 +996,30 @@ impl LocalDevboxApi {
         } else {
             Arc::new(LocalFilePackStorage::open(&root)?)
         };
-        Self::open_with_pack_storage(root, pack_storage)
+        Self::open_with_stores(root, metadata, pack_storage)
     }
 
-    fn open_with_pack_storage(
+    fn open_with_stores(
         root: impl AsRef<Path>,
+        metadata: Arc<dyn ApiMetadataStore>,
         pack_storage: Arc<dyn PackStorage>,
     ) -> ApiResult<Self> {
         let root = root.as_ref().to_path_buf();
         create_dir_all(&root)?;
-        create_dir_all(root.join("metadata"))?;
-        create_dir_all(root.join("objects"))?;
-        create_dir_all(root.join("cursors"))?;
         Ok(Self {
             root: Arc::new(root),
+            metadata,
             pack_storage,
         })
+    }
+
+    #[cfg(test)]
+    fn open_with_pack_storage(
+        root: impl AsRef<Path>,
+        pack_storage: Arc<dyn PackStorage>,
+    ) -> ApiResult<Self> {
+        let metadata = Arc::new(MemoryMetadataStore::default());
+        Self::open_with_stores(root, metadata, pack_storage)
     }
 
     pub fn root(&self) -> &Path {
@@ -437,6 +1028,10 @@ impl LocalDevboxApi {
 
     pub fn pack_storage_label(&self) -> &'static str {
         self.pack_storage.label()
+    }
+
+    pub fn metadata_storage_label(&self) -> &'static str {
+        self.metadata.label()
     }
 
     pub fn create_dev_session(
@@ -461,17 +1056,12 @@ impl LocalDevboxApi {
         );
         let now = timestamp();
 
-        let mut sessions = self.sessions()?;
-        upsert_session(
-            &mut sessions,
-            SessionRecord {
-                session_id: session_id.clone(),
-                account_id: account_id.clone(),
-                token_hash: digest_hex(&session_token),
-                created_at: now.clone(),
-            },
-        );
-        self.write_sessions(&sessions)?;
+        self.metadata.upsert_session(SessionRecord {
+            session_id: session_id.clone(),
+            account_id: account_id.clone(),
+            token_hash: digest_hex(&session_token),
+            created_at: now.clone(),
+        })?;
 
         self.register_device_for_account(
             &account_id,
@@ -493,14 +1083,13 @@ impl LocalDevboxApi {
         }
         let token_hash = digest_hex(session_token);
         let session = self
-            .sessions()?
-            .into_iter()
-            .find(|session| session.token_hash == token_hash)
+            .metadata
+            .session_by_token_hash(&token_hash)?
             .ok_or(ApiError::Unauthorized)?;
         let device = self
-            .devices()?
-            .into_iter()
-            .find(|device| device.device_id == device_id && device.account_id == session.account_id)
+            .metadata
+            .device(device_id)?
+            .filter(|device| device.account_id == session.account_id)
             .ok_or(ApiError::Unauthorized)?;
 
         Ok(AuthContext {
@@ -540,12 +1129,7 @@ impl LocalDevboxApi {
     ) -> ApiResult<SharedFolderResponse> {
         let folder_id = validate_id(folder_id, "shared folder id")?;
         let display_name = validate_non_empty(display_name, "shared folder display name")?;
-        let mut folders = self.folders()?;
-        match folders
-            .iter()
-            .find(|folder| folder.folder_id == folder_id)
-            .cloned()
-        {
+        match self.metadata.folder(&folder_id)? {
             Some(folder) if folder.owner_account_id != auth.account_id => {
                 return Err(ApiError::Forbidden(
                     "shared folder belongs to another account".to_string(),
@@ -553,26 +1137,25 @@ impl LocalDevboxApi {
             }
             Some(_) => {}
             None => {
-                folders.push(FolderRecord {
+                self.metadata.insert_folder(FolderRecord {
                     folder_id: folder_id.clone(),
                     owner_account_id: auth.account_id.clone(),
                     display_name: display_name.clone(),
                     created_at: timestamp(),
-                });
-                self.write_folders(&folders)?;
+                })?;
             }
         }
 
-        let mut memberships = self.memberships()?;
-        if !memberships.iter().any(|membership| {
-            membership.account_id == auth.account_id && membership.folder_id == folder_id
-        }) {
-            memberships.push(MembershipRecord {
+        if self
+            .metadata
+            .membership(&auth.account_id, &folder_id)?
+            .is_none()
+        {
+            self.metadata.insert_membership(MembershipRecord {
                 account_id: auth.account_id.clone(),
                 folder_id: folder_id.clone(),
                 role: "owner".to_string(),
-            });
-            self.write_memberships(&memberships)?;
+            })?;
         }
 
         Ok(SharedFolderResponse {
@@ -592,9 +1175,8 @@ impl LocalDevboxApi {
     ) -> ApiResult<SharedFolderResponse> {
         self.require_membership(auth, folder_id)?;
         let folder = self
-            .folders()?
-            .into_iter()
-            .find(|folder| folder.folder_id == folder_id)
+            .metadata
+            .folder(folder_id)?
             .ok_or_else(|| ApiError::NotFound("shared folder not found".to_string()))?;
         Ok(SharedFolderResponse {
             id: SharedFolderId::new(folder.folder_id)
@@ -607,27 +1189,16 @@ impl LocalDevboxApi {
     }
 
     pub fn list_shared_folders(&self, auth: &AuthContext) -> ApiResult<Vec<SharedFolderResponse>> {
-        let folders = self.folders()?;
-        let memberships = self.memberships()?;
         let mut responses = Vec::new();
 
-        for membership in memberships
-            .into_iter()
-            .filter(|membership| membership.account_id == auth.account_id)
-        {
-            let Some(folder) = folders
-                .iter()
-                .find(|folder| folder.folder_id == membership.folder_id)
-            else {
-                continue;
-            };
+        for (membership, folder) in self.metadata.folders_for_account(&auth.account_id)? {
             responses.push(SharedFolderResponse {
-                id: SharedFolderId::new(folder.folder_id.clone())
+                id: SharedFolderId::new(folder.folder_id)
                     .map_err(|error| ApiError::BadRequest(error.to_string()))?,
                 account_id: AccountId::new(auth.account_id.clone())
                     .map_err(|error| ApiError::BadRequest(error.to_string()))?,
                 role: role_from_string(&membership.role)?,
-                display_name: folder.display_name.clone(),
+                display_name: folder.display_name,
             });
         }
 
@@ -667,19 +1238,9 @@ impl LocalDevboxApi {
         cursor_id: &str,
     ) -> ApiResult<Option<String>> {
         self.require_membership(auth, folder_id)?;
-        let path = self.cursor_path(folder_id, cursor_id)?;
-        match fs::read_to_string(&path) {
-            Ok(contents) => {
-                let value = contents.trim();
-                if value.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(value.to_string()))
-                }
-            }
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(ApiError::Io { path, source }),
-        }
+        let folder_id = validate_id(folder_id, "shared folder id")?;
+        let cursor_id = validate_id(cursor_id, "cursor id")?;
+        self.metadata.get_cursor(&folder_id, &cursor_id)
     }
 
     pub fn compare_and_set_cursor(
@@ -691,19 +1252,11 @@ impl LocalDevboxApi {
         next: &str,
     ) -> ApiResult<()> {
         self.require_membership(auth, folder_id)?;
+        let folder_id = validate_id(folder_id, "shared folder id")?;
+        let cursor_id = validate_id(cursor_id, "cursor id")?;
         let next = validate_id(next, "folder revision id")?;
-        let current = self.get_cursor(auth, folder_id, cursor_id)?;
-        if current.as_deref() != expected {
-            return Err(ApiError::Conflict {
-                expected: expected.map(ToString::to_string),
-                actual: current,
-            });
-        }
-        let path = self.cursor_path(folder_id, cursor_id)?;
-        if let Some(parent) = path.parent() {
-            create_dir_all(parent)?;
-        }
-        fs::write(&path, format!("{next}\n")).map_err(|source| ApiError::Io { path, source })
+        self.metadata
+            .compare_and_set_cursor(&folder_id, &cursor_id, expected, &next)
     }
 
     pub fn serve(self, listener: TcpListener) -> ApiResult<()> {
@@ -736,177 +1289,34 @@ impl LocalDevboxApi {
         let account_id = validate_id(account_id, "account id")?;
         let device_id = validate_id(device_id, "device id")?;
         let display_name = validate_non_empty(display_name, "device display name")?;
-        let mut devices = self.devices()?;
-        match devices
-            .iter_mut()
-            .find(|device| device.device_id == device_id)
-        {
+        match self.metadata.device(&device_id)? {
             Some(device) if device.account_id != account_id => {
                 return Err(ApiError::Forbidden(
                     "device belongs to another account".to_string(),
                 ));
             }
-            Some(device) => {
-                device.display_name = display_name;
-            }
-            None => devices.push(DeviceRecord {
+            Some(_) | None => self.metadata.upsert_device(DeviceRecord {
                 account_id,
                 device_id,
                 display_name,
                 registered_at: timestamp(),
-            }),
+            })?,
         }
-        self.write_devices(&devices)
+        Ok(())
     }
 
     fn require_membership(&self, auth: &AuthContext, folder_id: &str) -> ApiResult<()> {
         let folder_id = validate_id(folder_id, "shared folder id")?;
-        let has_membership = self.memberships()?.iter().any(|membership| {
-            membership.account_id == auth.account_id && membership.folder_id == folder_id
-        });
-        if !has_membership {
+        if self
+            .metadata
+            .membership(&auth.account_id, &folder_id)?
+            .is_none()
+        {
             return Err(ApiError::Forbidden(
                 "session is not allowed to access this shared folder".to_string(),
             ));
         }
         Ok(())
-    }
-
-    fn metadata_path(&self, name: &str) -> PathBuf {
-        self.root.join("metadata").join(name)
-    }
-
-    fn sessions(&self) -> ApiResult<Vec<SessionRecord>> {
-        read_rows(&self.metadata_path("sessions.tsv")).map(|rows| {
-            rows.into_iter()
-                .filter_map(|row| {
-                    Some(SessionRecord {
-                        session_id: row.get("session_id")?.clone(),
-                        account_id: row.get("account_id")?.clone(),
-                        token_hash: row.get("token_hash")?.clone(),
-                        created_at: row.get("created_at")?.clone(),
-                    })
-                })
-                .collect()
-        })
-    }
-
-    fn write_sessions(&self, sessions: &[SessionRecord]) -> ApiResult<()> {
-        write_rows(
-            &self.metadata_path("sessions.tsv"),
-            &["session_id", "account_id", "token_hash", "created_at"],
-            sessions.iter().map(|session| {
-                vec![
-                    session.session_id.clone(),
-                    session.account_id.clone(),
-                    session.token_hash.clone(),
-                    session.created_at.clone(),
-                ]
-            }),
-        )
-    }
-
-    fn devices(&self) -> ApiResult<Vec<DeviceRecord>> {
-        read_rows(&self.metadata_path("devices.tsv")).map(|rows| {
-            rows.into_iter()
-                .filter_map(|row| {
-                    Some(DeviceRecord {
-                        account_id: row.get("account_id")?.clone(),
-                        device_id: row.get("device_id")?.clone(),
-                        display_name: row.get("display_name")?.clone(),
-                        registered_at: row.get("registered_at")?.clone(),
-                    })
-                })
-                .collect()
-        })
-    }
-
-    fn write_devices(&self, devices: &[DeviceRecord]) -> ApiResult<()> {
-        write_rows(
-            &self.metadata_path("devices.tsv"),
-            &["account_id", "device_id", "display_name", "registered_at"],
-            devices.iter().map(|device| {
-                vec![
-                    device.account_id.clone(),
-                    device.device_id.clone(),
-                    device.display_name.clone(),
-                    device.registered_at.clone(),
-                ]
-            }),
-        )
-    }
-
-    fn folders(&self) -> ApiResult<Vec<FolderRecord>> {
-        read_rows(&self.metadata_path("folders.tsv")).map(|rows| {
-            rows.into_iter()
-                .filter_map(|row| {
-                    Some(FolderRecord {
-                        folder_id: row.get("folder_id")?.clone(),
-                        owner_account_id: row.get("owner_account_id")?.clone(),
-                        display_name: row.get("display_name")?.clone(),
-                        created_at: row.get("created_at")?.clone(),
-                    })
-                })
-                .collect()
-        })
-    }
-
-    fn write_folders(&self, folders: &[FolderRecord]) -> ApiResult<()> {
-        write_rows(
-            &self.metadata_path("folders.tsv"),
-            &[
-                "folder_id",
-                "owner_account_id",
-                "display_name",
-                "created_at",
-            ],
-            folders.iter().map(|folder| {
-                vec![
-                    folder.folder_id.clone(),
-                    folder.owner_account_id.clone(),
-                    folder.display_name.clone(),
-                    folder.created_at.clone(),
-                ]
-            }),
-        )
-    }
-
-    fn memberships(&self) -> ApiResult<Vec<MembershipRecord>> {
-        read_rows(&self.metadata_path("memberships.tsv")).map(|rows| {
-            rows.into_iter()
-                .filter_map(|row| {
-                    Some(MembershipRecord {
-                        account_id: row.get("account_id")?.clone(),
-                        folder_id: row.get("folder_id")?.clone(),
-                        role: row.get("role")?.clone(),
-                    })
-                })
-                .collect()
-        })
-    }
-
-    fn write_memberships(&self, memberships: &[MembershipRecord]) -> ApiResult<()> {
-        write_rows(
-            &self.metadata_path("memberships.tsv"),
-            &["account_id", "folder_id", "role"],
-            memberships.iter().map(|membership| {
-                vec![
-                    membership.account_id.clone(),
-                    membership.folder_id.clone(),
-                    membership.role.clone(),
-                ]
-            }),
-        )
-    }
-
-    fn cursor_path(&self, folder_id: &str, cursor_id: &str) -> ApiResult<PathBuf> {
-        let folder_id = validate_id(folder_id, "shared folder id")?;
-        let cursor_id = validate_id(cursor_id, "cursor id")?;
-        Ok(self
-            .root
-            .join("cursors")
-            .join(folder_id)
-            .join(format!("{cursor_id}.txt")))
     }
 }
 
@@ -1019,6 +1429,7 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
             &serde_json::json!({
                 "status": "ok",
                 "service": "devbox-api",
+                "metadata": api.metadata_storage_label(),
                 "storage": api.pack_storage_label()
             }),
         ),
@@ -1274,17 +1685,6 @@ fn status_reason(status: u16) -> &'static str {
     }
 }
 
-fn upsert_session(sessions: &mut Vec<SessionRecord>, next: SessionRecord) {
-    if let Some(session) = sessions
-        .iter_mut()
-        .find(|session| session.session_id == next.session_id)
-    {
-        *session = next;
-    } else {
-        sessions.push(next);
-    }
-}
-
 fn safe_prefixed_id(prefix: &str, value: &str, label: &'static str) -> ApiResult<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -1339,120 +1739,6 @@ fn validate_non_empty(value: &str, label: &'static str) -> ApiResult<String> {
     Ok(value.to_string())
 }
 
-fn read_rows(path: &Path) -> ApiResult<Vec<BTreeMap<String, String>>> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(ApiError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
-    };
-    let mut lines = contents.lines();
-    let Some(header) = lines.next() else {
-        return Ok(Vec::new());
-    };
-    let fields = header
-        .split('\t')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let mut rows = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let values = line
-            .split('\t')
-            .map(decode_field)
-            .collect::<ApiResult<Vec<_>>>()?;
-        let mut row = BTreeMap::new();
-        for (name, value) in fields.iter().zip(values) {
-            row.insert(name.clone(), value);
-        }
-        rows.push(row);
-    }
-    Ok(rows)
-}
-
-fn write_rows(
-    path: &Path,
-    headers: &[&str],
-    rows: impl IntoIterator<Item = Vec<String>>,
-) -> ApiResult<()> {
-    if let Some(parent) = path.parent() {
-        create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
-        .map_err(|source| ApiError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(format!("{}\n", headers.join("\t")).as_bytes())
-        .map_err(|source| ApiError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    for row in rows {
-        let line = row
-            .iter()
-            .map(|value| encode_field(value))
-            .collect::<Vec<_>>()
-            .join("\t");
-        file.write_all(format!("{line}\n").as_bytes())
-            .map_err(|source| ApiError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-    }
-    Ok(())
-}
-
-fn encode_field(value: &str) -> String {
-    let mut encoded = String::new();
-    for character in value.chars() {
-        match character {
-            '%' => encoded.push_str("%25"),
-            '\t' => encoded.push_str("%09"),
-            '\n' => encoded.push_str("%0A"),
-            '\r' => encoded.push_str("%0D"),
-            _ => encoded.push(character),
-        }
-    }
-    encoded
-}
-
-fn decode_field(value: &str) -> ApiResult<String> {
-    let mut decoded = String::new();
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if index + 2 >= bytes.len() {
-                return Err(ApiError::Json("truncated percent escape".to_string()));
-            }
-            let hex = &value[index + 1..index + 3];
-            let byte = u8::from_str_radix(hex, 16)
-                .map_err(|_| ApiError::Json("invalid percent escape".to_string()))?;
-            decoded.push(byte as char);
-            index += 3;
-        } else {
-            let character = value[index..]
-                .chars()
-                .next()
-                .expect("index is inside the string");
-            decoded.push(character);
-            index += character.len_utf8();
-        }
-    }
-    Ok(decoded)
-}
-
 fn create_dir_all(path: impl AsRef<Path>) -> ApiResult<()> {
     let path = path.as_ref();
     fs::create_dir_all(path).map_err(|source| ApiError::Io {
@@ -1466,6 +1752,25 @@ fn optional_env_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn metadata_database_url() -> ApiResult<String> {
+    optional_env_value("DEVBOX_API_DATABASE_URL")
+        .or_else(|| optional_env_value("DATABASE_URL"))
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "metadata database is required: set DATABASE_URL or DEVBOX_API_DATABASE_URL"
+                    .to_string(),
+            )
+        })
+}
+
+fn postgres_error(error: postgres::Error) -> ApiError {
+    ApiError::Database(error.to_string())
+}
+
+fn lock_error<T>(_: std::sync::PoisonError<T>) -> ApiError {
+    ApiError::Database("metadata store lock was poisoned".to_string())
 }
 
 fn sync_error(error: SyncError) -> ApiError {
@@ -1697,6 +2002,7 @@ mod tests {
 
         assert!(text.starts_with("HTTP/1.1 200 OK"));
         assert!(text.contains("\"service\":\"devbox-api\""));
+        assert!(text.contains("\"metadata\":\"memory\""));
         assert!(text.contains("\"storage\":\"local-file\""));
     }
 }

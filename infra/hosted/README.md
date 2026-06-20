@@ -15,40 +15,49 @@ devbox clone <name>
 
 ## Product API On Railway
 
-`devbox-api` stores sessions, devices, shared-folder registry, and cursors under `DEVBOX_API_ROOT`.
-The Docker image defaults that root to `/data/devbox-api`. Loom pack bytes use local files by
-default, but switch to server-owned R2-compatible object storage when `DEVBOX_R2_ENDPOINT` and
-`DEVBOX_R2_BUCKET` are configured.
+`devbox-api` stores sessions, devices, shared-folder registry, memberships, and cursors in
+Postgres. Loom pack bytes use server-owned R2-compatible object storage when `DEVBOX_R2_ENDPOINT`
+and `DEVBOX_R2_BUCKET` are configured. `DEVBOX_API_ROOT` is only a scratch/local-pack fallback path;
+it is not the durable product metadata store.
 
 Railway setup:
 
 1. Deploy with the root [railway.toml](../../railway.toml).
-2. Configure a Railway Volume mounted at `/data` so account/session/folder/cursor metadata persists
-   across redeploys.
+2. Attach Railway Postgres and set `DATABASE_URL` on the `devbox-api` service. You can also use
+   `DEVBOX_API_DATABASE_URL`; `DATABASE_URL` is the normal Railway path.
 3. Configure server-side R2 pack storage when staging should use Cloudflare object storage:
    `DEVBOX_R2_ENDPOINT`, `DEVBOX_R2_BUCKET`, `DEVBOX_R2_ACCESS_KEY_ID`,
    `DEVBOX_R2_SECRET_ACCESS_KEY`, optional `DEVBOX_R2_REGION=auto`, optional
    `DEVBOX_R2_PREFIX`, and optional `DEVBOX_R2_SESSION_TOKEN`.
-4. Deploy and confirm `/ready` returns `service: "devbox-api"` and `storage: "r2-packs"` when R2 is
-   active.
+4. Deploy and confirm `/ready` returns `service: "devbox-api"`, `metadata: "postgres"`, and
+   `storage: "r2-packs"` when R2 is active.
 
-The Dockerfile intentionally does not include a Docker `VOLUME` instruction. Railway rejects
-Dockerfile-declared volumes; create Railway Volumes in Railway instead.
-
-The hosted images currently run as the default container user so Railway-mounted `/data` volumes are
-writeable at startup. A later hardening pass should add an entrypoint that fixes mounted-volume
-ownership and then drops privileges.
+Do not attach a Railway Volume for the product API. Durable API metadata lives in Postgres, and pack
+bytes live in R2. The Dockerfile intentionally does not include a Docker `VOLUME` instruction.
 
 Local container smoke:
 
 ```bash
 docker build -f infra/hosted/devbox-api.Dockerfile -t devbox-api:alpha .
-docker run --rm -p 8787:8787 -e PORT=8787 devbox-api:alpha
+docker run --rm -d -p 5432:5432 --name devbox-api-postgres \
+  -e POSTGRES_USER=devbox \
+  -e POSTGRES_PASSWORD=devbox \
+  -e POSTGRES_DB=devbox \
+  postgres:16-alpine
+docker run --rm -p 8787:8787 \
+  -e PORT=8787 \
+  -e DATABASE_URL=postgres://devbox:devbox@host.docker.internal:5432/devbox \
+  -e DEVBOX_R2_ENDPOINT=https://<cloudflare-account-id>.r2.cloudflarestorage.com \
+  -e DEVBOX_R2_BUCKET=devbox-alpha \
+  -e DEVBOX_R2_ACCESS_KEY_ID=<server-side-r2-access-key> \
+  -e DEVBOX_R2_SECRET_ACCESS_KEY=<server-side-r2-secret-key> \
+  devbox-api:alpha
 curl http://127.0.0.1:8787/ready
 ```
 
-`DATABASE_URL` is not consumed by `devbox-api` yet. It belongs to the legacy metadata service below
-until the product API metadata layer is moved from `/data` files to Postgres.
+These values stay on the server. End-user machines should only know the Devbox API URL and their
+session/device state; they should never configure Cloudflare endpoints, bucket names, prefixes, or
+R2 credentials.
 
 ## Legacy Metadata API
 

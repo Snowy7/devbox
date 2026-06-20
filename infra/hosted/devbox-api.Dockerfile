@@ -8,12 +8,12 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && mkdir -p /data/devbox-api \
+    && mkdir -p /tmp/devbox-api \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/devbox-api /usr/local/bin/devbox-api
 
-ENV DEVBOX_API_ROOT=/data/devbox-api
+ENV DEVBOX_API_ROOT=/tmp/devbox-api
 
 EXPOSE 8787
 

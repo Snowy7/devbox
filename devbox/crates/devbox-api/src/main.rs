@@ -37,7 +37,7 @@ fn run() -> Result<(), String> {
             }
             "--help" | "-h" => {
                 println!("devbox-api --root <PATH> [--bind 127.0.0.1:0]");
-                println!("Env: DEVBOX_API_ROOT, DEVBOX_API_BIND, PORT");
+                println!("Env: DATABASE_URL or DEVBOX_API_DATABASE_URL, DEVBOX_API_ROOT, DEVBOX_API_BIND, PORT");
                 println!("R2 pack storage: DEVBOX_R2_ENDPOINT, DEVBOX_R2_BUCKET, DEVBOX_R2_ACCESS_KEY_ID, DEVBOX_R2_SECRET_ACCESS_KEY, optional DEVBOX_R2_REGION, DEVBOX_R2_PREFIX, DEVBOX_R2_SESSION_TOKEN");
                 return Ok(());
             }
@@ -52,6 +52,7 @@ fn run() -> Result<(), String> {
 
     println!("devbox-api running locally at http://{addr}");
     println!("Storage: {}", api.root().display());
+    println!("Metadata storage: {}", api.metadata_storage_label());
     println!("Pack storage: {}", api.pack_storage_label());
     api.serve(listener).map_err(|error| error.to_string())
 }
