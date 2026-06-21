@@ -1066,8 +1066,19 @@ impl LocalDevboxApi {
 
     pub fn open_from_env(root: impl AsRef<Path>) -> ApiResult<Self> {
         let root = root.as_ref().to_path_buf();
-        let database_url = metadata_database_url()?;
-        let metadata = Arc::new(PostgresMetadataStore::connect(&database_url)?);
+        let metadata: Arc<dyn ApiMetadataStore> =
+            match optional_env_value("DEVBOX_API_METADATA_MODE").as_deref() {
+                Some("memory") => Arc::new(MemoryMetadataStore::default()),
+                Some(other) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "DEVBOX_API_METADATA_MODE must be 'memory' or unset, got '{other}'"
+                    )))
+                }
+                None => {
+                    let database_url = metadata_database_url()?;
+                    Arc::new(PostgresMetadataStore::connect(&database_url)?)
+                }
+            };
         let pack_storage: Arc<dyn PackStorage> = if optional_env_value("DEVBOX_R2_ENDPOINT")
             .is_some()
             || optional_env_value("DEVBOX_R2_BUCKET").is_some()
@@ -1942,6 +1953,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[derive(Debug, Default)]
     struct MemoryPackStorage {
         packs: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -2053,6 +2066,37 @@ mod tests {
 
         assert!(paths.contains(&"/v1/loom"));
         assert!(!paths.iter().any(|path| path.contains("git")));
+    }
+
+    #[test]
+    fn open_from_env_can_use_memory_metadata_for_local_smoke() {
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let old_mode = std::env::var("DEVBOX_API_METADATA_MODE").ok();
+        let old_database_url = std::env::var("DEVBOX_API_DATABASE_URL").ok();
+        let old_database_url_fallback = std::env::var("DATABASE_URL").ok();
+        std::env::set_var("DEVBOX_API_METADATA_MODE", "memory");
+        std::env::remove_var("DEVBOX_API_DATABASE_URL");
+        std::env::remove_var("DATABASE_URL");
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let api =
+            LocalDevboxApi::open_from_env(dir.path()).expect("api opens with memory metadata");
+
+        assert_eq!(api.metadata_storage_label(), "memory");
+        assert_eq!(api.pack_storage_label(), "local-file");
+
+        match old_mode {
+            Some(value) => std::env::set_var("DEVBOX_API_METADATA_MODE", value),
+            None => std::env::remove_var("DEVBOX_API_METADATA_MODE"),
+        }
+        match old_database_url {
+            Some(value) => std::env::set_var("DEVBOX_API_DATABASE_URL", value),
+            None => std::env::remove_var("DEVBOX_API_DATABASE_URL"),
+        }
+        match old_database_url_fallback {
+            Some(value) => std::env::set_var("DATABASE_URL", value),
+            None => std::env::remove_var("DATABASE_URL"),
+        }
     }
 
     #[test]

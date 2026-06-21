@@ -11,7 +11,9 @@ Usage: powershell -ExecutionPolicy Bypass -File scripts/mvp-two-device-smoke.ps1
 Runs a deterministic local MVP smoke test that proves:
   - Loom local-only capture/checkpoint works
   - Loom local remote sync/clone works
+  - Loom sparse clone, hydrate, evict, pin, and cache status work
   - Devbox hosted share/clone works through a local devbox-api
+  - Devbox hosted metadata/object split rejects object hash mismatches
   - Git metadata and generated dependencies are not materialized
   - Plain and nested folders materialize
   - Divergent sync refuses safely
@@ -135,6 +137,47 @@ function Invoke-Logged {
     Write-Host "[PASS] $Name"
 }
 
+function Invoke-LoggedHttpRefusal {
+    param(
+        [string]$Name,
+        [scriptblock]$ScriptBlock
+    )
+
+    $stdout = Join-Path $EvidenceDir "$Name.stdout.log"
+    $stderr = Join-Path $EvidenceDir "$Name.stderr.log"
+    $stdoutRaw = "$stdout.raw"
+    $stderrRaw = "$stderr.raw"
+
+    Write-Host "[RUN] $Name (expecting HTTP refusal)"
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        try {
+            & $ScriptBlock 1> $stdoutRaw 2> $stderrRaw
+            $code = 0
+        } catch {
+            $_ | Out-String | Set-Content -Path $stderrRaw
+            if (-not (Test-Path $stdoutRaw)) {
+                Set-Content -Path $stdoutRaw -Value ""
+            }
+            $code = 1
+        }
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
+
+    Redact-File $stdoutRaw $stdout
+    Redact-File $stderrRaw $stderr
+
+    if ($code -ne 0) {
+        Write-Host "[FAIL] $Name exited $code"
+        Get-Content -Tail 40 -Path $stderr | ForEach-Object { Write-Host $_ }
+        Fail "$Name failed"
+    }
+
+    Write-Host "[PASS] $Name refused safely"
+}
+
 function Expect-Contains($Path, $Needle) {
     $text = Get-Content -Raw -Path $Path
     if (-not $text.Contains($Needle)) {
@@ -198,6 +241,60 @@ function Tree-Contains($Root, $Needle) {
     $false
 }
 
+function Invoke-HostedObjectHashMismatchProbe($ApiUrl, $FolderId, $ObjectId, $SessionToken, $DeviceId) {
+    $url = "$ApiUrl/v1/loom/shared-folders/$FolderId/objects/$ObjectId"
+    $request = [System.Net.WebRequest]::Create($url)
+    $request.Method = "PUT"
+    $request.ContentType = "application/octet-stream"
+    $request.Headers.Add("authorization", "Bearer $SessionToken")
+    $request.Headers.Add("x-devbox-device-id", $DeviceId)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes("wrong hosted smoke bytes")
+    $request.ContentLength = $bytes.Length
+    $stream = $request.GetRequestStream()
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally {
+        $stream.Dispose()
+    }
+
+    $status = $null
+    $body = ""
+    $reader = $null
+    try {
+        $response = $request.GetResponse()
+        try {
+            $status = [int]$response.StatusCode
+            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+            $body = $reader.ReadToEnd()
+        } finally {
+            if ($reader) { $reader.Dispose() }
+            $response.Dispose()
+        }
+    } catch [System.Net.WebException] {
+        $response = $_.Exception.Response
+        if ($response) {
+            try {
+                $status = [int]$response.StatusCode
+                $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+                $body = $reader.ReadToEnd()
+            } finally {
+                if ($reader) { $reader.Dispose() }
+                $response.Dispose()
+            }
+        } else {
+            throw
+        }
+    }
+
+    Write-Output "http_status=$status"
+    if ($body) {
+        Write-Output $body
+    }
+    if ($status -ne 400) {
+        throw "expected HTTP 400 from mismatched object upload, got $status"
+    }
+}
+
 try {
     $LoomBin = Get-BinaryPath $env:LOOM_BIN "loom-cli" "loom"
     $DevboxBin = Get-BinaryPath $env:DEVBOX_BIN "devbox-cli" "devbox"
@@ -210,6 +307,7 @@ try {
     $EngineSource = Join-Path $WorkDir "engine-source"
     $EngineRemote = Join-Path $WorkDir "engine-remote"
     $EngineClone = Join-Path $WorkDir "engine-clone"
+    $EngineSparseClone = Join-Path $WorkDir "engine-sparse-clone"
     $PlainSource = Join-Path $WorkDir "plain-source"
     $PlainRemote = Join-Path $WorkDir "plain-remote"
     $PlainClone = Join-Path $WorkDir "plain-clone"
@@ -249,6 +347,27 @@ try {
     Expect-Absent (Join-Path $EngineClone ".git")
     Expect-Absent (Join-Path $EngineClone "node_modules")
     Expect-Absent (Join-Path $EngineClone "apps\web\dist")
+    Invoke-Logged -Name "06a-loom-sparse-clone" -Exe $LoomBin -CommandArgs @("clone", $EngineRemote, $EngineSparseClone, "--sparse")
+    Expect-Contains (Join-Path $EvidenceDir "06a-loom-sparse-clone.stdout.log") "Mode: sparse metadata-only"
+    Expect-Contains (Join-Path $EvidenceDir "06a-loom-sparse-clone.stdout.log") "Imported objects: 0"
+    Expect-Absent (Join-Path $EngineSparseClone "README.md")
+    Invoke-Logged -Name "06b-loom-sparse-cache-status" -Exe $LoomBin -CommandArgs @("cache", "status", $EngineSparseClone)
+    Expect-Contains (Join-Path $EvidenceDir "06b-loom-sparse-cache-status.stdout.log") "remote-only: 3"
+    Invoke-Logged -Name "06c-loom-sparse-hydrate-readme" -Exe $LoomBin -CommandArgs @("hydrate", (Join-Path $EngineSparseClone "README.md"))
+    Expect-Contains (Join-Path $EvidenceDir "06c-loom-sparse-hydrate-readme.stdout.log") "Fetched objects: 1"
+    Expect-FileText (Join-Path $EngineSparseClone "README.md") "engine source v2"
+    Invoke-Logged -Name "06d-loom-sparse-cache-after-hydrate" -Exe $LoomBin -CommandArgs @("cache", "status", $EngineSparseClone)
+    Expect-Contains (Join-Path $EvidenceDir "06d-loom-sparse-cache-after-hydrate.stdout.log") "hydrated: 1"
+    Invoke-Logged -Name "06e-loom-sparse-evict-readme" -Exe $LoomBin -CommandArgs @("evict", (Join-Path $EngineSparseClone "README.md"))
+    Expect-Contains (Join-Path $EvidenceDir "06e-loom-sparse-evict-readme.stdout.log") "Removed: 1 files, 1 objects"
+    Expect-Absent (Join-Path $EngineSparseClone "README.md")
+    Invoke-Logged -Name "06f-loom-sparse-hydrate-api" -Exe $LoomBin -CommandArgs @("hydrate", (Join-Path $EngineSparseClone "apps\api\app.txt"))
+    Expect-FileText (Join-Path $EngineSparseClone "apps\api\app.txt") "api"
+    Invoke-Logged -Name "06g-loom-sparse-pin-api" -Exe $LoomBin -CommandArgs @("pin", (Join-Path $EngineSparseClone "apps\api\app.txt"))
+    Invoke-Logged -Name "06h-loom-sparse-cache-after-pin" -Exe $LoomBin -CommandArgs @("cache", "status", $EngineSparseClone)
+    Expect-Contains (Join-Path $EvidenceDir "06h-loom-sparse-cache-after-pin.stdout.log") "pinned: 1 files"
+    Invoke-Logged -Name "06i-loom-sparse-pinned-evict-refusal" -Exe $LoomBin -CommandArgs @("evict", (Join-Path $EngineSparseClone "apps\api\app.txt")) -ExpectFailure
+    Expect-Contains (Join-Path $EvidenceDir "06i-loom-sparse-pinned-evict-refusal.stderr.log") "path is pinned"
 
     Invoke-Logged -Name "07-plain-track" -Exe $LoomBin -CommandArgs @("track", $PlainSource)
     Invoke-Logged -Name "08-plain-remote-add" -Exe $LoomBin -CommandArgs @("remote", "add", "local", $PlainRemote, $PlainSource)
@@ -275,7 +394,13 @@ try {
     $ApiRoot = Join-Path $WorkDir "api-root"
     $ApiStdoutRaw = Join-Path $EvidenceDir "17-devbox-api.stdout.log.raw"
     $ApiStderrRaw = Join-Path $EvidenceDir "17-devbox-api.stderr.log.raw"
-    $ApiProcess = Start-Process -FilePath $DevboxApiBin -ArgumentList @("--root", $ApiRoot, "--bind", "127.0.0.1:0") -RedirectStandardOutput $ApiStdoutRaw -RedirectStandardError $ApiStderrRaw -PassThru -WindowStyle Hidden
+    $OldApiMetadataMode = [Environment]::GetEnvironmentVariable("DEVBOX_API_METADATA_MODE", "Process")
+    [Environment]::SetEnvironmentVariable("DEVBOX_API_METADATA_MODE", "memory", "Process")
+    try {
+        $ApiProcess = Start-Process -FilePath $DevboxApiBin -ArgumentList @("--root", $ApiRoot, "--bind", "127.0.0.1:0") -RedirectStandardOutput $ApiStdoutRaw -RedirectStandardError $ApiStderrRaw -PassThru -WindowStyle Hidden
+    } finally {
+        [Environment]::SetEnvironmentVariable("DEVBOX_API_METADATA_MODE", $OldApiMetadataMode, "Process")
+    }
     $ApiUrl = ""
     for ($i = 0; $i -lt 100; $i++) {
         if ($ApiProcess.HasExited) {
@@ -320,6 +445,25 @@ try {
     Expect-FileText (Join-Path $ProductTarget "app\main.txt") "nested product file"
     Expect-Absent (Join-Path $ProductTarget ".git")
     Expect-Absent (Join-Path $ProductTarget "node_modules")
+    $ProductFolderId = $null
+    Get-Content -Path (Join-Path $ProductSource ".loom\metadata\shared_folder.tsv") | ForEach-Object {
+        $fields = $_ -split "`t"
+        if ($fields.Length -eq 2 -and $fields[0] -eq "id") {
+            $ProductFolderId = $fields[1]
+        }
+    }
+    $ProductObjectRow = Get-Content -Path (Join-Path $ProductSource ".loom\metadata\cache_entries.tsv") | Select-Object -First 1
+    $ProductObjectId = ($ProductObjectRow -split "`t")[0]
+    $SourceProductConfig = Get-Content -Raw -Path (Join-Path $SourceConfig "config.json") | ConvertFrom-Json
+    if (-not $ProductFolderId) { Fail "could not read hosted shared folder id" }
+    if (-not $ProductObjectId) { Fail "could not read hosted object id" }
+    if (-not $SourceProductConfig.session_token) { Fail "could not read hosted session token" }
+    if (-not $SourceProductConfig.device_id) { Fail "could not read hosted device id" }
+    Invoke-LoggedHttpRefusal -Name "21a-devbox-hosted-object-hash-mismatch" -ScriptBlock {
+        Invoke-HostedObjectHashMismatchProbe $ApiUrl $ProductFolderId $ProductObjectId $SourceProductConfig.session_token $SourceProductConfig.device_id
+    }
+    Expect-Contains (Join-Path $EvidenceDir "21a-devbox-hosted-object-hash-mismatch.stdout.log") "http_status=400"
+    Expect-Contains (Join-Path $EvidenceDir "21a-devbox-hosted-object-hash-mismatch.stdout.log") "object bytes do not match object id"
 
     New-TextFile (Join-Path $ProductSource "README.md") "product source after edit"
     Invoke-Logged -Name "22-devbox-source-push-edit" -Exe $DevboxBin -CommandArgs @("resume", $ProductSource, "--no-background-sync") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig }
@@ -347,8 +491,10 @@ API: $ApiUrl
 
 Proofs:
 - Loom local-only capture/checkpoint/status works.
-- Loom local filesystem remote sync and clone work.
-- Devbox hosted login/share/clone works through local devbox-api.
+- Loom local filesystem remote sync and eager clone work.
+- Loom sparse clone, hydrate, evict, pin, and cache status work through a local filesystem remote.
+- Devbox hosted login/share/clone works eagerly through local devbox-api.
+- Devbox hosted metadata/object split stores metadata packs separately from object bytes and rejects mismatched object bytes.
 - Editing the source shared folder propagates to the target through sync.
 - Git metadata is preserved locally and not materialized into clones.
 - Generated dependency/build output directories are suppressed.

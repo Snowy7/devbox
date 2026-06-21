@@ -1,6 +1,9 @@
 # Architecture Docs
 
 Start with [Full-Scale Project Shape](full-scale-project-shape.md) for the Loom/Devbox split.
+[Loom Storage Consistency](loom-storage-consistency.md) records the current testable guarantees and
+non-guarantees for cursors, compare-and-set, sparse hydration, eviction, pins, and hosted
+metadata/object integrity.
 
 Most other pages in this directory are legacy alpha architecture records. They are kept because the
 old alpha code still compiles and remains useful for smoke tests, but their `project` and `snapshot`

@@ -24,6 +24,7 @@ This repository currently contains the product foundation and MVP planning artif
 - [.plans](.plans/README.md) - MVP execution plan with static HTML pages for phases, architecture, and validation.
 - [docs/alpha-cli-distribution.md](docs/alpha-cli-distribution.md) - GitHub Release packaging, server-owned storage setup, and two-device alpha smoke testing.
 - [docs/devbox/loom-and-devbox.md](docs/devbox/loom-and-devbox.md) - the product/engine split and the vocabulary to use in new work.
+- [docs/architecture/loom-storage-consistency.md](docs/architecture/loom-storage-consistency.md) - current storage consistency guarantees, non-guarantees, and evidence path.
 
 ## Current Code Shape
 
@@ -109,7 +110,7 @@ word for a scoped shared folder. New product language should say shared folder.
 
 ### Quickstart: Prove the MVP Locally
 
-Run the smoke harness first. It builds the local binaries if needed, starts a temporary
+Run the storage-v2 smoke harness first. It builds the local binaries if needed, starts a temporary
 `devbox-api`, simulates two machines on one computer, and writes redacted evidence logs:
 
 ```text
@@ -119,8 +120,9 @@ scripts/mvp-two-device-smoke
 The smoke proves the current MVP path end to end:
 
 - Loom local-only capture/checkpoint/status.
-- Loom local filesystem remote sync and clone.
-- Devbox hosted `login`, `share`, `clone`, source edit, and target sync through local `devbox-api`.
+- Loom local filesystem remote sync, eager clone, sparse clone, hydrate, evict, pin, and cache status.
+- Devbox hosted `login`, eager `share`, eager `clone`, source edit, and target sync through local `devbox-api`.
+- Hosted metadata/object split, including object hash mismatch rejection.
 - Git metadata protection, generated dependency suppression, plain folders, nested folders, conflict refusal, and secret blocking.
 
 The product CLI path is intentionally small:
@@ -144,8 +146,9 @@ To remove the generated workspace after a passing run:
 DEVBOX_CLEAN_SMOKE_DIR=true scripts/mvp-two-device-smoke
 ```
 
-The script prints the evidence directory and writes `SUMMARY.txt` plus per-step logs with session
-tokens and Devbox clone URLs redacted.
+The script starts `devbox-api` with `DEVBOX_API_METADATA_MODE=memory`, so local evidence does not
+require Postgres or R2. It prints the evidence directory and writes `SUMMARY.txt` plus per-step logs
+with session tokens and Devbox clone URLs redacted.
 
 The product CLI keeps the normal path centered on folders and machines. For local development,
 run `devbox-api` and point the CLI at it with `--api` or `DEVBOX_API_URL`:
@@ -154,7 +157,7 @@ run `devbox-api` and point the CLI at it with `--api` or `DEVBOX_API_URL`:
 mkdir source
 printf 'hello from this machine\n' > source/README.md
 
-devbox-api --root .devbox-api --bind 127.0.0.1:3030
+DEVBOX_API_METADATA_MODE=memory devbox-api --root .devbox-api --bind 127.0.0.1:3030
 devbox login --api http://127.0.0.1:3030 --account local-dev --device-name "Desktop"
 devbox share ./source --no-background-sync
 
