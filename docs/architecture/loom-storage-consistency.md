@@ -71,8 +71,9 @@ future sparse filesystem or remote protocol.
 - Sparse clone is metadata-only, not an OS virtual filesystem. Missing files do not hydrate
   transparently on open.
 - Chunk vocabulary exists for future sparse transfer, but this implementation moves whole object bytes.
-- Remote-only metadata is not enough to work offline. A path must be hydrated or pinned while online
-  before offline use.
+- Remote-only metadata is not enough to work offline. A path must be hydrated while online before
+  offline use. Pin it after hydration only when the local bytes should be protected from later
+  eviction.
 - Pinning protects local eviction; it is not a remote legal-hold or team retention policy.
 - Conflict refusal does not resolve conflicts. Users still need a manual recovery path after divergent
   folder state.
