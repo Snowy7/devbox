@@ -12,6 +12,8 @@ pub enum LoomError {
     EmptyId { kind: &'static str },
     InvalidObjectHashLength { actual: usize },
     InvalidObjectHashCharacter { character: char },
+    InvalidChunkHashLength { actual: usize },
+    InvalidChunkHashCharacter { character: char },
     EmptyPath { kind: &'static str },
     AbsolutePath { kind: &'static str, path: PathBuf },
     ParentPath { kind: &'static str, path: PathBuf },
@@ -29,6 +31,13 @@ impl fmt::Display for LoomError {
             ),
             Self::InvalidObjectHashCharacter { character } => {
                 write!(f, "object id contains non-hex character '{character}'")
+            }
+            Self::InvalidChunkHashLength { actual } => write!(
+                f,
+                "chunk id must be a 64-character BLAKE3 hex digest, got {actual}"
+            ),
+            Self::InvalidChunkHashCharacter { character } => {
+                write!(f, "chunk id contains non-hex character '{character}'")
             }
             Self::EmptyPath { kind } => write!(f, "{kind} cannot be empty"),
             Self::AbsolutePath { kind, path } => {
@@ -119,6 +128,41 @@ impl fmt::Display for ObjectId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChunkId(String);
+
+impl ChunkId {
+    pub const BLAKE3_HEX_LENGTH: usize = 64;
+
+    pub fn from_blake3_hex(value: impl Into<String>) -> Result<Self, LoomError> {
+        let value = value.into();
+        if value.len() != Self::BLAKE3_HEX_LENGTH {
+            return Err(LoomError::InvalidChunkHashLength {
+                actual: value.len(),
+            });
+        }
+
+        if let Some(character) = value
+            .chars()
+            .find(|character| !character.is_ascii_hexdigit())
+        {
+            return Err(LoomError::InvalidChunkHashCharacter { character });
+        }
+
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ChunkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Object {
     id: ObjectId,
@@ -136,6 +180,90 @@ impl Object {
 
     pub fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chunk {
+    id: ChunkId,
+    size_bytes: u64,
+}
+
+impl Chunk {
+    pub fn new(id: ChunkId, size_bytes: u64) -> Self {
+        Self { id, size_bytes }
+    }
+
+    pub fn id(&self) -> &ChunkId {
+        &self.id
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HydrationState {
+    RemoteOnly,
+    Partial,
+    Hydrated,
+}
+
+impl HydrationState {
+    pub fn has_local_bytes(self) -> bool {
+        matches!(self, Self::Partial | Self::Hydrated)
+    }
+
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Hydrated)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheEntry {
+    object_id: ObjectId,
+    hydration_state: HydrationState,
+    local_path: PathBuf,
+    size_bytes: Option<u64>,
+    updated_at: String,
+}
+
+impl CacheEntry {
+    pub fn new(
+        object_id: ObjectId,
+        hydration_state: HydrationState,
+        local_path: impl Into<PathBuf>,
+        size_bytes: Option<u64>,
+        updated_at: impl Into<String>,
+    ) -> Result<Self, LoomError> {
+        Ok(Self {
+            object_id,
+            hydration_state,
+            local_path: validate_relative_path(local_path.into(), "cache entry path")?,
+            size_bytes,
+            updated_at: non_empty_message("updated_at", updated_at.into())?,
+        })
+    }
+
+    pub fn object_id(&self) -> &ObjectId {
+        &self.object_id
+    }
+
+    pub fn hydration_state(&self) -> HydrationState {
+        self.hydration_state
+    }
+
+    pub fn local_path(&self) -> &Path {
+        &self.local_path
+    }
+
+    pub fn size_bytes(&self) -> Option<u64> {
+        self.size_bytes
+    }
+
+    pub fn updated_at(&self) -> &str {
+        &self.updated_at
     }
 }
 
@@ -550,6 +678,22 @@ mod tests {
     }
 
     #[test]
+    fn chunks_record_content_identity_and_size() {
+        let id = ChunkId::from_blake3_hex(
+            "B3F35A5B6A1D118E4F9F4C23B77D982C84E4C3F4D53172AC89EACD1D29D98F03",
+        )
+        .expect("valid chunk id");
+        let chunk = Chunk::new(id.clone(), 64 * 1024);
+
+        assert_eq!(
+            id.as_str(),
+            "b3f35a5b6a1d118e4f9f4c23b77d982c84e4c3f4d53172ac89eacd1d29d98f03"
+        );
+        assert_eq!(chunk.id(), &id);
+        assert_eq!(chunk.size_bytes(), 64 * 1024);
+    }
+
+    #[test]
     fn object_id_rejects_invalid_hashes() {
         assert_eq!(
             ObjectId::from_blake3_hex("abc"),
@@ -561,6 +705,49 @@ mod tests {
             ),
             Err(LoomError::InvalidObjectHashCharacter { character: 'z' })
         );
+    }
+
+    #[test]
+    fn chunk_id_rejects_invalid_hashes() {
+        assert_eq!(
+            ChunkId::from_blake3_hex("abc"),
+            Err(LoomError::InvalidChunkHashLength { actual: 3 })
+        );
+        assert_eq!(
+            ChunkId::from_blake3_hex(
+                "z3f35a5b6a1d118e4f9f4c23b77d982c84e4c3f4d53172ac89eacd1d29d98f03",
+            ),
+            Err(LoomError::InvalidChunkHashCharacter { character: 'z' })
+        );
+    }
+
+    #[test]
+    fn cache_entries_validate_hydration_state_and_local_paths() {
+        let entry = CacheEntry::new(
+            object_id(),
+            HydrationState::Hydrated,
+            "objects/b3/a3/f3/object",
+            Some(128),
+            "2026-06-19T12:00:00Z",
+        )
+        .expect("cache entry creates");
+
+        assert_eq!(entry.hydration_state(), HydrationState::Hydrated);
+        assert!(entry.hydration_state().has_local_bytes());
+        assert!(entry.hydration_state().is_complete());
+        assert_eq!(entry.local_path(), Path::new("objects/b3/a3/f3/object"));
+
+        assert!(CacheEntry::new(
+            object_id(),
+            HydrationState::RemoteOnly,
+            "../escape",
+            None,
+            "2026-06-19T12:00:00Z",
+        )
+        .is_err());
+        assert!(!HydrationState::RemoteOnly.has_local_bytes());
+        assert!(HydrationState::Partial.has_local_bytes());
+        assert!(!HydrationState::Partial.is_complete());
     }
 
     #[test]
