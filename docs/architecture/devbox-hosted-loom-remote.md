@@ -1,7 +1,7 @@
 # Devbox Hosted Loom Remote
 
-PR6 makes Devbox a hosted storage boundary for Loom remotes without moving
-folder-state decisions out of Loom.
+Devbox is a hosted storage boundary for Loom remotes without moving folder-state
+decisions out of Loom.
 
 Devbox API owns:
 
@@ -33,15 +33,14 @@ loom sync <folder>
 loom clone devbox://<shared-folder-id>?api=...&session=...&device=... <target>
 ```
 
-The `devbox://...` URL is intentionally engine-facing. It includes local-dev
-session material so PR6 can prove the hosted remote path without adding product
-commands. PR7 should replace this with product UX such as `devbox login`,
-`devbox share`, `devbox clone`, pause/resume, and unlink.
+The `devbox://...` URL is intentionally engine-facing. Product flows should use
+`devbox login`, `devbox share`, `devbox clone`, pause/resume, and unlink instead
+of asking users to handle remote details.
 
 Known follow-up work:
 
 - replace deterministic local-dev sessions with production auth
-- issue clone/share tokens instead of embedding session material in URLs
+- issue clone/share tokens for engine URLs that still need delegated access
 - harden durable cloud storage behind the API boundary
 - add richer folder permissions beyond owner access
 - hide remote details from normal Devbox users

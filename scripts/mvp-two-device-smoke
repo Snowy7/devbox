@@ -8,7 +8,9 @@ Usage: scripts/mvp-two-device-smoke
 Runs a deterministic local MVP smoke test that proves:
   - Loom local-only capture/checkpoint works
   - Loom local remote sync/clone works
+  - Loom sparse clone, hydrate, evict, pin, and cache status work
   - Devbox hosted share/clone works through a local devbox-api
+  - Devbox hosted metadata/object split rejects object hash mismatches
   - Git metadata and generated dependencies are not materialized
   - Plain and nested folders materialize
   - Divergent sync refuses safely
@@ -119,6 +121,30 @@ record_expect_failure() {
   echo "[PASS] $name refused safely"
 }
 
+record_expected_http_refusal() {
+  local name="$1"
+  shift
+  local stdout_file="$evidence_dir/$name.stdout.log"
+  local stderr_file="$evidence_dir/$name.stderr.log"
+  echo "[RUN] $name (expecting HTTP refusal)"
+  if "$@" >"$stdout_file.raw" 2>"$stderr_file.raw"; then
+    redact_log <"$stdout_file.raw" >"$stdout_file"
+    redact_log <"$stderr_file.raw" >"$stderr_file"
+    rm -f "$stdout_file.raw" "$stderr_file.raw"
+    echo "[PASS] $name refused safely"
+  else
+    local code=$?
+    redact_log <"$stdout_file.raw" >"$stdout_file"
+    redact_log <"$stderr_file.raw" >"$stderr_file"
+    rm -f "$stdout_file.raw" "$stderr_file.raw"
+    echo "[FAIL] $name exited $code" >&2
+    tail -n 40 "$stderr_file" >&2 || true
+    echo "stdout=$stdout_file" >&2
+    echo "stderr=$stderr_file" >&2
+    exit "$code"
+  fi
+}
+
 expect_contains() {
   local path="$1"
   local needle="$2"
@@ -135,6 +161,28 @@ expect_file_text() {
 expect_absent() {
   local path="$1"
   [[ ! -e "$path" ]] || fail "unexpected path exists: $path"
+}
+
+hosted_object_hash_mismatch_probe() {
+  local api_url="$1"
+  local folder_id="$2"
+  local object_id="$3"
+  local session_token="$4"
+  local device_id="$5"
+
+  command -v curl >/dev/null 2>&1 || fail "curl is required for hosted object mismatch evidence"
+  local body_file="$evidence_dir/hosted-object-hash-mismatch.body.tmp"
+  local status
+  status="$(curl -sS -o "$body_file" -w '%{http_code}' \
+    -X PUT "$api_url/v1/loom/shared-folders/$folder_id/objects/$object_id" \
+    -H "authorization: Bearer $session_token" \
+    -H "x-devbox-device-id: $device_id" \
+    -H "content-type: application/octet-stream" \
+    --data-binary 'wrong hosted smoke bytes')"
+  echo "http_status=$status"
+  cat "$body_file"
+  rm -f "$body_file"
+  [[ "$status" == "400" ]] || return 1
 }
 
 path_for_bin() {
@@ -168,6 +216,7 @@ echo "evidence=$evidence_dir"
 engine_source="$workdir/engine-source"
 engine_remote="$workdir/engine-remote"
 engine_clone="$workdir/engine-clone"
+engine_sparse_clone="$workdir/engine-sparse-clone"
 plain_source="$workdir/plain-source"
 plain_remote="$workdir/plain-remote"
 plain_clone="$workdir/plain-clone"
@@ -217,6 +266,27 @@ expect_file_text "$engine_clone/apps/web/src/index.ts" "web"
 expect_absent "$engine_clone/.git"
 expect_absent "$engine_clone/node_modules"
 expect_absent "$engine_clone/apps/web/dist"
+record "06a-loom-sparse-clone" "$loom_bin" clone "$engine_remote" "$engine_sparse_clone" --sparse
+expect_contains "$evidence_dir/06a-loom-sparse-clone.stdout.log" "Mode: sparse metadata-only"
+expect_contains "$evidence_dir/06a-loom-sparse-clone.stdout.log" "Imported objects: 0"
+expect_absent "$engine_sparse_clone/README.md"
+record "06b-loom-sparse-cache-status" "$loom_bin" cache status "$engine_sparse_clone"
+expect_contains "$evidence_dir/06b-loom-sparse-cache-status.stdout.log" "remote-only: 3"
+record "06c-loom-sparse-hydrate-readme" "$loom_bin" hydrate "$engine_sparse_clone/README.md"
+expect_contains "$evidence_dir/06c-loom-sparse-hydrate-readme.stdout.log" "Fetched objects: 1"
+expect_file_text "$engine_sparse_clone/README.md" "engine source v2"
+record "06d-loom-sparse-cache-after-hydrate" "$loom_bin" cache status "$engine_sparse_clone"
+expect_contains "$evidence_dir/06d-loom-sparse-cache-after-hydrate.stdout.log" "hydrated: 1"
+record "06e-loom-sparse-evict-readme" "$loom_bin" evict "$engine_sparse_clone/README.md"
+expect_contains "$evidence_dir/06e-loom-sparse-evict-readme.stdout.log" "Removed: 1 files, 1 objects"
+expect_absent "$engine_sparse_clone/README.md"
+record "06f-loom-sparse-hydrate-api" "$loom_bin" hydrate "$engine_sparse_clone/apps/api/app.txt"
+expect_file_text "$engine_sparse_clone/apps/api/app.txt" "api"
+record "06g-loom-sparse-pin-api" "$loom_bin" pin "$engine_sparse_clone/apps/api/app.txt"
+record "06h-loom-sparse-cache-after-pin" "$loom_bin" cache status "$engine_sparse_clone"
+expect_contains "$evidence_dir/06h-loom-sparse-cache-after-pin.stdout.log" "pinned: 1 files"
+record_expect_failure "06i-loom-sparse-pinned-evict-refusal" "$loom_bin" evict "$engine_sparse_clone/apps/api/app.txt"
+expect_contains "$evidence_dir/06i-loom-sparse-pinned-evict-refusal.stderr.log" "path is pinned"
 
 record "07-plain-track" "$loom_bin" track "$plain_source"
 record "08-plain-remote-add" "$loom_bin" remote add local "$plain_remote" "$plain_source"
@@ -243,7 +313,7 @@ expect_contains "$evidence_dir/16-conflict-sync-refusal.stderr.log" "diverged"
 
 api_root="$workdir/api-root"
 api_log="$evidence_dir/17-devbox-api.log"
-"$devbox_api_bin" --root "$api_root" --bind 127.0.0.1:0 >"$api_log.raw" 2>&1 &
+DEVBOX_API_METADATA_MODE=memory "$devbox_api_bin" --root "$api_root" --bind 127.0.0.1:0 >"$api_log.raw" 2>&1 &
 api_pid=$!
 api_url=""
 for _ in $(seq 1 100); do
@@ -279,6 +349,17 @@ expect_file_text "$product_target/README.md" "product source"
 expect_file_text "$product_target/app/main.txt" "nested product file"
 expect_absent "$product_target/.git"
 expect_absent "$product_target/node_modules"
+product_folder_id="$(awk -F'\t' '$1 == "id" { print $2 }' "$product_source/.loom/metadata/shared_folder.tsv")"
+product_object_id="$(awk -F'\t' 'NF > 0 { print $1; exit }' "$product_source/.loom/metadata/cache_entries.tsv")"
+product_session_token="$(sed -nE 's/.*"session_token": "([^"]+)".*/\1/p' "$source_config/config.json" | head -n 1)"
+product_device_id="$(sed -nE 's/.*"device_id": "([^"]+)".*/\1/p' "$source_config/config.json" | head -n 1)"
+[[ -n "$product_folder_id" ]] || fail "could not read hosted shared folder id"
+[[ -n "$product_object_id" ]] || fail "could not read hosted object id"
+[[ -n "$product_session_token" ]] || fail "could not read hosted session token"
+[[ -n "$product_device_id" ]] || fail "could not read hosted device id"
+record_expected_http_refusal "21a-devbox-hosted-object-hash-mismatch" hosted_object_hash_mismatch_probe "$api_url" "$product_folder_id" "$product_object_id" "$product_session_token" "$product_device_id"
+expect_contains "$evidence_dir/21a-devbox-hosted-object-hash-mismatch.stdout.log" "http_status=400"
+expect_contains "$evidence_dir/21a-devbox-hosted-object-hash-mismatch.stdout.log" "object bytes do not match object id"
 
 printf 'product source after edit\n' > "$product_source/README.md"
 record "22-devbox-source-push-edit" env DEVBOX_CONFIG_DIR="$source_config" "$devbox_bin" resume "$product_source" --no-background-sync
@@ -303,8 +384,10 @@ API: $api_url
 
 Proofs:
 - Loom local-only capture/checkpoint/status works.
-- Loom local filesystem remote sync and clone work.
-- Devbox hosted login/share/clone works through local devbox-api.
+- Loom local filesystem remote sync and eager clone work.
+- Loom sparse clone, hydrate, evict, pin, and cache status work through a local filesystem remote.
+- Devbox hosted login/share/clone works eagerly through local devbox-api.
+- Devbox hosted metadata/object split stores metadata packs separately from object bytes and rejects mismatched object bytes.
 - Editing the source shared folder propagates to the target through sync.
 - Git metadata is preserved locally and not materialized into clones.
 - Generated dependency/build output directories are suppressed.
