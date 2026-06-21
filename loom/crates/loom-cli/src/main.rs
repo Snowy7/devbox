@@ -2,7 +2,7 @@ use devbox_remote::{
     provision_devbox_hosted_remote, DevboxHostedRemote, DevboxHostedRemoteConfig,
     DEVBOX_HOSTED_REMOTE_KIND,
 };
-use loom_core::{FileKind, RevisionBoundary};
+use loom_core::{FileKind, FileVersion, RevisionBoundary};
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
 use loom_store::{
     path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore, RemoteConfig,
@@ -15,8 +15,9 @@ use loom_sync::{
 };
 use loom_worktree::{
     cache_status_for_scope, diff_revision_to_capture, evaluate_directory_policy, evict_versions,
-    hydrate_versions, relative_scope_path, tracked_versions_for_scope, CaptureEngine,
-    CaptureRequest, DirectoryPolicyDecision, RestoreEngine, WorktreeCapture, WorktreeDiff,
+    hydrate_versions, prefetch_versions_for_scope, prune_cache_to_limit, relative_scope_path,
+    tracked_versions_for_scope, CaptureEngine, CaptureRequest, DirectoryPolicyDecision,
+    RestoreEngine, WorktreeCapture, WorktreeDiff, DEFAULT_PREFETCH_MAX_BYTES,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -122,10 +123,10 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "cache",
-        usage: "loom cache status [FOLDER]",
+        usage: "loom cache status [FOLDER]\n       loom cache prune --max-bytes <BYTES> [FOLDER]\n       loom cache prefetch [FOLDER] [--max-bytes <BYTES>]",
         summary: "Show local cache hydration state",
         implemented: true,
-        planned_behavior: "summarize hydrated, remote-only, and partial file counts",
+        planned_behavior: "summarize hydration, prune clean bytes over a limit, and prefetch small files",
     },
 ];
 
@@ -628,28 +629,7 @@ fn run_hydrate(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    let missing = versions
-        .iter()
-        .filter(|version| version.kind() == &FileKind::File)
-        .filter_map(|version| {
-            version
-                .object_id()
-                .filter(|object_id| !store.object_cache().exists(object_id))
-                .map(|object_id| (object_id.clone(), version.size_bytes()))
-        })
-        .collect::<Vec<_>>();
-    let mut fetched_objects = 0;
-    if !missing.is_empty() {
-        let remote_config = preferred_remote(&store)?;
-        let remote = remote_from_config(&remote_config)?;
-        for (object_id, size_bytes) in missing {
-            if hydrate_object_from_remote(&store, remote.as_ref(), &object_id, size_bytes)
-                .map_err(|error| error.to_string())?
-            {
-                fetched_objects += 1;
-            }
-        }
-    }
+    let fetched_objects = fetch_missing_objects(&store, &versions)?;
 
     let report = hydrate_versions(&store, &versions).map_err(|error| error.to_string())?;
     println!("Folder: {}", store.folder_root().display());
@@ -719,8 +699,10 @@ fn run_cache(args: &[String]) -> Result<(), String> {
         [subcommand, folder] if subcommand == "status" => {
             run_cache_status(Some(PathBuf::from(folder)))
         }
+        [subcommand, rest @ ..] if subcommand == "prune" => run_cache_prune(rest),
+        [subcommand, rest @ ..] if subcommand == "prefetch" => run_cache_prefetch(rest),
         _ => Err(
-            "cache command requires 'status [FOLDER]'\nUsage: loom cache status [FOLDER]"
+            "cache command requires 'status', 'prune', or 'prefetch'\nUsage: loom cache status [FOLDER]\n       loom cache prune --max-bytes <BYTES> [FOLDER]\n       loom cache prefetch [FOLDER] [--max-bytes <BYTES>]"
                 .to_string(),
         ),
     }
@@ -736,6 +718,72 @@ fn run_cache_status(folder: Option<PathBuf>) -> Result<(), String> {
     println!("  remote-only: {}", report.remote_only_files());
     println!("  partial: {}", report.partial_files());
     println!("  total files: {}", report.total_files());
+    println!("  hydrated bytes: {}", report.hydrated_bytes());
+    println!("  remote-only bytes: {}", report.remote_only_bytes());
+    println!(
+        "  pinned: {} files, {} bytes",
+        report.pinned_files(),
+        report.pinned_bytes()
+    );
+    println!(
+        "  evictable: {} files, {} bytes",
+        report.evictable_files(),
+        report.evictable_bytes()
+    );
+    Ok(())
+}
+
+fn run_cache_prune(args: &[String]) -> Result<(), String> {
+    let parsed = parse_cache_prune_args(args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let report = prune_cache_to_limit(&store, Path::new(""), parsed.max_bytes)
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Cache limit: {} bytes", report.limit_bytes());
+    println!(
+        "Hydrated bytes: {} -> {}",
+        report.hydrated_bytes_before(),
+        report.hydrated_bytes_after()
+    );
+    println!(
+        "Evicted: {} files, {} objects; already remote-only: {} files",
+        report.evicted_files(),
+        report.evicted_objects(),
+        report.already_remote_files()
+    );
+    println!(
+        "Skipped: {} pinned, {} dirty, {} unsupported",
+        report.skipped_pinned_files(),
+        report.skipped_dirty_files(),
+        report.skipped_unsupported_files()
+    );
+    Ok(())
+}
+
+fn run_cache_prefetch(args: &[String]) -> Result<(), String> {
+    let parsed = parse_cache_prefetch_args(args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let selection = prefetch_versions_for_scope(&store, Path::new(""), parsed.max_bytes)
+        .map_err(|error| error.to_string())?;
+    let fetched_objects = fetch_missing_objects(&store, selection.versions())?;
+    let report =
+        hydrate_versions(&store, selection.versions()).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Prefetch limit: {} bytes per file", parsed.max_bytes);
+    println!(
+        "Selected: {} files; skipped large: {} files",
+        selection.selected_files(),
+        selection.skipped_large_files()
+    );
+    println!("Fetched objects: {fetched_objects}");
+    println!(
+        "Materialized: {} files, {} folders, {} already present",
+        report.materialized_files(),
+        report.materialized_directories(),
+        report.already_materialized_files()
+    );
     Ok(())
 }
 
@@ -1067,6 +1115,34 @@ fn preferred_remote(store: &LocalStore) -> Result<RemoteConfig, String> {
         })
 }
 
+fn fetch_missing_objects(store: &LocalStore, versions: &[FileVersion]) -> Result<usize, String> {
+    let missing = versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter_map(|version| {
+            version
+                .object_id()
+                .filter(|object_id| !store.object_cache().exists(object_id))
+                .map(|object_id| (object_id.clone(), version.size_bytes()))
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(0);
+    }
+
+    let remote_config = preferred_remote(store)?;
+    let remote = remote_from_config(&remote_config)?;
+    let mut fetched_objects = 0;
+    for (object_id, size_bytes) in missing {
+        if hydrate_object_from_remote(store, remote.as_ref(), &object_id, size_bytes)
+            .map_err(|error| error.to_string())?
+        {
+            fetched_objects += 1;
+        }
+    }
+    Ok(fetched_objects)
+}
+
 fn local_pinned_scopes(store: &LocalStore) -> Result<Vec<PathBuf>, String> {
     let mut scopes = Vec::new();
     for pin in store.pins().map_err(|error| error.to_string())? {
@@ -1171,6 +1247,18 @@ struct SyncDaemonArgs {
     debounce_ms: u64,
     poll_ms: u64,
     max_cycles: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct CachePruneArgs {
+    folder: Option<PathBuf>,
+    max_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachePrefetchArgs {
+    folder: Option<PathBuf>,
+    max_bytes: u64,
 }
 
 fn parse_clone_args(args: &[String]) -> Result<CloneArgs, String> {
@@ -1319,6 +1407,65 @@ fn parse_sync_daemon_args(args: &[String], command: &str) -> Result<SyncDaemonAr
         poll_ms,
         max_cycles,
     })
+}
+
+fn parse_cache_prune_args(args: &[String]) -> Result<CachePruneArgs, String> {
+    let mut folder = None;
+    let mut max_bytes = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--max-bytes" {
+            index += 1;
+            max_bytes = Some(parse_u64_flag(
+                "--max-bytes",
+                args.get(index)
+                    .ok_or_else(|| "--max-bytes requires a value".to_string())?,
+            )?);
+        } else if let Some(value) = arg.strip_prefix("--max-bytes=") {
+            max_bytes = Some(parse_u64_flag("--max-bytes", value)?);
+        } else if arg.starts_with('-') {
+            return Err(format!("cache prune unknown option '{arg}'"));
+        } else if folder.replace(PathBuf::from(arg)).is_some() {
+            return Err("cache prune accepts at most one folder".to_string());
+        }
+        index += 1;
+    }
+
+    let max_bytes = max_bytes.ok_or_else(|| {
+        "cache prune requires --max-bytes <BYTES>\nUsage: loom cache prune --max-bytes <BYTES> [FOLDER]"
+            .to_string()
+    })?;
+
+    Ok(CachePruneArgs { folder, max_bytes })
+}
+
+fn parse_cache_prefetch_args(args: &[String]) -> Result<CachePrefetchArgs, String> {
+    let mut folder = None;
+    let mut max_bytes = DEFAULT_PREFETCH_MAX_BYTES;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--max-bytes" {
+            index += 1;
+            max_bytes = parse_u64_flag(
+                "--max-bytes",
+                args.get(index)
+                    .ok_or_else(|| "--max-bytes requires a value".to_string())?,
+            )?;
+        } else if let Some(value) = arg.strip_prefix("--max-bytes=") {
+            max_bytes = parse_u64_flag("--max-bytes", value)?;
+        } else if arg.starts_with('-') {
+            return Err(format!("cache prefetch unknown option '{arg}'"));
+        } else if folder.replace(PathBuf::from(arg)).is_some() {
+            return Err("cache prefetch accepts at most one folder".to_string());
+        }
+        index += 1;
+    }
+
+    Ok(CachePrefetchArgs { folder, max_bytes })
 }
 
 fn parse_optional_folder(args: &[String], command: &str) -> Result<Option<PathBuf>, String> {

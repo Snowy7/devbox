@@ -17,6 +17,7 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 const OLD_SECRET_SCAN_PREFIX_BYTES: usize = 1024 * 1024;
 const MAX_SECRET_FINDINGS: usize = 16;
+pub const DEFAULT_PREFETCH_MAX_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureRequest {
@@ -147,6 +148,12 @@ pub struct CacheStatusReport {
     remote_only_files: usize,
     partial_files: usize,
     total_files: usize,
+    hydrated_bytes: u64,
+    remote_only_bytes: u64,
+    pinned_files: usize,
+    pinned_bytes: u64,
+    evictable_files: usize,
+    evictable_bytes: u64,
 }
 
 impl CacheStatusReport {
@@ -164,6 +171,102 @@ impl CacheStatusReport {
 
     pub fn total_files(&self) -> usize {
         self.total_files
+    }
+
+    pub fn hydrated_bytes(&self) -> u64 {
+        self.hydrated_bytes
+    }
+
+    pub fn remote_only_bytes(&self) -> u64 {
+        self.remote_only_bytes
+    }
+
+    pub fn pinned_files(&self) -> usize {
+        self.pinned_files
+    }
+
+    pub fn pinned_bytes(&self) -> u64 {
+        self.pinned_bytes
+    }
+
+    pub fn evictable_files(&self) -> usize {
+        self.evictable_files
+    }
+
+    pub fn evictable_bytes(&self) -> u64 {
+        self.evictable_bytes
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CachePruneReport {
+    limit_bytes: u64,
+    hydrated_bytes_before: u64,
+    hydrated_bytes_after: u64,
+    evicted_files: usize,
+    evicted_objects: usize,
+    already_remote_files: usize,
+    skipped_pinned_files: usize,
+    skipped_dirty_files: usize,
+    skipped_unsupported_files: usize,
+}
+
+impl CachePruneReport {
+    pub fn limit_bytes(&self) -> u64 {
+        self.limit_bytes
+    }
+
+    pub fn hydrated_bytes_before(&self) -> u64 {
+        self.hydrated_bytes_before
+    }
+
+    pub fn hydrated_bytes_after(&self) -> u64 {
+        self.hydrated_bytes_after
+    }
+
+    pub fn evicted_files(&self) -> usize {
+        self.evicted_files
+    }
+
+    pub fn evicted_objects(&self) -> usize {
+        self.evicted_objects
+    }
+
+    pub fn already_remote_files(&self) -> usize {
+        self.already_remote_files
+    }
+
+    pub fn skipped_pinned_files(&self) -> usize {
+        self.skipped_pinned_files
+    }
+
+    pub fn skipped_dirty_files(&self) -> usize {
+        self.skipped_dirty_files
+    }
+
+    pub fn skipped_unsupported_files(&self) -> usize {
+        self.skipped_unsupported_files
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrefetchSelection {
+    versions: Vec<FileVersion>,
+    selected_files: usize,
+    skipped_large_files: usize,
+}
+
+impl PrefetchSelection {
+    pub fn versions(&self) -> &[FileVersion] {
+        &self.versions
+    }
+
+    pub fn selected_files(&self) -> usize {
+        self.selected_files
+    }
+
+    pub fn skipped_large_files(&self) -> usize {
+        self.skipped_large_files
     }
 }
 
@@ -790,6 +893,7 @@ pub fn cache_status_for_scope(
     scope: &Path,
 ) -> CaptureResult<CacheStatusReport> {
     let versions = tracked_versions_for_scope(store, scope)?;
+    let pinned_scopes = local_materialization_pin_scopes(store)?;
     let mut report = CacheStatusReport::default();
     for version in versions {
         if version.kind() != &FileKind::File {
@@ -799,6 +903,7 @@ pub fn cache_status_for_scope(
             continue;
         };
         report.total_files += 1;
+        let size_bytes = version.size_bytes().unwrap_or(0);
         let state = if store.object_cache().exists(object_id) {
             HydrationState::Hydrated
         } else {
@@ -809,13 +914,135 @@ pub fn cache_status_for_scope(
                 .unwrap_or(HydrationState::RemoteOnly)
         };
         match state {
-            HydrationState::Hydrated => report.hydrated_files += 1,
-            HydrationState::RemoteOnly => report.remote_only_files += 1,
+            HydrationState::Hydrated => {
+                report.hydrated_files += 1;
+                report.hydrated_bytes += size_bytes;
+            }
+            HydrationState::RemoteOnly => {
+                report.remote_only_files += 1;
+                report.remote_only_bytes += size_bytes;
+            }
             HydrationState::Partial => report.partial_files += 1,
+        }
+
+        let pinned = pinned_scopes
+            .iter()
+            .any(|pinned_scope| paths_overlap(version.path(), pinned_scope));
+        if pinned {
+            report.pinned_files += 1;
+            report.pinned_bytes += size_bytes;
+            continue;
+        }
+
+        if state == HydrationState::Hydrated
+            && matches!(
+                classify_evictability(store, &version, object_id)?,
+                Evictability::Clean
+            )
+        {
+            report.evictable_files += 1;
+            report.evictable_bytes += size_bytes;
         }
     }
 
     Ok(report)
+}
+
+pub fn prune_cache_to_limit(
+    store: &LocalStore,
+    scope: &Path,
+    max_bytes: u64,
+) -> CaptureResult<CachePruneReport> {
+    let pinned_scopes = local_materialization_pin_scopes(store)?;
+    let before = cache_status_for_scope(store, scope)?;
+    let mut report = CachePruneReport {
+        limit_bytes: max_bytes,
+        hydrated_bytes_before: before.hydrated_bytes(),
+        hydrated_bytes_after: before.hydrated_bytes(),
+        ..CachePruneReport::default()
+    };
+    if before.hydrated_bytes() <= max_bytes {
+        return Ok(report);
+    }
+
+    let mut versions = tracked_versions_for_scope(store, scope)?
+        .into_iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter(|version| {
+            version
+                .object_id()
+                .is_some_and(|object_id| store.object_cache().exists(object_id))
+        })
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| {
+        path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
+    });
+
+    for version in versions {
+        if report.hydrated_bytes_after <= max_bytes {
+            break;
+        }
+
+        if pinned_scopes
+            .iter()
+            .any(|pinned_scope| paths_overlap(version.path(), pinned_scope))
+        {
+            report.skipped_pinned_files += 1;
+            continue;
+        }
+
+        let object_id = version
+            .object_id()
+            .ok_or_else(|| CaptureError::UnsafeRestore {
+                path: version.path().to_path_buf(),
+                reason: "file version has no content object".to_string(),
+            })?;
+        match classify_evictability(store, &version, object_id)? {
+            Evictability::Clean => {
+                let evicted = evict_versions(store, &[version], &pinned_scopes)?;
+                report.evicted_files += evicted.evicted_files();
+                report.evicted_objects += evicted.evicted_objects();
+                report.already_remote_files += evicted.already_remote_files();
+                report.hydrated_bytes_after =
+                    cache_status_for_scope(store, scope)?.hydrated_bytes();
+            }
+            Evictability::Dirty => report.skipped_dirty_files += 1,
+            Evictability::Unsupported => report.skipped_unsupported_files += 1,
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn prefetch_versions_for_scope(
+    store: &LocalStore,
+    scope: &Path,
+    max_bytes: u64,
+) -> CaptureResult<PrefetchSelection> {
+    let mut selection = PrefetchSelection::default();
+    let mut versions = tracked_versions_for_scope(store, scope)?
+        .into_iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| {
+        path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
+    });
+
+    for version in versions {
+        let size_bytes = version.size_bytes().unwrap_or(u64::MAX);
+        if size_bytes > max_bytes {
+            selection.skipped_large_files += 1;
+            continue;
+        }
+        if version.object_id().is_none() {
+            continue;
+        }
+
+        selection.selected_files += 1;
+        selection.versions.push(version);
+    }
+
+    Ok(selection)
 }
 
 pub fn diff_revision_to_capture(
@@ -1232,6 +1459,52 @@ fn ensure_file_matches_object(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Evictability {
+    Clean,
+    Dirty,
+    Unsupported,
+}
+
+fn classify_evictability(
+    store: &LocalStore,
+    version: &FileVersion,
+    object_id: &ObjectId,
+) -> CaptureResult<Evictability> {
+    let target = store.folder_root().join(version.path());
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(Evictability::Unsupported),
+        Ok(metadata) if metadata.is_file() => {
+            match ensure_file_matches_object(version.path(), &target, object_id) {
+                Ok(()) => Ok(Evictability::Clean),
+                Err(CaptureError::UnsafeRestore { .. }) => Ok(Evictability::Dirty),
+                Err(error) => Err(error),
+            }
+        }
+        Ok(_) => Ok(Evictability::Unsupported),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(Evictability::Clean),
+        Err(source) => Err(CaptureError::Io {
+            path: target,
+            source,
+        }),
+    }
+}
+
+fn local_materialization_pin_scopes(store: &LocalStore) -> CaptureResult<Vec<PathBuf>> {
+    let mut scopes = Vec::new();
+    for pin in store.pins().map_err(CaptureError::Store)? {
+        let Some(path) = pin.reason().strip_prefix("materialization-pin path=") else {
+            continue;
+        };
+        scopes.push(if path == "." {
+            PathBuf::new()
+        } else {
+            path.split('/').collect()
+        });
+    }
+    Ok(scopes)
 }
 
 fn validate_materialization_scope(relative_path: &Path) -> CaptureResult<()> {
