@@ -992,6 +992,7 @@ fn product_sync_error(error: SyncError) -> String {
         SyncError::MissingRemotePack(_)
         | SyncError::MissingRevision(_)
         | SyncError::MissingObjectPayload(_)
+        | SyncError::MissingObjectSize(_)
         | SyncError::Pack(_) => {
             "Devbox could not read the latest shared folder data; try again".to_string()
         }
