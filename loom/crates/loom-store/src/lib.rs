@@ -88,14 +88,7 @@ impl ObjectRef {
     }
 
     pub fn object_ref(&self) -> String {
-        format!(
-            "{}/{}/{}/{}/{}",
-            OBJECTS_DIR,
-            HASH_ALGORITHM_DIR,
-            &self.id.as_str()[0..2],
-            &self.id.as_str()[2..4],
-            self.id
-        )
+        object_ref_for_id(&self.id)
     }
 
     pub fn size_bytes(&self) -> u64 {
@@ -681,6 +674,22 @@ impl LocalStore {
         &self.object_cache
     }
 
+    pub fn write_object_bytes(&self, bytes: impl AsRef<[u8]>) -> StoreResult<ObjectRef> {
+        let object = self.object_cache.write_bytes(bytes)?;
+        self.record_object_hydrated(&object)?;
+        Ok(object)
+    }
+
+    pub fn import_object_bytes(
+        &self,
+        expected_id: &ObjectId,
+        bytes: impl AsRef<[u8]>,
+    ) -> StoreResult<ObjectRef> {
+        let object = self.object_cache.import_bytes(expected_id, bytes)?;
+        self.record_object_hydrated(&object)?;
+        Ok(object)
+    }
+
     pub fn cache_entries(&self) -> StoreResult<Vec<CacheEntry>> {
         Ok(self.load_cache_entries()?.into_values().collect())
     }
@@ -695,6 +704,29 @@ impl LocalStore {
             HydrationState::Hydrated,
             object.object_ref(),
             Some(object.size_bytes()),
+            current_timestamp(),
+        )?;
+        self.upsert_cache_entry(entry.clone())?;
+        Ok(entry)
+    }
+
+    pub fn record_cached_object_hydrated(
+        &self,
+        object_id: &ObjectId,
+        size_bytes: u64,
+    ) -> StoreResult<CacheEntry> {
+        if !self.object_cache.exists(object_id) {
+            return Err(StoreError::MissingObject {
+                id: object_id.clone(),
+                path: self.object_cache.path_for(object_id),
+            });
+        }
+
+        let entry = CacheEntry::new(
+            object_id.clone(),
+            HydrationState::Hydrated,
+            object_ref_for_id(object_id),
+            Some(size_bytes),
             current_timestamp(),
         )?;
         self.upsert_cache_entry(entry.clone())?;
@@ -1481,6 +1513,17 @@ fn default_shared_folder(folder_root: &Path) -> StoreResult<SharedFolder> {
         .unwrap_or_else(|| folder_root.display().to_string());
 
     SharedFolder::new(id, folder_root, display_name, FolderScope::WholeFolder).map_err(Into::into)
+}
+
+fn object_ref_for_id(id: &ObjectId) -> String {
+    format!(
+        "{}/{}/{}/{}/{}",
+        OBJECTS_DIR,
+        HASH_ALGORITHM_DIR,
+        &id.as_str()[0..2],
+        &id.as_str()[2..4],
+        id
+    )
 }
 
 fn non_empty_metadata_value(kind: &'static str, value: String) -> StoreResult<String> {

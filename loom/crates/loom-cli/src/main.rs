@@ -642,7 +642,7 @@ fn capture_worktree(
     boundary: RevisionBoundary,
 ) -> Result<WorktreeCapture, String> {
     let request = CaptureRequest::new(store.shared_folder().clone(), boundary);
-    let capture = CaptureEngine::new(store.object_cache())
+    let capture = CaptureEngine::new(store)
         .capture(&request)
         .map_err(|error| error.to_string())?;
     Ok(capture)

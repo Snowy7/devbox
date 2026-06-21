@@ -7,7 +7,7 @@ use loom_core::{
     FileKind, FileVersion, FileVersionId, FolderRevision, FolderRevisionId, LoomError,
     RevisionBoundary, SharedFolder,
 };
-use loom_store::{path_to_store_string, LocalStore, ObjectCache, StoreError, STORE_DIR};
+use loom_store::{path_to_store_string, LocalStore, StoreError, STORE_DIR};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -237,12 +237,12 @@ impl<'a> RestoreEngine<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CaptureEngine<'a> {
-    object_cache: &'a ObjectCache,
+    store: &'a LocalStore,
 }
 
 impl<'a> CaptureEngine<'a> {
-    pub fn new(object_cache: &'a ObjectCache) -> Self {
-        Self { object_cache }
+    pub fn new(store: &'a LocalStore) -> Self {
+        Self { store }
     }
 
     pub fn capture(&self, request: &CaptureRequest) -> CaptureResult<WorktreeCapture> {
@@ -265,7 +265,7 @@ impl<'a> CaptureEngine<'a> {
         })?;
         let captured_at = current_timestamp();
         let mut capture = WorktreeCapture::new(root.clone(), captured_at.clone());
-        walk_directory(self.object_cache, &root, &root, &captured_at, &mut capture)?;
+        walk_directory(self.store, &root, &root, &captured_at, &mut capture)?;
         capture.file_versions.sort_by(|left, right| {
             path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
         });
@@ -844,7 +844,7 @@ fn restore_remove_dir_error(
 }
 
 fn walk_directory(
-    object_cache: &ObjectCache,
+    store: &LocalStore,
     root: &Path,
     path: &Path,
     captured_at: &str,
@@ -882,17 +882,11 @@ fn walk_directory(
                 }
                 DirectoryPolicyDecision::Include => {
                     capture_directory(&relative_path, captured_at, capture)?;
-                    walk_directory(object_cache, root, &entry_path, captured_at, capture)?;
+                    walk_directory(store, root, &entry_path, captured_at, capture)?;
                 }
             }
         } else if metadata.is_file() {
-            capture_file(
-                object_cache,
-                &entry_path,
-                &relative_path,
-                captured_at,
-                capture,
-            )?;
+            capture_file(store, &entry_path, &relative_path, captured_at, capture)?;
         } else if metadata.file_type().is_symlink() {
             capture.summary.deferred_entries += 1;
             capture.deferred.push(CaptureNotice::new(
@@ -930,7 +924,7 @@ fn capture_directory(
 }
 
 fn capture_file(
-    object_cache: &ObjectCache,
+    store: &LocalStore,
     path: &Path,
     relative_path: &Path,
     captured_at: &str,
@@ -947,7 +941,7 @@ fn capture_file(
         return Ok(());
     }
 
-    let object = object_cache.write_bytes(&bytes)?;
+    let object = store.write_object_bytes(&bytes)?;
     let size_bytes = object.size_bytes();
     let version = FileVersion::new(
         stable_file_version_id(
@@ -1280,7 +1274,7 @@ fn looks_like_text(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loom_core::{FolderScope, SharedFolderId};
+    use loom_core::{FolderScope, HydrationState, SharedFolderId};
     use loom_store::LocalStore;
     use std::fs;
 
@@ -1329,6 +1323,29 @@ mod tests {
             .ignored()
             .iter()
             .any(|notice| notice.relative_path() == Path::new("node_modules")));
+    }
+
+    #[test]
+    fn normal_capture_records_hydrated_cache_metadata() {
+        let fixture = TestFolder::new();
+        fixture.write("src/main.rs", "fn main() {}\n");
+
+        let capture = fixture.capture();
+        let file = capture
+            .file_versions()
+            .iter()
+            .find(|version| version.path() == Path::new("src/main.rs"))
+            .expect("captured file exists");
+        let object_id = file.object_id().expect("captured file has object id");
+        let reopened = LocalStore::open(&fixture.root).expect("store reopens");
+        let entry = reopened
+            .cache_entry(object_id)
+            .expect("cache metadata reads")
+            .expect("cache metadata exists");
+
+        assert_eq!(entry.object_id(), object_id);
+        assert_eq!(entry.hydration_state(), HydrationState::Hydrated);
+        assert_eq!(entry.size_bytes(), file.size_bytes());
     }
 
     #[test]
@@ -1619,7 +1636,7 @@ mod tests {
                 self.store.shared_folder().clone(),
                 RevisionBoundary::LoomCommand,
             );
-            CaptureEngine::new(self.store.object_cache())
+            CaptureEngine::new(&self.store)
                 .capture(&request)
                 .expect("capture succeeds")
         }
