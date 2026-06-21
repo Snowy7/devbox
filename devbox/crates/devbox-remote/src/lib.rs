@@ -179,7 +179,7 @@ impl DevboxHostedRemote {
 
 impl LoomRemote for DevboxHostedRemote {
     fn object_transfer_capability(&self) -> ObjectTransferCapability {
-        ObjectTransferCapability::InlinePackObjects
+        ObjectTransferCapability::SeparateObjects
     }
 
     fn get_cursor(&self, cursor_id: &str) -> SyncResult<Option<FolderRevisionId>> {
@@ -295,21 +295,64 @@ impl LoomRemote for DevboxHostedRemote {
     }
 
     fn has_object(&self, object_id: &ObjectId) -> SyncResult<bool> {
-        Err(SyncError::RemoteTransport(format!(
-            "devbox hosted remote does not expose separate object availability yet for {object_id}"
-        )))
+        let object = validate_remote_segment(object_id.as_str(), "object id")?;
+        let url = self
+            .config
+            .url(&self.config.loom_path(&format!("objects/{object}")));
+        let response = self.call("HEAD", &url, None)?;
+        match response.status {
+            200 => Ok(true),
+            401 | 403 => Err(SyncError::RemoteAuth(format!(
+                "devbox hosted object availability check failed with HTTP status {}",
+                response.status
+            ))),
+            404 => Ok(false),
+            status => Err(SyncError::RemoteTransport(format!(
+                "devbox hosted object availability check failed with HTTP status {status}"
+            ))),
+        }
     }
 
-    fn put_object(&self, object_id: &ObjectId, _bytes: &[u8]) -> SyncResult<()> {
-        Err(SyncError::RemoteTransport(format!(
-            "devbox hosted remote does not expose separate object upload yet for {object_id}"
-        )))
+    fn put_object(&self, object_id: &ObjectId, bytes: &[u8]) -> SyncResult<()> {
+        let object = validate_remote_segment(object_id.as_str(), "object id")?;
+        let url = self
+            .config
+            .url(&self.config.loom_path(&format!("objects/{object}")));
+        let response = self.call("PUT", &url, Some(bytes))?;
+        match response.status {
+            200 | 201 => Ok(()),
+            401 | 403 => Err(SyncError::RemoteAuth(format!(
+                "devbox hosted object upload failed with HTTP status {}",
+                response.status
+            ))),
+            409 => Err(SyncError::RemoteTransport(
+                "devbox hosted object upload conflicted with different bytes".to_string(),
+            )),
+            status => Err(SyncError::RemoteTransport(format!(
+                "devbox hosted object upload failed with HTTP status {status}"
+            ))),
+        }
     }
 
     fn get_object(&self, object_id: &ObjectId) -> SyncResult<Vec<u8>> {
-        Err(SyncError::RemoteTransport(format!(
-            "devbox hosted remote does not expose separate object download yet for {object_id}"
-        )))
+        let object = validate_remote_segment(object_id.as_str(), "object id")?;
+        let url = self
+            .config
+            .url(&self.config.loom_path(&format!("objects/{object}")));
+        let response = self.call("GET", &url, None)?;
+        match response.status {
+            200 => Ok(response.bytes),
+            401 | 403 => Err(SyncError::RemoteAuth(format!(
+                "devbox hosted object download failed with HTTP status {}",
+                response.status
+            ))),
+            404 => Err(SyncError::RemoteTransport(format!(
+                "devbox hosted object {object_id} was not found"
+            ))),
+            status => Err(SyncError::RemoteTransport(format!(
+                "devbox hosted object download failed with HTTP status {status}"
+            ))),
+        }
     }
 }
 
@@ -504,7 +547,7 @@ mod tests {
     use super::*;
     use loom_core::RevisionBoundary;
     use loom_store::LocalStore;
-    use loom_sync::{sync_store_to_remote, DEFAULT_CURSOR_ID};
+    use loom_sync::{import_pack_from_remote, sync_store_to_remote, DEFAULT_CURSOR_ID};
     use std::fs;
 
     #[test]
@@ -547,6 +590,7 @@ mod tests {
         let pack = remote.get_pack(revision.id()).expect("pack reads");
 
         assert_eq!(report.latest_revision_id, *revision.id());
+        assert_eq!(report.uploaded_objects, 1);
         assert_eq!(
             remote
                 .get_cursor(DEFAULT_CURSOR_ID)
@@ -555,12 +599,37 @@ mod tests {
             Some(revision.id())
         );
         assert_eq!(pack.manifest.latest_revision_id, *revision.id());
+        assert_eq!(pack.manifest.object_count(), 1);
+        assert_eq!(pack.inline_object_count(), 0);
+        assert!(remote.has_object(object.id()).expect("object head reads"));
+        assert_eq!(
+            remote.get_object(object.id()).expect("object downloads"),
+            b"hello\n"
+        );
         assert!(provisioned.config.clone_url().starts_with("devbox://"));
         assert_eq!(
             DevboxHostedRemoteConfig::from_clone_url(&provisioned.config.clone_url())
                 .expect("clone URL parses")
                 .shared_folder_id(),
             store.shared_folder().id()
+        );
+
+        let target_folder = dir.path().join("target");
+        let target_store = LocalStore::init_clone(
+            &target_folder,
+            pack.manifest.shared_folder_id.clone(),
+            pack.manifest.display_name.clone(),
+        )
+        .expect("target store initializes");
+        let import = import_pack_from_remote(&target_store, &pack, &remote)
+            .expect("metadata pack hydrates from hosted object storage");
+        assert_eq!(import.imported_objects, 1);
+        assert_eq!(
+            target_store
+                .object_cache()
+                .read(object.id())
+                .expect("target object reads"),
+            b"hello\n"
         );
     }
 
@@ -591,6 +660,62 @@ mod tests {
                 attempted,
                 ..
             } if expected.is_none() && actual == Some(first) && attempted == second
+        ));
+    }
+
+    #[test]
+    fn devbox_hosted_remote_refuses_unauthorized_pack_and_object_access() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api =
+            devbox_api::spawn_local_test_server(dir.path().join("api")).expect("api server starts");
+        let folder = dir.path().join("source");
+        fs::create_dir_all(&folder).expect("folder creates");
+        let store = LocalStore::open_or_init(&folder)
+            .expect("store initializes")
+            .into_store();
+        let object = store
+            .object_cache()
+            .write_bytes(b"secret hosted object\n")
+            .expect("object");
+        let version = loom_core::FileVersion::new(
+            loom_core::FileVersionId::new("file-version-auth").expect("file version id"),
+            "README.md",
+            loom_core::FileKind::File,
+            Some(object.id().clone()),
+            Some(object.size_bytes()),
+            "unix:1",
+        )
+        .expect("file version");
+        let revision = store
+            .coalesce_folder_revision(RevisionBoundary::Sync, &[version])
+            .expect("revision")
+            .revision()
+            .clone();
+        let provisioned = provision_devbox_hosted_remote(
+            api.base_url(),
+            store.shared_folder().id(),
+            store.shared_folder().display_name(),
+        )
+        .expect("remote provisions");
+        let remote = DevboxHostedRemote::new(provisioned.config.clone());
+        sync_store_to_remote(&store, &remote).expect("sync succeeds");
+        let unauthorized = DevboxHostedRemote::new(
+            DevboxHostedRemoteConfig::new(
+                api.base_url(),
+                store.shared_folder().id().clone(),
+                "wrong-session-token",
+                provisioned.config.device_id().to_string(),
+            )
+            .expect("config builds"),
+        );
+
+        assert!(matches!(
+            unauthorized.get_pack(revision.id()),
+            Err(SyncError::RemoteAuth(_))
+        ));
+        assert!(matches!(
+            unauthorized.get_object(object.id()),
+            Err(SyncError::RemoteAuth(_))
         ));
     }
 }
