@@ -795,6 +795,7 @@ pub fn evict_versions(
     store: &LocalStore,
     selected_versions: &[FileVersion],
     pinned_scopes: &[PathBuf],
+    remote_available_objects: &BTreeSet<ObjectId>,
 ) -> CaptureResult<EvictReport> {
     let mut report = EvictReport::default();
     let latest_versions = tracked_versions_for_scope(store, Path::new(""))?;
@@ -825,6 +826,12 @@ pub fn evict_versions(
                 path: version.path().to_path_buf(),
                 reason: "file version has no content object".to_string(),
             })?;
+        if !remote_available_objects.contains(object_id) {
+            return Err(CaptureError::UnsafeRestore {
+                path: version.path().to_path_buf(),
+                reason: "refusing to evict without a proven remote object copy".to_string(),
+            });
+        }
         let target = store.folder_root().join(version.path());
         match fs::symlink_metadata(&target) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -891,6 +898,7 @@ pub fn evict_versions(
 pub fn cache_status_for_scope(
     store: &LocalStore,
     scope: &Path,
+    remote_available_objects: &BTreeSet<ObjectId>,
 ) -> CaptureResult<CacheStatusReport> {
     let versions = tracked_versions_for_scope(store, scope)?;
     let pinned_scopes = local_materialization_pin_scopes(store)?;
@@ -904,15 +912,7 @@ pub fn cache_status_for_scope(
         };
         report.total_files += 1;
         let size_bytes = version.size_bytes().unwrap_or(0);
-        let state = if store.object_cache().exists(object_id) {
-            HydrationState::Hydrated
-        } else {
-            store
-                .cache_entry(object_id)
-                .map_err(CaptureError::Store)?
-                .map(|entry| entry.hydration_state())
-                .unwrap_or(HydrationState::RemoteOnly)
-        };
+        let state = materialization_state_for_version(store, &version, object_id)?;
         match state {
             HydrationState::Hydrated => {
                 report.hydrated_files += 1;
@@ -935,6 +935,7 @@ pub fn cache_status_for_scope(
         }
 
         if state == HydrationState::Hydrated
+            && remote_available_objects.contains(object_id)
             && matches!(
                 classify_evictability(store, &version, object_id)?,
                 Evictability::Clean
@@ -952,9 +953,10 @@ pub fn prune_cache_to_limit(
     store: &LocalStore,
     scope: &Path,
     max_bytes: u64,
+    remote_available_objects: &BTreeSet<ObjectId>,
 ) -> CaptureResult<CachePruneReport> {
     let pinned_scopes = local_materialization_pin_scopes(store)?;
-    let before = cache_status_for_scope(store, scope)?;
+    let before = cache_status_for_scope(store, scope, remote_available_objects)?;
     let mut report = CachePruneReport {
         limit_bytes: max_bytes,
         hydrated_bytes_before: before.hydrated_bytes(),
@@ -969,9 +971,10 @@ pub fn prune_cache_to_limit(
         .into_iter()
         .filter(|version| version.kind() == &FileKind::File)
         .filter(|version| {
-            version
-                .object_id()
-                .is_some_and(|object_id| store.object_cache().exists(object_id))
+            version.object_id().is_some_and(|object_id| {
+                remote_available_objects.contains(object_id)
+                    && store.object_cache().exists(object_id)
+            })
         })
         .collect::<Vec<_>>();
     versions.sort_by(|left, right| {
@@ -999,12 +1002,14 @@ pub fn prune_cache_to_limit(
             })?;
         match classify_evictability(store, &version, object_id)? {
             Evictability::Clean => {
-                let evicted = evict_versions(store, &[version], &pinned_scopes)?;
+                let evicted =
+                    evict_versions(store, &[version], &pinned_scopes, remote_available_objects)?;
                 report.evicted_files += evicted.evicted_files();
                 report.evicted_objects += evicted.evicted_objects();
                 report.already_remote_files += evicted.already_remote_files();
                 report.hydrated_bytes_after =
-                    cache_status_for_scope(store, scope)?.hydrated_bytes();
+                    cache_status_for_scope(store, scope, remote_available_objects)?
+                        .hydrated_bytes();
             }
             Evictability::Dirty => report.skipped_dirty_files += 1,
             Evictability::Unsupported => report.skipped_unsupported_files += 1,
@@ -1485,6 +1490,40 @@ fn classify_evictability(
         }
         Ok(_) => Ok(Evictability::Unsupported),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(Evictability::Clean),
+        Err(source) => Err(CaptureError::Io {
+            path: target,
+            source,
+        }),
+    }
+}
+
+fn materialization_state_for_version(
+    store: &LocalStore,
+    version: &FileVersion,
+    object_id: &ObjectId,
+) -> CaptureResult<HydrationState> {
+    let target = store.folder_root().join(version.path());
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(HydrationState::Partial),
+        Ok(metadata) if metadata.is_file() => {
+            match ensure_file_matches_object(version.path(), &target, object_id) {
+                Ok(()) => Ok(HydrationState::Hydrated),
+                Err(CaptureError::UnsafeRestore { .. }) => Ok(HydrationState::Partial),
+                Err(error) => Err(error),
+            }
+        }
+        Ok(_) => Ok(HydrationState::Partial),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            if store.object_cache().exists(object_id) {
+                Ok(HydrationState::Partial)
+            } else {
+                Ok(store
+                    .cache_entry(object_id)
+                    .map_err(CaptureError::Store)?
+                    .map(|entry| entry.hydration_state())
+                    .unwrap_or(HydrationState::RemoteOnly))
+            }
+        }
         Err(source) => Err(CaptureError::Io {
             path: target,
             source,

@@ -453,8 +453,9 @@ fn cache_status_prune_and_prefetch_keep_sparse_cache_bounded() {
     let hydrated_status = run_loom(["cache", "status", target.to_str().expect("UTF-8 path")]);
     assert_success(&hydrated_status);
     let hydrated_status_stdout = stdout(&hydrated_status);
-    assert!(hydrated_status_stdout.contains("hydrated: 3"));
+    assert!(hydrated_status_stdout.contains("hydrated: 2"));
     assert!(hydrated_status_stdout.contains("remote-only: 1"));
+    assert!(hydrated_status_stdout.contains("partial: 1"));
     assert!(hydrated_status_stdout.contains("pinned: 1 files, 6 bytes"));
     assert!(hydrated_status_stdout.contains("evictable: 1 files, 8 bytes"));
 
@@ -476,6 +477,90 @@ fn cache_status_prune_and_prefetch_keep_sparse_cache_bounded() {
         std::fs::read_to_string(target.join("src").join("main.rs")).expect("dirty reads"),
         "dirty local change\n"
     );
+}
+
+#[test]
+fn cache_prune_refuses_without_remote_object_proof() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "local only\n").expect("readme writes");
+
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let prune = run_loom([
+        "cache",
+        "prune",
+        "--max-bytes",
+        "0",
+        fixture.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!prune.status.success());
+    assert!(stderr(&prune).contains("no Loom remote is configured"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("README.md")).expect("readme reads"),
+        "local only\n"
+    );
+
+    let status = run_loom(["cache", "status", fixture.to_str().expect("UTF-8 path")]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("hydrated: 1"));
+    assert!(status_stdout.contains("evictable: 0 files, 0 bytes"));
+}
+
+#[test]
+fn cache_status_counts_materialized_duplicate_objects_once_per_present_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("a.txt"), "same text\n").expect("a writes");
+    std::fs::write(source.join("b.txt"), "same text\n").expect("b writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+    assert_success(&run_loom(["hydrate", target.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "pin",
+        target.join("a.txt").to_str().expect("UTF-8 path"),
+    ]));
+
+    let prune = run_loom([
+        "cache",
+        "prune",
+        "--max-bytes",
+        "0",
+        target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&prune);
+    assert!(target.join("a.txt").exists());
+    assert!(!target.join("b.txt").exists());
+
+    let status = run_loom(["cache", "status", target.to_str().expect("UTF-8 path")]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("hydrated: 1"));
+    assert!(status_stdout.contains("partial: 1"));
+    assert!(status_stdout.contains("hydrated bytes: 10"));
+    assert!(status_stdout.contains("pinned: 1 files, 10 bytes"));
+    assert!(status_stdout.contains("evictable: 0 files, 0 bytes"));
+    assert!(!status_stdout.contains("hydrated bytes: 20"));
 }
 
 #[test]

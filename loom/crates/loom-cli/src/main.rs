@@ -19,6 +19,7 @@ use loom_worktree::{
     tracked_versions_for_scope, CaptureEngine, CaptureRequest, DirectoryPolicyDecision,
     RestoreEngine, WorktreeCapture, WorktreeDiff, DEFAULT_PREFETCH_MAX_BYTES,
 };
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -657,8 +658,10 @@ fn run_evict(args: &[String]) -> Result<(), String> {
         ));
     }
     let pinned_scopes = local_pinned_scopes(&store)?;
-    let report =
-        evict_versions(&store, &versions, &pinned_scopes).map_err(|error| error.to_string())?;
+    let remote_available_objects =
+        remote_available_objects_for_versions(&store, &versions, "evict")?;
+    let report = evict_versions(&store, &versions, &pinned_scopes, &remote_available_objects)
+        .map_err(|error| error.to_string())?;
     println!("Folder: {}", store.folder_root().display());
     println!("Evicted: {}", path_to_store_string(&scope));
     println!(
@@ -710,8 +713,11 @@ fn run_cache(args: &[String]) -> Result<(), String> {
 
 fn run_cache_status(folder: Option<PathBuf>) -> Result<(), String> {
     let store = open_store_from_optional_folder(folder)?;
-    let report =
-        cache_status_for_scope(&store, Path::new("")).map_err(|error| error.to_string())?;
+    let versions =
+        tracked_versions_for_scope(&store, Path::new("")).map_err(|error| error.to_string())?;
+    let remote_available_objects = best_effort_remote_available_objects(&store, &versions);
+    let report = cache_status_for_scope(&store, Path::new(""), &remote_available_objects)
+        .map_err(|error| error.to_string())?;
     println!("Folder: {}", store.folder_root().display());
     println!("Cache status:");
     println!("  hydrated: {}", report.hydrated_files());
@@ -736,8 +742,23 @@ fn run_cache_status(folder: Option<PathBuf>) -> Result<(), String> {
 fn run_cache_prune(args: &[String]) -> Result<(), String> {
     let parsed = parse_cache_prune_args(args)?;
     let store = open_store_from_optional_folder(parsed.folder)?;
-    let report = prune_cache_to_limit(&store, Path::new(""), parsed.max_bytes)
+    let versions =
+        tracked_versions_for_scope(&store, Path::new("")).map_err(|error| error.to_string())?;
+    let no_remote_proof = BTreeSet::new();
+    let current_status = cache_status_for_scope(&store, Path::new(""), &no_remote_proof)
         .map_err(|error| error.to_string())?;
+    let remote_available_objects = if current_status.hydrated_bytes() > parsed.max_bytes {
+        remote_available_objects_for_versions(&store, &versions, "cache prune")?
+    } else {
+        no_remote_proof
+    };
+    let report = prune_cache_to_limit(
+        &store,
+        Path::new(""),
+        parsed.max_bytes,
+        &remote_available_objects,
+    )
+    .map_err(|error| error.to_string())?;
 
     println!("Folder: {}", store.folder_root().display());
     println!("Cache limit: {} bytes", report.limit_bytes());
@@ -1141,6 +1162,73 @@ fn fetch_missing_objects(store: &LocalStore, versions: &[FileVersion]) -> Result
         }
     }
     Ok(fetched_objects)
+}
+
+fn remote_available_objects_for_versions(
+    store: &LocalStore,
+    versions: &[FileVersion],
+    command: &str,
+) -> Result<BTreeSet<loom_core::ObjectId>, String> {
+    let object_ids = unique_file_object_ids(versions);
+    if object_ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let remote_config = preferred_remote_for_eviction(store, command)?;
+    let remote = remote_from_config(&remote_config)?;
+    let mut available = BTreeSet::new();
+    for object_id in object_ids {
+        let exists = remote.has_object(&object_id).map_err(|error| {
+            format!(
+                "{command} refused because remote object availability could not be proven: {error}"
+            )
+        })?;
+        if !exists {
+            return Err(format!(
+                "{command} refused because object {object_id} is not available on remote {}; run 'loom sync' first",
+                remote_config.name()
+            ));
+        }
+        available.insert(object_id);
+    }
+
+    Ok(available)
+}
+
+fn best_effort_remote_available_objects(
+    store: &LocalStore,
+    versions: &[FileVersion],
+) -> BTreeSet<loom_core::ObjectId> {
+    let Ok(remote_config) = preferred_remote(store) else {
+        return BTreeSet::new();
+    };
+    let Ok(remote) = remote_from_config(&remote_config) else {
+        return BTreeSet::new();
+    };
+
+    unique_file_object_ids(versions)
+        .into_iter()
+        .filter(|object_id| remote.has_object(object_id).unwrap_or(false))
+        .collect()
+}
+
+fn unique_file_object_ids(versions: &[FileVersion]) -> BTreeSet<loom_core::ObjectId> {
+    versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter_map(|version| version.object_id().cloned())
+        .collect()
+}
+
+fn preferred_remote_for_eviction(
+    store: &LocalStore,
+    command: &str,
+) -> Result<RemoteConfig, String> {
+    preferred_remote(store).map_err(|_| {
+        format!(
+            "{command} refused because no Loom remote is configured; run 'loom remote add' and 'loom sync' before evicting local bytes"
+        )
+    })
 }
 
 fn local_pinned_scopes(store: &LocalStore) -> Result<Vec<PathBuf>, String> {
