@@ -317,7 +317,7 @@ pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> Sync
 }
 
 pub fn import_pack(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, None)
+    import_pack_with_remote(store, pack, None, true)
 }
 
 pub fn import_pack_from_remote(
@@ -325,26 +325,46 @@ pub fn import_pack_from_remote(
     pack: &LoomPack,
     remote: &dyn LoomRemote,
 ) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, Some(remote))
+    import_pack_with_remote(store, pack, Some(remote), true)
+}
+
+pub fn import_pack_metadata_only(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportReport> {
+    import_pack_with_remote(store, pack, None, false)
+}
+
+pub fn import_pack_metadata_only_from_remote(
+    store: &LocalStore,
+    pack: &LoomPack,
+    remote: &dyn LoomRemote,
+) -> SyncResult<ImportReport> {
+    import_pack_with_remote(store, pack, Some(remote), false)
 }
 
 fn import_pack_with_remote(
     store: &LocalStore,
     pack: &LoomPack,
     remote: Option<&dyn LoomRemote>,
+    hydrate_missing_objects: bool,
 ) -> SyncResult<ImportReport> {
     let mut imported_objects = 0;
     for object in &pack.manifest.objects {
         if !store.object_cache().exists(&object.object_id) {
             let payload = if let Some(payload) = pack.object_payload(&object.object_id) {
-                payload.payload.clone()
-            } else if let Some(remote) = remote {
-                remote.get_object(&object.object_id)?
+                Some(payload.payload.clone())
+            } else if hydrate_missing_objects {
+                let remote = remote
+                    .ok_or_else(|| SyncError::MissingObjectPayload(object.object_id.clone()))?;
+                Some(remote.get_object(&object.object_id)?)
             } else {
-                return Err(SyncError::MissingObjectPayload(object.object_id.clone()));
+                None
             };
-            store.import_object_bytes(&object.object_id, &payload)?;
-            imported_objects += 1;
+
+            if let Some(payload) = payload {
+                store.import_object_bytes(&object.object_id, &payload)?;
+                imported_objects += 1;
+            } else {
+                store.record_object_remote_only(&object.object_id, Some(object.size_bytes))?;
+            }
         } else {
             store.record_cached_object_hydrated(&object.object_id, object.size_bytes)?;
         }
@@ -380,6 +400,24 @@ fn import_pack_with_remote(
         imported_pins,
         imported_objects,
     })
+}
+
+pub fn hydrate_object_from_remote(
+    store: &LocalStore,
+    remote: &dyn LoomRemote,
+    object_id: &ObjectId,
+    expected_size_bytes: Option<u64>,
+) -> SyncResult<bool> {
+    if store.object_cache().exists(object_id) {
+        if let Some(size_bytes) = expected_size_bytes {
+            store.record_cached_object_hydrated(object_id, size_bytes)?;
+        }
+        return Ok(false);
+    }
+
+    let payload = remote.get_object(object_id)?;
+    store.import_object_bytes(object_id, &payload)?;
+    Ok(true)
 }
 
 pub fn build_pack(
