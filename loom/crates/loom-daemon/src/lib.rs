@@ -482,7 +482,7 @@ pub fn reconcile_once(
     store: &LocalStore,
     remote: &dyn LoomRemote,
 ) -> DaemonResult<ReconcileReport> {
-    let capture = CaptureEngine::new(store.object_cache()).capture(&CaptureRequest::new(
+    let capture = CaptureEngine::new(store).capture(&CaptureRequest::new(
         store.shared_folder().clone(),
         RevisionBoundary::DebounceWindow,
     ))?;
@@ -536,7 +536,7 @@ pub fn reconcile_once(
 
     let pack = remote.get_pack(&remote_revision_id)?;
     if pack_revision_is_ancestor(&pack.revisions, local.id(), &remote_revision_id) {
-        let current = CaptureEngine::new(store.object_cache()).capture(&CaptureRequest::new(
+        let current = CaptureEngine::new(store).capture(&CaptureRequest::new(
             store.shared_folder().clone(),
             RevisionBoundary::Sync,
         ))?;
@@ -553,7 +553,7 @@ pub fn reconcile_once(
             DaemonError::Sync(SyncError::MissingRevision(remote_revision_id.clone()))
         })?;
         RestoreEngine::new(store).restore(&revision, &current)?;
-        let restored = CaptureEngine::new(store.object_cache()).capture(&CaptureRequest::new(
+        let restored = CaptureEngine::new(store).capture(&CaptureRequest::new(
             store.shared_folder().clone(),
             RevisionBoundary::Sync,
         ))?;
@@ -1412,7 +1412,7 @@ mod tests {
             )
             .expect("target clone store");
             import_pack(&target_store, &pack).expect("pack imports");
-            let current = CaptureEngine::new(target_store.object_cache())
+            let current = CaptureEngine::new(&target_store)
                 .capture(&CaptureRequest::new(
                     target_store.shared_folder().clone(),
                     RevisionBoundary::Restore,
@@ -1425,7 +1425,7 @@ mod tests {
             RestoreEngine::new(&target_store)
                 .restore(&revision, &current)
                 .expect("restore applies");
-            let restored = CaptureEngine::new(target_store.object_cache())
+            let restored = CaptureEngine::new(&target_store)
                 .capture(&CaptureRequest::new(
                     target_store.shared_folder().clone(),
                     RevisionBoundary::Sync,
@@ -1447,7 +1447,7 @@ mod tests {
     }
 
     fn capture_and_coalesce(store: &LocalStore) {
-        let capture = CaptureEngine::new(store.object_cache())
+        let capture = CaptureEngine::new(store)
             .capture(&CaptureRequest::new(
                 store.shared_folder().clone(),
                 RevisionBoundary::Sync,

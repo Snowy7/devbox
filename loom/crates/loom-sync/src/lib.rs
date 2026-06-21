@@ -259,10 +259,10 @@ pub fn import_pack(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportRepo
     let mut imported_objects = 0;
     for object in &pack.manifest.objects {
         if !store.object_cache().exists(&object.object_id) {
-            store
-                .object_cache()
-                .import_bytes(&object.object_id, &object.payload)?;
+            store.import_object_bytes(&object.object_id, &object.payload)?;
             imported_objects += 1;
+        } else {
+            store.record_cached_object_hydrated(&object.object_id, object.size_bytes)?;
         }
     }
 
@@ -502,7 +502,7 @@ fn create_dir_all(path: impl AsRef<Path>) -> SyncResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loom_core::RevisionBoundary;
+    use loom_core::{HydrationState, RevisionBoundary};
     use loom_store::LocalStore;
     use std::fs;
 
@@ -561,6 +561,60 @@ mod tests {
         );
         assert_eq!(pack.manifest.latest_revision_id, *revision.id());
         assert_eq!(pack.manifest.object_count(), 1);
+    }
+
+    #[test]
+    fn pack_import_records_hydrated_cache_metadata() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_folder = dir.path().join("source");
+        let target_folder = dir.path().join("target");
+        fs::create_dir_all(&source_folder).expect("source folder creates");
+        let source_store = LocalStore::open_or_init(&source_folder)
+            .expect("source store initializes")
+            .into_store();
+        let object = source_store
+            .object_cache()
+            .write_bytes(b"hello from pack\n")
+            .expect("source object writes");
+        let version = loom_core::FileVersion::new(
+            loom_core::FileVersionId::new("file-version-pack").expect("file version id"),
+            "README.md",
+            loom_core::FileKind::File,
+            Some(object.id().clone()),
+            Some(object.size_bytes()),
+            "unix:1",
+        )
+        .expect("file version");
+        let revision = source_store
+            .coalesce_folder_revision(RevisionBoundary::Sync, &[version])
+            .expect("revision")
+            .revision()
+            .clone();
+        let pack = build_pack(&source_store, revision.id()).expect("pack builds");
+        let target_store = LocalStore::init_clone(
+            &target_folder,
+            pack.manifest.shared_folder_id.clone(),
+            pack.manifest.display_name.clone(),
+        )
+        .expect("target store initializes");
+
+        let report = import_pack(&target_store, &pack).expect("pack imports");
+        let entry = target_store
+            .cache_entry(object.id())
+            .expect("cache metadata reads")
+            .expect("cache metadata exists");
+
+        assert_eq!(report.imported_objects, 1);
+        assert_eq!(entry.object_id(), object.id());
+        assert_eq!(entry.hydration_state(), HydrationState::Hydrated);
+        assert_eq!(entry.size_bytes(), Some(object.size_bytes()));
+        assert_eq!(
+            target_store
+                .object_cache()
+                .read(object.id())
+                .expect("target object reads"),
+            b"hello from pack\n"
+        );
     }
 
     #[test]

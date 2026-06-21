@@ -420,7 +420,7 @@ fn capture_worktree(
     store: &LocalStore,
     boundary: RevisionBoundary,
 ) -> Result<WorktreeCapture, String> {
-    CaptureEngine::new(store.object_cache())
+    CaptureEngine::new(store)
         .capture(&CaptureRequest::new(
             store.shared_folder().clone(),
             boundary,

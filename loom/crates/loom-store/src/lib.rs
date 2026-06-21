@@ -4,6 +4,7 @@
 //! milestone. The layout is intentionally small and explicit:
 //!
 //! - `.loom/objects/b3/<prefix>/<prefix>/<object>` stores content-addressed bytes.
+//! - `.loom/metadata/cache_entries.tsv` records local object-byte hydration state.
 //! - `.loom/metadata/file_versions.tsv` is an append-only file-version catalog.
 //! - `.loom/metadata/revisions.tsv` is an append-only folder-revision index.
 //! - `.loom/metadata/revisions/<revision>.tsv` stores revision entries.
@@ -12,9 +13,9 @@
 //! these responsibilities migrate into Loom-owned crates.
 
 use loom_core::{
-    Checkpoint, CheckpointId, Cursor, FileKind, FileVersion, FileVersionId, FolderEntry,
-    FolderRevision, FolderRevisionId, FolderScope, LoomError, ObjectId, Pin, PinId,
-    RevisionBoundary, SharedFolder, SharedFolderId,
+    CacheEntry, Checkpoint, CheckpointId, Cursor, FileKind, FileVersion, FileVersionId,
+    FolderEntry, FolderRevision, FolderRevisionId, FolderScope, HydrationState, LoomError,
+    ObjectId, Pin, PinId, RevisionBoundary, SharedFolder, SharedFolderId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -33,6 +34,7 @@ const OBJECTS_DIR: &str = "objects";
 const TEMP_DIR: &str = "tmp";
 const METADATA_DIR: &str = "metadata";
 const SHARED_FOLDER_FILE: &str = "shared_folder.tsv";
+const CACHE_ENTRIES_FILE: &str = "cache_entries.tsv";
 const FILE_VERSIONS_FILE: &str = "file_versions.tsv";
 const REVISIONS_FILE: &str = "revisions.tsv";
 const REVISIONS_DIR: &str = "revisions";
@@ -45,6 +47,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreBoundary {
     pub stores_objects: bool,
+    pub stores_cache_metadata: bool,
     pub stores_file_versions: bool,
     pub stores_folder_revisions: bool,
     pub stores_cursors: bool,
@@ -54,6 +57,7 @@ impl StoreBoundary {
     pub fn loom_owned() -> Self {
         Self {
             stores_objects: true,
+            stores_cache_metadata: true,
             stores_file_versions: true,
             stores_folder_revisions: true,
             stores_cursors: true,
@@ -84,14 +88,7 @@ impl ObjectRef {
     }
 
     pub fn object_ref(&self) -> String {
-        format!(
-            "{}/{}/{}/{}/{}",
-            OBJECTS_DIR,
-            HASH_ALGORITHM_DIR,
-            &self.id.as_str()[0..2],
-            &self.id.as_str()[2..4],
-            self.id
-        )
+        object_ref_for_id(&self.id)
     }
 
     pub fn size_bytes(&self) -> u64 {
@@ -677,6 +674,72 @@ impl LocalStore {
         &self.object_cache
     }
 
+    pub fn write_object_bytes(&self, bytes: impl AsRef<[u8]>) -> StoreResult<ObjectRef> {
+        let object = self.object_cache.write_bytes(bytes)?;
+        self.record_object_hydrated(&object)?;
+        Ok(object)
+    }
+
+    pub fn import_object_bytes(
+        &self,
+        expected_id: &ObjectId,
+        bytes: impl AsRef<[u8]>,
+    ) -> StoreResult<ObjectRef> {
+        let object = self.object_cache.import_bytes(expected_id, bytes)?;
+        self.record_object_hydrated(&object)?;
+        Ok(object)
+    }
+
+    pub fn cache_entries(&self) -> StoreResult<Vec<CacheEntry>> {
+        Ok(self.load_cache_entries()?.into_values().collect())
+    }
+
+    pub fn cache_entry(&self, object_id: &ObjectId) -> StoreResult<Option<CacheEntry>> {
+        Ok(self.load_cache_entries()?.remove(object_id))
+    }
+
+    pub fn record_object_hydrated(&self, object: &ObjectRef) -> StoreResult<CacheEntry> {
+        let entry = CacheEntry::new(
+            object.id().clone(),
+            HydrationState::Hydrated,
+            object.object_ref(),
+            Some(object.size_bytes()),
+            current_timestamp(),
+        )?;
+        self.upsert_cache_entry(entry.clone())?;
+        Ok(entry)
+    }
+
+    pub fn record_cached_object_hydrated(
+        &self,
+        object_id: &ObjectId,
+        size_bytes: u64,
+    ) -> StoreResult<CacheEntry> {
+        if !self.object_cache.exists(object_id) {
+            return Err(StoreError::MissingObject {
+                id: object_id.clone(),
+                path: self.object_cache.path_for(object_id),
+            });
+        }
+
+        let entry = CacheEntry::new(
+            object_id.clone(),
+            HydrationState::Hydrated,
+            object_ref_for_id(object_id),
+            Some(size_bytes),
+            current_timestamp(),
+        )?;
+        self.upsert_cache_entry(entry.clone())?;
+        Ok(entry)
+    }
+
+    pub fn upsert_cache_entry(&self, entry: CacheEntry) -> StoreResult<()> {
+        let mut entries = self.load_cache_entries()?;
+        entries.insert(entry.object_id().clone(), entry);
+        let entries = entries.into_values().collect::<Vec<_>>();
+        self.write_cache_entries(&entries)
+    }
+
     pub fn file_versions(&self) -> StoreResult<Vec<FileVersion>> {
         Ok(self.load_file_versions()?.into_values().collect())
     }
@@ -1035,6 +1098,73 @@ impl LocalStore {
         })
     }
 
+    fn load_cache_entries(&self) -> StoreResult<BTreeMap<ObjectId, CacheEntry>> {
+        let path = self.metadata_path(CACHE_ENTRIES_FILE);
+        let Some(contents) = read_optional_to_string(&path)? else {
+            return Ok(BTreeMap::new());
+        };
+        let mut entries = BTreeMap::new();
+
+        for (line_index, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = split_fields(&path, line_index + 1, line, 5)?;
+            let object_id = ObjectId::from_blake3_hex(decode_field(&fields[0])?)?;
+            let hydration_state = hydration_state_from_store(&decode_field(&fields[1])?)
+                .ok_or_else(|| StoreError::CorruptMetadata {
+                    path: path.clone(),
+                    message: format!("line {} has unknown hydration state", line_index + 1),
+                })?;
+            let local_path = store_string_to_path(&decode_field(&fields[2])?);
+            let size_bytes = match decode_field(&fields[3])?.as_str() {
+                "-" => None,
+                value => Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| StoreError::CorruptMetadata {
+                            path: path.clone(),
+                            message: format!("line {} has invalid cache size", line_index + 1),
+                        })?,
+                ),
+            };
+            let updated_at = decode_field(&fields[4])?;
+            let entry = CacheEntry::new(
+                object_id.clone(),
+                hydration_state,
+                local_path,
+                size_bytes,
+                updated_at,
+            )?;
+            entries.insert(object_id, entry);
+        }
+
+        Ok(entries)
+    }
+
+    fn write_cache_entries(&self, entries: &[CacheEntry]) -> StoreResult<()> {
+        let path = self.metadata_path(CACHE_ENTRIES_FILE);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+        for entry in entries {
+            file.write_all(cache_entry_row(entry).as_bytes())
+                .map_err(|source| StoreError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+        }
+
+        Ok(())
+    }
+
     fn load_checkpoints(&self) -> StoreResult<Vec<Checkpoint>> {
         let path = self.metadata_path(CHECKPOINTS_FILE);
         let Some(contents) = read_optional_to_string(&path)? else {
@@ -1385,6 +1515,17 @@ fn default_shared_folder(folder_root: &Path) -> StoreResult<SharedFolder> {
     SharedFolder::new(id, folder_root, display_name, FolderScope::WholeFolder).map_err(Into::into)
 }
 
+fn object_ref_for_id(id: &ObjectId) -> String {
+    format!(
+        "{}/{}/{}/{}/{}",
+        OBJECTS_DIR,
+        HASH_ALGORITHM_DIR,
+        &id.as_str()[0..2],
+        &id.as_str()[2..4],
+        id
+    )
+}
+
 fn non_empty_metadata_value(kind: &'static str, value: String) -> StoreResult<String> {
     if value.trim().is_empty() {
         return Err(StoreError::CorruptMetadata {
@@ -1544,6 +1685,22 @@ fn file_version_row(version: &FileVersion) -> String {
     )
 }
 
+fn cache_entry_row(entry: &CacheEntry) -> String {
+    format!(
+        "{}\t{}\t{}\t{}\t{}\n",
+        encode_field(entry.object_id().as_str()),
+        encode_field(hydration_state_to_store(entry.hydration_state())),
+        encode_field(&path_to_store_string(entry.local_path())),
+        encode_field(
+            &entry
+                .size_bytes()
+                .map(|size| size.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        encode_field(entry.updated_at()),
+    )
+}
+
 fn file_kind_to_store(kind: &FileKind) -> &'static str {
     match kind {
         FileKind::File => "file",
@@ -1559,6 +1716,23 @@ fn file_kind_from_store(value: &str) -> Option<FileKind> {
         "directory" => Some(FileKind::Directory),
         "symlink" => Some(FileKind::Symlink),
         "unsupported" => Some(FileKind::Unsupported),
+        _ => None,
+    }
+}
+
+fn hydration_state_to_store(state: HydrationState) -> &'static str {
+    match state {
+        HydrationState::RemoteOnly => "remote-only",
+        HydrationState::Partial => "partial",
+        HydrationState::Hydrated => "hydrated",
+    }
+}
+
+fn hydration_state_from_store(value: &str) -> Option<HydrationState> {
+    match value {
+        "remote-only" => Some(HydrationState::RemoteOnly),
+        "partial" => Some(HydrationState::Partial),
+        "hydrated" => Some(HydrationState::Hydrated),
         _ => None,
     }
 }
@@ -1754,6 +1928,7 @@ mod tests {
         let boundary = StoreBoundary::loom_owned();
 
         assert!(boundary.stores_objects);
+        assert!(boundary.stores_cache_metadata);
         assert!(boundary.stores_file_versions);
         assert!(boundary.stores_folder_revisions);
         assert!(boundary.stores_cursors);
@@ -1774,6 +1949,101 @@ mod tests {
         assert!(object.object_ref().starts_with("objects/b3/"));
         assert_eq!(cache.read(object.id()).expect("object reads"), content);
         assert_eq!(count_files(&dir.path().join(OBJECTS_DIR)), 1);
+    }
+
+    #[test]
+    fn object_bytes_can_have_separate_hydrated_cache_metadata() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("shared");
+        fs::create_dir_all(&folder).expect("folder creates");
+        let store = LocalStore::open_or_init(&folder)
+            .expect("store initializes")
+            .into_store();
+
+        let object = store
+            .object_cache()
+            .write_bytes(b"cached source bytes")
+            .expect("object writes");
+        let entry = store
+            .record_object_hydrated(&object)
+            .expect("cache entry records");
+
+        assert!(store.object_cache().exists(object.id()));
+        assert_eq!(entry.object_id(), object.id());
+        assert_eq!(entry.hydration_state(), HydrationState::Hydrated);
+        assert_eq!(entry.size_bytes(), Some(object.size_bytes()));
+        let object_ref = object.object_ref();
+        assert_eq!(entry.local_path(), Path::new(object_ref.as_str()));
+
+        let entries = store.cache_entries().expect("cache entries load");
+        assert_eq!(entries, vec![entry]);
+        assert!(store
+            .file_versions()
+            .expect("file versions load")
+            .is_empty());
+        assert!(store.revisions().expect("revisions load").is_empty());
+    }
+
+    #[test]
+    fn cache_metadata_survives_reopen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("shared");
+        fs::create_dir_all(&folder).expect("folder creates");
+        let store = LocalStore::open_or_init(&folder)
+            .expect("store initializes")
+            .into_store();
+        let object = store
+            .object_cache()
+            .write_bytes(b"durable cache metadata")
+            .expect("object writes");
+        let entry = store
+            .record_object_hydrated(&object)
+            .expect("cache entry records");
+
+        let reopened = LocalStore::open(&folder).expect("store reopens");
+
+        assert_eq!(
+            reopened
+                .cache_entry(object.id())
+                .expect("cache entry loads after reopen"),
+            Some(entry)
+        );
+        assert_eq!(
+            reopened
+                .object_cache()
+                .read(object.id())
+                .expect("object reads after reopen"),
+            b"durable cache metadata"
+        );
+    }
+
+    #[test]
+    fn cache_metadata_rejects_unknown_hydration_states() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("shared");
+        fs::create_dir_all(&folder).expect("folder creates");
+        let store = LocalStore::open_or_init(&folder)
+            .expect("store initializes")
+            .into_store();
+        let object = store
+            .object_cache()
+            .write_bytes(b"invalid cache state")
+            .expect("object writes");
+        fs::write(
+            store.metadata_path(CACHE_ENTRIES_FILE),
+            format!(
+                "{}\tnot-a-state\t{}\t{}\tunix:1\n",
+                object.id(),
+                object.object_ref(),
+                object.size_bytes()
+            ),
+        )
+        .expect("cache metadata writes");
+
+        let error = store
+            .cache_entries()
+            .expect_err("unknown hydration state should fail");
+        assert!(matches!(error, StoreError::CorruptMetadata { .. }));
     }
 
     #[test]
