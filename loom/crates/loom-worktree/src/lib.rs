@@ -4,8 +4,8 @@
 //! file-version capture belong here as the old snapshot crate is migrated.
 
 use loom_core::{
-    FileKind, FileVersion, FileVersionId, FolderRevision, FolderRevisionId, LoomError,
-    RevisionBoundary, SharedFolder,
+    FileKind, FileVersion, FileVersionId, FolderRevision, FolderRevisionId, HydrationState,
+    LoomError, ObjectId, RevisionBoundary, SharedFolder,
 };
 use loom_store::{path_to_store_string, LocalStore, StoreError, STORE_DIR};
 use std::collections::{BTreeMap, BTreeSet};
@@ -96,6 +96,74 @@ impl RestoreReport {
 
     pub fn diff(&self) -> &WorktreeDiff {
         &self.diff
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HydrateReport {
+    materialized_files: usize,
+    materialized_directories: usize,
+    already_materialized_files: usize,
+}
+
+impl HydrateReport {
+    pub fn materialized_files(&self) -> usize {
+        self.materialized_files
+    }
+
+    pub fn materialized_directories(&self) -> usize {
+        self.materialized_directories
+    }
+
+    pub fn already_materialized_files(&self) -> usize {
+        self.already_materialized_files
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EvictReport {
+    evicted_files: usize,
+    already_remote_files: usize,
+    evicted_objects: usize,
+}
+
+impl EvictReport {
+    pub fn evicted_files(&self) -> usize {
+        self.evicted_files
+    }
+
+    pub fn already_remote_files(&self) -> usize {
+        self.already_remote_files
+    }
+
+    pub fn evicted_objects(&self) -> usize {
+        self.evicted_objects
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheStatusReport {
+    hydrated_files: usize,
+    remote_only_files: usize,
+    partial_files: usize,
+    total_files: usize,
+}
+
+impl CacheStatusReport {
+    pub fn hydrated_files(&self) -> usize {
+        self.hydrated_files
+    }
+
+    pub fn remote_only_files(&self) -> usize {
+        self.remote_only_files
+    }
+
+    pub fn partial_files(&self) -> usize {
+        self.partial_files
+    }
+
+    pub fn total_files(&self) -> usize {
+        self.total_files
     }
 }
 
@@ -266,6 +334,7 @@ impl<'a> CaptureEngine<'a> {
         let captured_at = current_timestamp();
         let mut capture = WorktreeCapture::new(root.clone(), captured_at.clone());
         walk_directory(self.store, &root, &root, &captured_at, &mut capture)?;
+        preserve_remote_only_latest_entries(self.store, &root, &mut capture)?;
         capture.file_versions.sort_by(|left, right| {
             path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
         });
@@ -474,6 +543,280 @@ impl From<LoomError> for CaptureError {
 }
 
 pub type CaptureResult<T> = Result<T, CaptureError>;
+
+pub fn relative_scope_path(store: &LocalStore, path: &Path) -> CaptureResult<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| CaptureError::Io {
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(path)
+    };
+    let path = canonicalize_existing_prefix(&path)?;
+
+    let relative = path
+        .strip_prefix(store.folder_root())
+        .map_err(|_| CaptureError::UnsafeRestore {
+            path: path.clone(),
+            reason: format!(
+                "path is not inside shared folder {}",
+                store.folder_root().display()
+            ),
+        })?
+        .to_path_buf();
+
+    validate_materialization_scope(&relative)?;
+    Ok(relative)
+}
+
+pub fn tracked_versions_for_scope(
+    store: &LocalStore,
+    scope: &Path,
+) -> CaptureResult<Vec<FileVersion>> {
+    validate_materialization_scope(scope)?;
+    let revision = store
+        .latest_revision()
+        .map_err(CaptureError::Store)?
+        .ok_or_else(|| CaptureError::UnsafeRestore {
+            path: scope.to_path_buf(),
+            reason: "no folder revisions have been imported yet".to_string(),
+        })?;
+    let file_versions = store
+        .file_versions()
+        .map_err(CaptureError::Store)?
+        .into_iter()
+        .map(|version| (version.id().clone(), version))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = Vec::new();
+
+    for entry in revision.entries() {
+        if !path_is_in_scope(entry.path(), scope) {
+            continue;
+        }
+        let version = file_versions.get(entry.file_version_id()).ok_or_else(|| {
+            CaptureError::MissingRevisionFileVersion {
+                revision_id: revision.id().clone(),
+                file_version_id: entry.file_version_id().clone(),
+            }
+        })?;
+        if version.path() != entry.path() {
+            return Err(CaptureError::UnsafeRestore {
+                path: entry.path().to_path_buf(),
+                reason: format!(
+                    "revision entry points at file version for {}",
+                    path_to_store_string(version.path())
+                ),
+            });
+        }
+        validate_materialized_relative_path(version.path())?;
+        selected.push(version.clone());
+    }
+
+    selected.sort_by(|left, right| {
+        path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
+    });
+    Ok(selected)
+}
+
+pub fn hydrate_versions(
+    store: &LocalStore,
+    versions: &[FileVersion],
+) -> CaptureResult<HydrateReport> {
+    validate_restore_target_plan(versions)?;
+    let mut report = HydrateReport::default();
+    let mut file_writes = Vec::new();
+    let mut directories = Vec::new();
+
+    for version in versions {
+        let target = store.folder_root().join(version.path());
+        match version.kind() {
+            FileKind::Directory => {
+                preflight_hydrate_directory(version.path(), &target)?;
+                directories.push(version.path().to_path_buf());
+            }
+            FileKind::File => {
+                let object_id = version
+                    .object_id()
+                    .ok_or_else(|| CaptureError::UnsafeRestore {
+                        path: version.path().to_path_buf(),
+                        reason: "file version has no content object".to_string(),
+                    })?;
+                let bytes = store
+                    .object_cache()
+                    .read(object_id)
+                    .map_err(CaptureError::Store)?;
+                match preflight_hydrate_file(version.path(), &target, &bytes)? {
+                    HydrateFileAction::Write => {
+                        file_writes.push((version.path().to_path_buf(), bytes))
+                    }
+                    HydrateFileAction::AlreadyMaterialized => {
+                        report.already_materialized_files += 1;
+                    }
+                }
+            }
+            FileKind::Symlink | FileKind::Unsupported => {
+                return Err(CaptureError::UnsafeRestore {
+                    path: version.path().to_path_buf(),
+                    reason: "only regular files and directories can be hydrated safely".to_string(),
+                });
+            }
+        }
+    }
+
+    for path in directories {
+        let target = store.folder_root().join(&path);
+        fs::create_dir_all(&target).map_err(|source| CaptureError::Io {
+            path: target,
+            source,
+        })?;
+        report.materialized_directories += 1;
+    }
+
+    for (path, bytes) in file_writes {
+        let target = store.folder_root().join(&path);
+        prepare_hydrate_file_target(&path, &target)?;
+        fs::write(&target, bytes).map_err(|source| CaptureError::Io {
+            path: target,
+            source,
+        })?;
+        report.materialized_files += 1;
+    }
+
+    Ok(report)
+}
+
+pub fn evict_versions(
+    store: &LocalStore,
+    selected_versions: &[FileVersion],
+    pinned_scopes: &[PathBuf],
+) -> CaptureResult<EvictReport> {
+    let mut report = EvictReport::default();
+    let latest_versions = tracked_versions_for_scope(store, Path::new(""))?;
+    let selected_paths = selected_versions
+        .iter()
+        .map(|version| version.path().to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let mut selected_objects = BTreeSet::<ObjectId>::new();
+    let mut removable_files = Vec::new();
+
+    for version in selected_versions {
+        if version.kind() != &FileKind::File {
+            continue;
+        }
+        if pinned_scopes
+            .iter()
+            .any(|pinned_scope| paths_overlap(version.path(), pinned_scope))
+        {
+            return Err(CaptureError::UnsafeRestore {
+                path: version.path().to_path_buf(),
+                reason: "path is pinned for offline retention".to_string(),
+            });
+        }
+
+        let object_id = version
+            .object_id()
+            .ok_or_else(|| CaptureError::UnsafeRestore {
+                path: version.path().to_path_buf(),
+                reason: "file version has no content object".to_string(),
+            })?;
+        let target = store.folder_root().join(version.path());
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CaptureError::UnsafeRestore {
+                    path: version.path().to_path_buf(),
+                    reason: "refusing to evict a symlink".to_string(),
+                });
+            }
+            Ok(metadata) if metadata.is_file() => {
+                ensure_file_matches_object(version.path(), &target, object_id)?;
+                removable_files.push(version.path().to_path_buf());
+                selected_objects.insert(object_id.clone());
+            }
+            Ok(_) => {
+                return Err(CaptureError::UnsafeRestore {
+                    path: version.path().to_path_buf(),
+                    reason: "refusing to evict an unsupported local entry".to_string(),
+                });
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                report.already_remote_files += 1;
+                selected_objects.insert(object_id.clone());
+            }
+            Err(source) => {
+                return Err(CaptureError::Io {
+                    path: target,
+                    source,
+                });
+            }
+        }
+    }
+
+    for path in removable_files {
+        let target = store.folder_root().join(&path);
+        fs::remove_file(&target).map_err(|source| CaptureError::Io {
+            path: target,
+            source,
+        })?;
+        report.evicted_files += 1;
+    }
+
+    for object_id in selected_objects {
+        let still_materialized = latest_versions.iter().any(|version| {
+            version.object_id() == Some(&object_id)
+                && !selected_paths.contains(version.path())
+                && store.folder_root().join(version.path()).is_file()
+        });
+        if still_materialized {
+            continue;
+        }
+        let size_bytes = latest_versions
+            .iter()
+            .find(|version| version.object_id() == Some(&object_id))
+            .and_then(FileVersion::size_bytes);
+        store
+            .evict_cached_object(&object_id, size_bytes)
+            .map_err(CaptureError::Store)?;
+        report.evicted_objects += 1;
+    }
+
+    Ok(report)
+}
+
+pub fn cache_status_for_scope(
+    store: &LocalStore,
+    scope: &Path,
+) -> CaptureResult<CacheStatusReport> {
+    let versions = tracked_versions_for_scope(store, scope)?;
+    let mut report = CacheStatusReport::default();
+    for version in versions {
+        if version.kind() != &FileKind::File {
+            continue;
+        }
+        let Some(object_id) = version.object_id() else {
+            continue;
+        };
+        report.total_files += 1;
+        let state = if store.object_cache().exists(object_id) {
+            HydrationState::Hydrated
+        } else {
+            store
+                .cache_entry(object_id)
+                .map_err(CaptureError::Store)?
+                .map(|entry| entry.hydration_state())
+                .unwrap_or(HydrationState::RemoteOnly)
+        };
+        match state {
+            HydrationState::Hydrated => report.hydrated_files += 1,
+            HydrationState::RemoteOnly => report.remote_only_files += 1,
+            HydrationState::Partial => report.partial_files += 1,
+        }
+    }
+
+    Ok(report)
+}
 
 pub fn diff_revision_to_capture(
     revision: &FolderRevision,
@@ -787,6 +1130,147 @@ fn ensure_directory_clear_after_planned_removals(
     Ok(())
 }
 
+enum HydrateFileAction {
+    Write,
+    AlreadyMaterialized,
+}
+
+fn preflight_hydrate_directory(relative_path: &Path, target: &Path) -> CaptureResult<()> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to replace a symlink".to_string(),
+        }),
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(metadata) if metadata.is_file() => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to replace a local file with a directory".to_string(),
+        }),
+        Ok(_) => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "unsupported filesystem entry".to_string(),
+        }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CaptureError::Io {
+            path: target.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn preflight_hydrate_file(
+    relative_path: &Path,
+    target: &Path,
+    bytes: &[u8],
+) -> CaptureResult<HydrateFileAction> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to overwrite a symlink".to_string(),
+        }),
+        Ok(metadata) if metadata.is_dir() => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to overwrite a directory with a file".to_string(),
+        }),
+        Ok(metadata) if metadata.is_file() => {
+            let current = fs::read(target).map_err(|source| CaptureError::Io {
+                path: target.to_path_buf(),
+                source,
+            })?;
+            if current == bytes {
+                Ok(HydrateFileAction::AlreadyMaterialized)
+            } else {
+                Err(CaptureError::UnsafeRestore {
+                    path: relative_path.to_path_buf(),
+                    reason: "refusing to overwrite a dirty local file".to_string(),
+                })
+            }
+        }
+        Ok(_) => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "unsupported filesystem entry".to_string(),
+        }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(HydrateFileAction::Write),
+        Err(source) => Err(CaptureError::Io {
+            path: target.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn prepare_hydrate_file_target(relative_path: &Path, target: &Path) -> CaptureResult<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|source| CaptureError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    preflight_hydrate_file(relative_path, target, &[]).and_then(|action| match action {
+        HydrateFileAction::Write => Ok(()),
+        HydrateFileAction::AlreadyMaterialized => Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "internal hydrate preflight mismatch".to_string(),
+        }),
+    })
+}
+
+fn ensure_file_matches_object(
+    relative_path: &Path,
+    target: &Path,
+    object_id: &ObjectId,
+) -> CaptureResult<()> {
+    let bytes = fs::read(target).map_err(|source| CaptureError::Io {
+        path: target.to_path_buf(),
+        source,
+    })?;
+    let actual = ObjectId::from_blake3_hex(blake3::hash(&bytes).to_hex().to_string())?;
+    if &actual != object_id {
+        return Err(CaptureError::UnsafeRestore {
+            path: relative_path.to_path_buf(),
+            reason: "refusing to evict a dirty local file".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_materialization_scope(relative_path: &Path) -> CaptureResult<()> {
+    if relative_path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    validate_materialized_relative_path(relative_path)
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> CaptureResult<PathBuf> {
+    if path.exists() {
+        return fs::canonicalize(path).map_err(|source| CaptureError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+
+    let mut missing = Vec::new();
+    let mut existing = path.to_path_buf();
+    while !existing.exists() {
+        let Some(name) = existing.file_name().map(|name| name.to_os_string()) else {
+            break;
+        };
+        missing.push(name);
+        if !existing.pop() {
+            break;
+        }
+    }
+
+    let mut canonical = fs::canonicalize(&existing).map_err(|source| CaptureError::Io {
+        path: existing,
+        source,
+    })?;
+    for component in missing.into_iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
 fn validate_materialized_relative_path(relative_path: &Path) -> CaptureResult<()> {
     if relative_path.as_os_str().is_empty() {
         return Err(CaptureError::UnsafeRestore {
@@ -816,6 +1300,96 @@ fn validate_materialized_relative_path(relative_path: &Path) -> CaptureResult<()
                     reason: "path must stay inside the shared folder".to_string(),
                 });
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn path_is_in_scope(path: &Path, scope: &Path) -> bool {
+    scope.as_os_str().is_empty() || path == scope || path.starts_with(scope)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.as_os_str().is_empty()
+        || right.as_os_str().is_empty()
+        || left == right
+        || left.starts_with(right)
+        || right.starts_with(left)
+}
+
+fn preserve_remote_only_latest_entries(
+    store: &LocalStore,
+    root: &Path,
+    capture: &mut WorktreeCapture,
+) -> CaptureResult<()> {
+    let Some(revision) = store.latest_revision().map_err(CaptureError::Store)? else {
+        return Ok(());
+    };
+
+    let file_versions = store
+        .file_versions()
+        .map_err(CaptureError::Store)?
+        .into_iter()
+        .map(|version| (version.id().clone(), version))
+        .collect::<BTreeMap<_, _>>();
+    let captured_paths = capture
+        .file_versions
+        .iter()
+        .map(|version| version.path().to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let mut latest_versions = Vec::new();
+
+    for entry in revision.entries() {
+        let version = file_versions.get(entry.file_version_id()).ok_or_else(|| {
+            CaptureError::MissingRevisionFileVersion {
+                revision_id: revision.id().clone(),
+                file_version_id: entry.file_version_id().clone(),
+            }
+        })?;
+        if version.path() != entry.path() {
+            return Err(CaptureError::UnsafeRestore {
+                path: entry.path().to_path_buf(),
+                reason: format!(
+                    "revision entry points at file version for {}",
+                    path_to_store_string(version.path())
+                ),
+            });
+        }
+        latest_versions.push(version.clone());
+    }
+
+    let remote_only_files = latest_versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter(|version| !captured_paths.contains(version.path()))
+        .filter(|version| !root.join(version.path()).exists())
+        .filter_map(|version| {
+            let object_id = version.object_id()?;
+            match store.cache_entry(object_id) {
+                Ok(Some(entry)) if entry.hydration_state() == HydrationState::RemoteOnly => {
+                    Some(version.path().to_path_buf())
+                }
+                _ => None,
+            }
+        })
+        .collect::<BTreeSet<_>>();
+
+    for version in latest_versions {
+        if captured_paths.contains(version.path()) || root.join(version.path()).exists() {
+            continue;
+        }
+
+        let preserve = match version.kind() {
+            FileKind::File => remote_only_files.contains(version.path()),
+            FileKind::Directory => remote_only_files
+                .iter()
+                .any(|file_path| file_path.starts_with(version.path())),
+            FileKind::Symlink | FileKind::Unsupported => false,
+        };
+
+        if preserve {
+            capture.file_versions.push(version);
         }
     }
 

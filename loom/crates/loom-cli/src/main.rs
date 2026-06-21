@@ -2,19 +2,21 @@ use devbox_remote::{
     provision_devbox_hosted_remote, DevboxHostedRemote, DevboxHostedRemoteConfig,
     DEVBOX_HOSTED_REMOTE_KIND,
 };
-use loom_core::RevisionBoundary;
+use loom_core::{FileKind, RevisionBoundary};
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
 use loom_store::{
     path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore, RemoteConfig,
     ResolvedRevisionTarget,
 };
 use loom_sync::{
-    import_pack_from_remote, sync_store_to_remote, LocalFilesystemRemote, LoomRemote,
-    DEFAULT_REMOTE_NAME, LOCAL_FILESYSTEM_REMOTE_KIND,
+    hydrate_object_from_remote, import_pack_from_remote, import_pack_metadata_only_from_remote,
+    sync_store_to_remote, LocalFilesystemRemote, LoomRemote, DEFAULT_REMOTE_NAME,
+    LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
-    diff_revision_to_capture, evaluate_directory_policy, CaptureEngine, CaptureRequest,
-    DirectoryPolicyDecision, RestoreEngine, WorktreeCapture, WorktreeDiff,
+    cache_status_for_scope, diff_revision_to_capture, evaluate_directory_policy, evict_versions,
+    hydrate_versions, relative_scope_path, tracked_versions_for_scope, CaptureEngine,
+    CaptureRequest, DirectoryPolicyDecision, RestoreEngine, WorktreeCapture, WorktreeDiff,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,10 +94,38 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "clone",
-        usage: "loom clone <REMOTE> <FOLDER>",
+        usage: "loom clone <REMOTE> <FOLDER> [--sparse]",
         summary: "Materialize a shared folder on this machine",
         implemented: true,
         planned_behavior: "create a local shared folder from a Loom remote without assuming Git",
+    },
+    CommandSpec {
+        name: "hydrate",
+        usage: "loom hydrate <PATH|FOLDER>",
+        summary: "Fetch and materialize bytes for a path or subtree",
+        implemented: true,
+        planned_behavior: "turn remote-only folder metadata into local files on demand",
+    },
+    CommandSpec {
+        name: "evict",
+        usage: "loom evict <PATH|FOLDER>",
+        summary: "Remove clean materialized bytes for a path or subtree",
+        implemented: true,
+        planned_behavior: "free local bytes while keeping folder history intact",
+    },
+    CommandSpec {
+        name: "pin",
+        usage: "loom pin <PATH|FOLDER>",
+        summary: "Keep a path or subtree available locally",
+        implemented: true,
+        planned_behavior: "record local offline intent that prevents explicit eviction",
+    },
+    CommandSpec {
+        name: "cache",
+        usage: "loom cache status [FOLDER]",
+        summary: "Show local cache hydration state",
+        implemented: true,
+        planned_behavior: "summarize hydrated, remote-only, and partial file counts",
     },
 ];
 
@@ -144,6 +174,10 @@ fn run_command(command: &CommandSpec, args: &[String]) -> ExitCode {
         "remote" => result_to_exit(run_remote(args)),
         "sync" => result_to_exit(run_sync(args)),
         "clone" => result_to_exit(run_clone(args)),
+        "hydrate" => result_to_exit(run_hydrate(args)),
+        "evict" => result_to_exit(run_evict(args)),
+        "pin" => result_to_exit(run_pin(args)),
+        "cache" => result_to_exit(run_cache(args)),
         _ => {
             run_placeholder(command);
             ExitCode::SUCCESS
@@ -492,10 +526,9 @@ fn run_sync_run_loop(args: &[String]) -> Result<(), String> {
 }
 
 fn run_clone(args: &[String]) -> Result<(), String> {
-    let (remote_location, target) = match args {
-        [remote_location, target] => (remote_location.clone(), PathBuf::from(target)),
-        _ => return Err("clone requires a remote path and target folder".to_string()),
-    };
+    let parsed = parse_clone_args(args)?;
+    let remote_location = parsed.remote_location;
+    let target = parsed.target;
     let (remote, remote_kind, stored_location) = clone_remote_from_location(&remote_location)?;
     let remote_revision_id = remote
         .get_cursor(loom_sync::DEFAULT_CURSOR_ID)
@@ -513,27 +546,36 @@ fn run_clone(args: &[String]) -> Result<(), String> {
         pack.manifest.display_name.clone(),
     )
     .map_err(|error| error.to_string())?;
-    let import_report = import_pack_from_remote(&store, &pack, remote.as_ref())
-        .map_err(|error| error.to_string())?;
-    let current = capture_worktree(&store, RevisionBoundary::Restore)?;
-    ensure_no_blocked_or_deferred(&current, "clone")?;
-    if !current.file_versions().is_empty() {
-        return Err(
-            "clone refused because the target already contains source files; choose an empty folder"
-                .to_string(),
-        );
-    }
+    let import_report = if parsed.sparse {
+        import_pack_metadata_only_from_remote(&store, &pack, remote.as_ref())
+            .map_err(|error| error.to_string())?
+    } else {
+        import_pack_from_remote(&store, &pack, remote.as_ref())
+            .map_err(|error| error.to_string())?
+    };
+    let mut materialized_report = None;
     let revision = store
         .revision_by_id(&remote_revision_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("imported pack did not contain revision {remote_revision_id}"))?;
-    let report = RestoreEngine::new(&store)
-        .restore(&revision, &current)
-        .map_err(|error| error.to_string())?;
-    let restored_capture = capture_worktree(&store, RevisionBoundary::Sync)?;
-    store
-        .coalesce_folder_revision(RevisionBoundary::Sync, restored_capture.file_versions())
-        .map_err(|error| error.to_string())?;
+    if !parsed.sparse {
+        let current = capture_worktree(&store, RevisionBoundary::Restore)?;
+        ensure_no_blocked_or_deferred(&current, "clone")?;
+        if !current.file_versions().is_empty() {
+            return Err(
+                "clone refused because the target already contains source files; choose an empty folder"
+                    .to_string(),
+            );
+        }
+        let report = RestoreEngine::new(&store)
+            .restore(&revision, &current)
+            .map_err(|error| error.to_string())?;
+        let restored_capture = capture_worktree(&store, RevisionBoundary::Sync)?;
+        store
+            .coalesce_folder_revision(RevisionBoundary::Sync, restored_capture.file_versions())
+            .map_err(|error| error.to_string())?;
+        materialized_report = Some(report);
+    }
     store
         .upsert_remote(
             RemoteConfig::new(DEFAULT_REMOTE_NAME, remote_kind, stored_location.clone())
@@ -541,9 +583,17 @@ fn run_clone(args: &[String]) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
 
-    println!("Cloned revision: {}", report.revision_id());
+    println!("Cloned revision: {}", revision.id());
     println!("Target: {}", store.folder_root().display());
     println!("Remote: {}", stored_location);
+    println!(
+        "Mode: {}",
+        if parsed.sparse {
+            "sparse metadata-only"
+        } else {
+            "eager materialized"
+        }
+    );
     println!("Imported objects: {}", import_report.imported_objects);
     println!(
         "Imported metadata: {} file versions, {} revisions, {} checkpoints, {} pins",
@@ -552,12 +602,140 @@ fn run_clone(args: &[String]) -> Result<(), String> {
         import_report.imported_checkpoints,
         import_report.imported_pins
     );
+    if let Some(report) = materialized_report {
+        println!(
+            "Materialized: {} created, {} modified, {} removed",
+            report.diff().deleted().len(),
+            report.diff().modified().len(),
+            report.diff().created().len()
+        );
+    } else {
+        println!("Materialized: 0 files (run 'loom hydrate <path>' when needed)");
+    }
+    Ok(())
+}
+
+fn run_hydrate(args: &[String]) -> Result<(), String> {
+    let target = required_path_arg("hydrate", args)?;
+    let store = open_store_for_path_or_folder(&target)?;
+    let scope = relative_scope_path(&store, &absolute_path_from_path(&target)?)
+        .map_err(|error| error.to_string())?;
+    let versions = tracked_versions_for_scope(&store, &scope).map_err(|error| error.to_string())?;
+    if versions.is_empty() {
+        return Err(format!(
+            "hydrate found no tracked files under {}",
+            path_to_store_string(&scope)
+        ));
+    }
+
+    let missing = versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter_map(|version| {
+            version
+                .object_id()
+                .filter(|object_id| !store.object_cache().exists(object_id))
+                .map(|object_id| (object_id.clone(), version.size_bytes()))
+        })
+        .collect::<Vec<_>>();
+    let mut fetched_objects = 0;
+    if !missing.is_empty() {
+        let remote_config = preferred_remote(&store)?;
+        let remote = remote_from_config(&remote_config)?;
+        for (object_id, size_bytes) in missing {
+            if hydrate_object_from_remote(&store, remote.as_ref(), &object_id, size_bytes)
+                .map_err(|error| error.to_string())?
+            {
+                fetched_objects += 1;
+            }
+        }
+    }
+
+    let report = hydrate_versions(&store, &versions).map_err(|error| error.to_string())?;
+    println!("Folder: {}", store.folder_root().display());
+    println!("Hydrated: {}", path_to_store_string(&scope));
+    println!("Fetched objects: {fetched_objects}");
     println!(
-        "Materialized: {} created, {} modified, {} removed",
-        report.diff().deleted().len(),
-        report.diff().modified().len(),
-        report.diff().created().len()
+        "Materialized: {} files, {} folders, {} already present",
+        report.materialized_files(),
+        report.materialized_directories(),
+        report.already_materialized_files()
     );
+    Ok(())
+}
+
+fn run_evict(args: &[String]) -> Result<(), String> {
+    let target = required_path_arg("evict", args)?;
+    let store = open_store_for_path_or_folder(&target)?;
+    let scope = relative_scope_path(&store, &absolute_path_from_path(&target)?)
+        .map_err(|error| error.to_string())?;
+    let versions = tracked_versions_for_scope(&store, &scope).map_err(|error| error.to_string())?;
+    if versions.is_empty() {
+        return Err(format!(
+            "evict found no tracked files under {}",
+            path_to_store_string(&scope)
+        ));
+    }
+    let pinned_scopes = local_pinned_scopes(&store)?;
+    let report =
+        evict_versions(&store, &versions, &pinned_scopes).map_err(|error| error.to_string())?;
+    println!("Folder: {}", store.folder_root().display());
+    println!("Evicted: {}", path_to_store_string(&scope));
+    println!(
+        "Removed: {} files, {} objects; already remote-only: {} files",
+        report.evicted_files(),
+        report.evicted_objects(),
+        report.already_remote_files()
+    );
+    Ok(())
+}
+
+fn run_pin(args: &[String]) -> Result<(), String> {
+    let target = required_path_arg("pin", args)?;
+    let store = open_store_for_path_or_folder(&target)?;
+    let scope = relative_scope_path(&store, &absolute_path_from_path(&target)?)
+        .map_err(|error| error.to_string())?;
+    let revision = store
+        .latest_revision()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no folder revisions yet; run 'loom status' first".to_string())?;
+    let pin = store
+        .pin_revision(
+            revision.id(),
+            format!("materialization-pin path={}", path_to_store_string(&scope)),
+        )
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Pinned: {}", path_to_store_string(&scope));
+    println!("Revision: {}", revision.id());
+    println!("Pin: {}", pin.id());
+    Ok(())
+}
+
+fn run_cache(args: &[String]) -> Result<(), String> {
+    match args {
+        [subcommand] if subcommand == "status" => run_cache_status(None),
+        [subcommand, folder] if subcommand == "status" => {
+            run_cache_status(Some(PathBuf::from(folder)))
+        }
+        _ => Err(
+            "cache command requires 'status [FOLDER]'\nUsage: loom cache status [FOLDER]"
+                .to_string(),
+        ),
+    }
+}
+
+fn run_cache_status(folder: Option<PathBuf>) -> Result<(), String> {
+    let store = open_store_from_optional_folder(folder)?;
+    let report =
+        cache_status_for_scope(&store, Path::new("")).map_err(|error| error.to_string())?;
+    println!("Folder: {}", store.folder_root().display());
+    println!("Cache status:");
+    println!("  hydrated: {}", report.hydrated_files());
+    println!("  remote-only: {}", report.remote_only_files());
+    println!("  partial: {}", report.partial_files());
+    println!("  total files: {}", report.total_files());
     Ok(())
 }
 
@@ -773,6 +951,16 @@ fn required_folder_arg(command: &str, args: &[String]) -> Result<PathBuf, String
     }
 }
 
+fn required_path_arg(command: &str, args: &[String]) -> Result<PathBuf, String> {
+    match args {
+        [path] => Ok(PathBuf::from(path)),
+        [] => Err(format!(
+            "{command} requires a path or folder\nUsage: loom {command} <PATH|FOLDER>"
+        )),
+        _ => Err(format!("{command} accepts exactly one path or folder")),
+    }
+}
+
 fn open_existing_store(args: &[String]) -> Result<LocalStore, String> {
     match args {
         [] => {
@@ -827,6 +1015,71 @@ fn open_store_for_sync_source(folder: Option<PathBuf>) -> Result<LocalStore, Str
             }
         }
     }
+}
+
+fn open_store_for_path_or_folder(path: &Path) -> Result<LocalStore, String> {
+    let absolute = absolute_path_from_path(path)?;
+    let mut current = if absolute.exists() && absolute.is_dir() {
+        absolute.clone()
+    } else {
+        absolute
+            .parent()
+            .ok_or_else(|| format!("path has no parent: {}", absolute.display()))?
+            .to_path_buf()
+    };
+
+    while !current.exists() {
+        if !current.pop() {
+            return Err(format!(
+                "could not find an existing ancestor for {}",
+                absolute.display()
+            ));
+        }
+    }
+
+    let mut current = fs::canonicalize(&current).map_err(|error| error.to_string())?;
+    loop {
+        if current
+            .join(".loom")
+            .join("metadata")
+            .join("shared_folder.tsv")
+            .is_file()
+        {
+            return LocalStore::open(&current).map_err(|error| error.to_string());
+        }
+        if !current.pop() {
+            return Err(format!(
+                "{} is not inside a tracked Loom folder",
+                absolute.display()
+            ));
+        }
+    }
+}
+
+fn preferred_remote(store: &LocalStore) -> Result<RemoteConfig, String> {
+    store
+        .remote(DEFAULT_REMOTE_NAME)
+        .map_err(|error| error.to_string())?
+        .or_else(|| store.remotes().ok().and_then(|mut remotes| remotes.pop()))
+        .ok_or_else(|| {
+            "no Loom remote configured; sparse hydration needs a remote with object bytes"
+                .to_string()
+        })
+}
+
+fn local_pinned_scopes(store: &LocalStore) -> Result<Vec<PathBuf>, String> {
+    let mut scopes = Vec::new();
+    for pin in store.pins().map_err(|error| error.to_string())? {
+        let Some(path) = pin.reason().strip_prefix("materialization-pin path=") else {
+            continue;
+        };
+        scopes.push(if path == "." {
+            PathBuf::new()
+        } else {
+            path.split('/').collect()
+        });
+    }
+    Ok(scopes)
 }
 
 fn absolute_path(path: &str) -> Result<PathBuf, String> {
@@ -888,6 +1141,13 @@ fn clone_remote_from_location(
 }
 
 #[derive(Debug, Clone)]
+struct CloneArgs {
+    remote_location: String,
+    target: PathBuf,
+    sparse: bool,
+}
+
+#[derive(Debug, Clone)]
 struct CheckpointArgs {
     folder: Option<PathBuf>,
     message: String,
@@ -911,6 +1171,30 @@ struct SyncDaemonArgs {
     debounce_ms: u64,
     poll_ms: u64,
     max_cycles: Option<usize>,
+}
+
+fn parse_clone_args(args: &[String]) -> Result<CloneArgs, String> {
+    let mut sparse = false;
+    let mut positional = Vec::new();
+
+    for arg in args {
+        if arg == "--sparse" {
+            sparse = true;
+        } else if arg.starts_with('-') {
+            return Err(format!("clone unknown option '{arg}'"));
+        } else {
+            positional.push(arg.clone());
+        }
+    }
+
+    match positional.as_slice() {
+        [remote_location, target] => Ok(CloneArgs {
+            remote_location: remote_location.clone(),
+            target: PathBuf::from(target),
+            sparse,
+        }),
+        _ => Err("clone requires a remote path and target folder\nUsage: loom clone <REMOTE> <FOLDER> [--sparse]".to_string()),
+    }
 }
 
 fn parse_checkpoint_args(args: &[String]) -> Result<CheckpointArgs, String> {
@@ -1178,7 +1462,11 @@ mod tests {
                 "restore",
                 "remote",
                 "sync",
-                "clone"
+                "clone",
+                "hydrate",
+                "evict",
+                "pin",
+                "cache"
             ]
         );
     }

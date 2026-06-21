@@ -733,6 +733,37 @@ impl LocalStore {
         Ok(entry)
     }
 
+    pub fn record_object_remote_only(
+        &self,
+        object_id: &ObjectId,
+        size_bytes: Option<u64>,
+    ) -> StoreResult<CacheEntry> {
+        let entry = CacheEntry::new(
+            object_id.clone(),
+            HydrationState::RemoteOnly,
+            object_ref_for_id(object_id),
+            size_bytes,
+            current_timestamp(),
+        )?;
+        self.upsert_cache_entry(entry.clone())?;
+        Ok(entry)
+    }
+
+    pub fn evict_cached_object(
+        &self,
+        object_id: &ObjectId,
+        size_bytes: Option<u64>,
+    ) -> StoreResult<CacheEntry> {
+        let path = self.object_cache.path_for(object_id);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StoreError::Io { path, source }),
+        }
+
+        self.record_object_remote_only(object_id, size_bytes)
+    }
+
     pub fn upsert_cache_entry(&self, entry: CacheEntry) -> StoreResult<()> {
         let mut entries = self.load_cache_entries()?;
         entries.insert(entry.object_id().clone(), entry);

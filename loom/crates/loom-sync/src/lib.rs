@@ -9,7 +9,7 @@ use loom_pack::{
     PackPayloadAvailability,
 };
 use loom_store::{LocalStore, ObjectCache, StoreError};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -317,7 +317,7 @@ pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> Sync
 }
 
 pub fn import_pack(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, None)
+    import_pack_with_remote(store, pack, None, true)
 }
 
 pub fn import_pack_from_remote(
@@ -325,26 +325,46 @@ pub fn import_pack_from_remote(
     pack: &LoomPack,
     remote: &dyn LoomRemote,
 ) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, Some(remote))
+    import_pack_with_remote(store, pack, Some(remote), true)
+}
+
+pub fn import_pack_metadata_only(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportReport> {
+    import_pack_with_remote(store, pack, None, false)
+}
+
+pub fn import_pack_metadata_only_from_remote(
+    store: &LocalStore,
+    pack: &LoomPack,
+    remote: &dyn LoomRemote,
+) -> SyncResult<ImportReport> {
+    import_pack_with_remote(store, pack, Some(remote), false)
 }
 
 fn import_pack_with_remote(
     store: &LocalStore,
     pack: &LoomPack,
     remote: Option<&dyn LoomRemote>,
+    hydrate_missing_objects: bool,
 ) -> SyncResult<ImportReport> {
     let mut imported_objects = 0;
     for object in &pack.manifest.objects {
         if !store.object_cache().exists(&object.object_id) {
             let payload = if let Some(payload) = pack.object_payload(&object.object_id) {
-                payload.payload.clone()
-            } else if let Some(remote) = remote {
-                remote.get_object(&object.object_id)?
+                Some(payload.payload.clone())
+            } else if hydrate_missing_objects {
+                let remote = remote
+                    .ok_or_else(|| SyncError::MissingObjectPayload(object.object_id.clone()))?;
+                Some(remote.get_object(&object.object_id)?)
             } else {
-                return Err(SyncError::MissingObjectPayload(object.object_id.clone()));
+                None
             };
-            store.import_object_bytes(&object.object_id, &payload)?;
-            imported_objects += 1;
+
+            if let Some(payload) = payload {
+                store.import_object_bytes(&object.object_id, &payload)?;
+                imported_objects += 1;
+            } else {
+                store.record_object_remote_only(&object.object_id, Some(object.size_bytes))?;
+            }
         } else {
             store.record_cached_object_hydrated(&object.object_id, object.size_bytes)?;
         }
@@ -382,6 +402,24 @@ fn import_pack_with_remote(
     })
 }
 
+pub fn hydrate_object_from_remote(
+    store: &LocalStore,
+    remote: &dyn LoomRemote,
+    object_id: &ObjectId,
+    expected_size_bytes: Option<u64>,
+) -> SyncResult<bool> {
+    if store.object_cache().exists(object_id) {
+        if let Some(size_bytes) = expected_size_bytes {
+            store.record_cached_object_hydrated(object_id, size_bytes)?;
+        }
+        return Ok(false);
+    }
+
+    let payload = remote.get_object(object_id)?;
+    store.import_object_bytes(object_id, &payload)?;
+    Ok(true)
+}
+
 pub fn build_pack(
     store: &LocalStore,
     latest_revision_id: &FolderRevisionId,
@@ -411,20 +449,38 @@ fn build_pack_with_payload_mode(
         return Err(SyncError::MissingRevision(latest_revision_id.clone()));
     }
 
-    let mut object_ids = BTreeSet::new();
+    let mut object_sizes = BTreeMap::new();
     for version in &file_versions {
         if let Some(object_id) = version.object_id() {
-            object_ids.insert(object_id.clone());
+            let size_bytes = version
+                .size_bytes()
+                .or_else(|| {
+                    store
+                        .cache_entry(object_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|entry| entry.size_bytes())
+                })
+                .ok_or_else(|| SyncError::MissingObjectSize(object_id.clone()))?;
+            object_sizes.entry(object_id.clone()).or_insert(size_bytes);
         }
     }
 
     let mut objects = Vec::new();
     let mut object_payloads = Vec::new();
-    for object_id in object_ids {
-        let payload = store.object_cache().read(&object_id)?;
+    for (object_id, size_bytes) in object_sizes {
+        let payload = if include_payloads {
+            Some(store.object_cache().read(&object_id)?)
+        } else {
+            None
+        };
+        let size_bytes = payload
+            .as_ref()
+            .map(|payload| payload.len() as u64)
+            .unwrap_or(size_bytes);
         objects.push(PackObject {
             object_id: object_id.clone(),
-            size_bytes: payload.len() as u64,
+            size_bytes,
             compression: PackCompression::None,
             availability: if include_payloads {
                 PackPayloadAvailability::Inline
@@ -432,7 +488,7 @@ fn build_pack_with_payload_mode(
                 PackPayloadAvailability::Remote
             },
         });
-        if include_payloads {
+        if let Some(payload) = payload {
             object_payloads.push(PackObjectPayload {
                 object_id,
                 compression: PackCompression::None,
@@ -492,6 +548,7 @@ pub enum SyncError {
     NoLocalRevision,
     MissingRevision(FolderRevisionId),
     MissingObjectPayload(ObjectId),
+    MissingObjectSize(ObjectId),
     InvalidCursor(String),
     CursorLockBusy {
         cursor_id: String,
@@ -528,6 +585,9 @@ impl fmt::Display for SyncError {
             }
             Self::MissingObjectPayload(object_id) => {
                 write!(f, "pack does not include payload bytes for object {object_id}")
+            }
+            Self::MissingObjectSize(object_id) => {
+                write!(f, "missing size metadata for object {object_id}")
             }
             Self::InvalidCursor(cursor_id) => {
                 write!(f, "invalid cursor id '{cursor_id}'")
@@ -576,6 +636,7 @@ impl std::error::Error for SyncError {
             Self::NoLocalRevision
             | Self::MissingRevision(_)
             | Self::MissingObjectPayload(_)
+            | Self::MissingObjectSize(_)
             | Self::InvalidCursor(_)
             | Self::CursorLockBusy { .. }
             | Self::CursorConflict { .. }

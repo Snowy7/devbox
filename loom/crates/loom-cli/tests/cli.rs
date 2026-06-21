@@ -16,6 +16,10 @@ fn help_lists_the_mvp_commands() {
         "remote",
         "sync",
         "clone",
+        "hydrate",
+        "evict",
+        "pin",
+        "cache",
     ] {
         assert!(stdout.contains(command), "{command} missing from help");
     }
@@ -199,6 +203,188 @@ fn remote_sync_and_clone_move_folder_state() {
     assert!(!target.join(".git").exists());
     assert!(!target.join("node_modules/pkg/index.js").exists());
     assert!(target.join(".loom").is_dir());
+}
+
+#[test]
+fn sparse_clone_hydrate_evict_pin_and_cache_status_control_materialization() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let sparse_target = dir.path().join("sparse-target");
+    let eager_target = dir.path().join("eager-target");
+    std::fs::create_dir_all(source.join("src")).expect("source creates");
+    std::fs::write(source.join("README.md"), "hello from source\n").expect("readme writes");
+    std::fs::write(source.join("src").join("main.rs"), "fn main() {}\n").expect("main writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+
+    let sparse_clone = run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        sparse_target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]);
+    assert_success(&sparse_clone);
+    let sparse_stdout = stdout(&sparse_clone);
+    assert!(sparse_stdout.contains("Mode: sparse metadata-only"));
+    assert!(sparse_stdout.contains("Materialized: 0 files"));
+    assert!(sparse_target.join(".loom").is_dir());
+    assert!(!sparse_target.join("README.md").exists());
+    assert!(!sparse_target.join("src").join("main.rs").exists());
+
+    let sparse_status = run_loom([
+        "cache",
+        "status",
+        sparse_target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&sparse_status);
+    let sparse_status_stdout = stdout(&sparse_status);
+    assert!(sparse_status_stdout.contains("remote-only: 2"));
+    assert!(sparse_status_stdout.contains("total files: 2"));
+
+    let status_after_sparse = run_loom(["status", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&status_after_sparse);
+    let status_after_sparse_stdout = stdout(&status_after_sparse);
+    assert!(
+        status_after_sparse_stdout.contains("No source changes since the latest folder revision.")
+    );
+    assert!(!status_after_sparse_stdout.contains("Captured new folder revision"));
+
+    let sync_after_sparse = run_loom(["sync", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&sync_after_sparse);
+
+    let hydrate_readme = run_loom([
+        "hydrate",
+        sparse_target
+            .join("README.md")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]);
+    assert_success(&hydrate_readme);
+    assert_eq!(
+        std::fs::read_to_string(sparse_target.join("README.md")).expect("readme reads"),
+        "hello from source\n"
+    );
+    assert!(!sparse_target.join("src").join("main.rs").exists());
+
+    std::fs::write(sparse_target.join("README.md"), "changed sparse file\n")
+        .expect("sparse readme edits");
+    let sync_after_sparse_edit = run_loom(["sync", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&sync_after_sparse_edit);
+    assert!(stdout(&sync_after_sparse_edit).contains("Pack objects: 1"));
+
+    std::fs::write(sparse_target.join("README.md"), "hello from source\n")
+        .expect("clean hydrated file restores");
+    assert_success(&run_loom([
+        "sync",
+        sparse_target.to_str().expect("UTF-8 path"),
+    ]));
+
+    std::fs::write(sparse_target.join("README.md"), "dirty after hydrate\n")
+        .expect("dirty hydrated file writes");
+    let dirty_evict = run_loom([
+        "evict",
+        sparse_target
+            .join("README.md")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]);
+    assert!(!dirty_evict.status.success());
+    assert!(stderr(&dirty_evict).contains("dirty local file"));
+    std::fs::write(sparse_target.join("README.md"), "hello from source\n")
+        .expect("clean hydrated file restores");
+
+    let evict_readme = run_loom([
+        "evict",
+        sparse_target
+            .join("README.md")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]);
+    assert_success(&evict_readme);
+    assert!(!sparse_target.join("README.md").exists());
+    let evict_status = run_loom([
+        "cache",
+        "status",
+        sparse_target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&evict_status);
+    assert!(stdout(&evict_status).contains("remote-only: 2"));
+
+    std::fs::create_dir_all(sparse_target.join("src")).expect("sparse src creates");
+    std::fs::write(
+        sparse_target.join("src").join("main.rs"),
+        "dirty local placeholder\n",
+    )
+    .expect("dirty sparse file writes");
+    let dirty_hydrate = run_loom([
+        "hydrate",
+        sparse_target
+            .join("src")
+            .join("main.rs")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]);
+    assert!(!dirty_hydrate.status.success());
+    assert!(stderr(&dirty_hydrate).contains("dirty local file"));
+    assert_eq!(
+        std::fs::read_to_string(sparse_target.join("src").join("main.rs"))
+            .expect("dirty sparse file reads"),
+        "dirty local placeholder\n"
+    );
+    std::fs::remove_file(sparse_target.join("src").join("main.rs"))
+        .expect("dirty sparse file removes");
+
+    assert_success(&run_loom([
+        "hydrate",
+        sparse_target
+            .join("README.md")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom([
+        "pin",
+        sparse_target
+            .join("README.md")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]));
+    let pinned_evict = run_loom([
+        "evict",
+        sparse_target
+            .join("README.md")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]);
+    assert!(!pinned_evict.status.success());
+    assert!(stderr(&pinned_evict).contains("pinned"));
+    assert!(sparse_target.join("README.md").exists());
+
+    let eager_clone = run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        eager_target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&eager_clone);
+    let eager_stdout = stdout(&eager_clone);
+    assert!(eager_stdout.contains("Mode: eager materialized"));
+    assert_eq!(
+        std::fs::read_to_string(eager_target.join("README.md")).expect("eager readme reads"),
+        "hello from source\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(eager_target.join("src").join("main.rs"))
+            .expect("eager main reads"),
+        "fn main() {}\n"
+    );
 }
 
 #[test]
