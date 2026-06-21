@@ -388,6 +388,182 @@ fn sparse_clone_hydrate_evict_pin_and_cache_status_control_materialization() {
 }
 
 #[test]
+fn cache_status_prune_and_prefetch_keep_sparse_cache_bounded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(source.join("src")).expect("src creates");
+    std::fs::create_dir_all(source.join("config")).expect("config creates");
+    std::fs::create_dir_all(source.join("node_modules/pkg")).expect("generated creates");
+    std::fs::write(source.join("README.md"), "hello\n").expect("readme writes");
+    std::fs::write(source.join("src").join("main.rs"), "fn main() {}\n").expect("main writes");
+    std::fs::write(source.join("config").join("app.toml"), "debug=1\n").expect("config writes");
+    std::fs::write(source.join("big.bin"), "x".repeat(80)).expect("large writes");
+    std::fs::write(source.join("node_modules/pkg/index.js"), "generated\n")
+        .expect("generated writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+
+    let sparse_status = run_loom(["cache", "status", target.to_str().expect("UTF-8 path")]);
+    assert_success(&sparse_status);
+    let sparse_status_stdout = stdout(&sparse_status);
+    assert!(sparse_status_stdout.contains("hydrated: 0"));
+    assert!(sparse_status_stdout.contains("remote-only: 4"));
+    assert!(sparse_status_stdout.contains("remote-only bytes: 107"));
+    assert!(sparse_status_stdout.contains("evictable: 0 files, 0 bytes"));
+
+    let prefetch = run_loom([
+        "cache",
+        "prefetch",
+        target.to_str().expect("UTF-8 path"),
+        "--max-bytes",
+        "20",
+    ]);
+    assert_success(&prefetch);
+    let prefetch_stdout = stdout(&prefetch);
+    assert!(prefetch_stdout.contains("Selected: 3 files; skipped large: 1 files"));
+    assert!(target.join("README.md").exists());
+    assert!(target.join("src").join("main.rs").exists());
+    assert!(target.join("config").join("app.toml").exists());
+    assert!(!target.join("big.bin").exists());
+    assert!(!target.join("node_modules/pkg/index.js").exists());
+
+    assert_success(&run_loom([
+        "pin",
+        target.join("README.md").to_str().expect("UTF-8 path"),
+    ]));
+    std::fs::write(target.join("src").join("main.rs"), "dirty local change\n")
+        .expect("dirty source writes");
+
+    let hydrated_status = run_loom(["cache", "status", target.to_str().expect("UTF-8 path")]);
+    assert_success(&hydrated_status);
+    let hydrated_status_stdout = stdout(&hydrated_status);
+    assert!(hydrated_status_stdout.contains("hydrated: 2"));
+    assert!(hydrated_status_stdout.contains("remote-only: 1"));
+    assert!(hydrated_status_stdout.contains("partial: 1"));
+    assert!(hydrated_status_stdout.contains("pinned: 1 files, 6 bytes"));
+    assert!(hydrated_status_stdout.contains("evictable: 1 files, 8 bytes"));
+
+    let prune = run_loom([
+        "cache",
+        "prune",
+        "--max-bytes",
+        "0",
+        target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&prune);
+    let prune_stdout = stdout(&prune);
+    assert!(prune_stdout.contains("Evicted: 1 files, 1 objects"));
+    assert!(prune_stdout.contains("Skipped: 1 pinned, 1 dirty, 0 unsupported"));
+    assert!(target.join("README.md").exists());
+    assert!(target.join("src").join("main.rs").exists());
+    assert!(!target.join("config").join("app.toml").exists());
+    assert_eq!(
+        std::fs::read_to_string(target.join("src").join("main.rs")).expect("dirty reads"),
+        "dirty local change\n"
+    );
+}
+
+#[test]
+fn cache_prune_refuses_without_remote_object_proof() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "local only\n").expect("readme writes");
+
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let prune = run_loom([
+        "cache",
+        "prune",
+        "--max-bytes",
+        "0",
+        fixture.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!prune.status.success());
+    assert!(stderr(&prune).contains("no Loom remote is configured"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("README.md")).expect("readme reads"),
+        "local only\n"
+    );
+
+    let status = run_loom(["cache", "status", fixture.to_str().expect("UTF-8 path")]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("hydrated: 1"));
+    assert!(status_stdout.contains("evictable: 0 files, 0 bytes"));
+}
+
+#[test]
+fn cache_status_counts_materialized_duplicate_objects_once_per_present_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("a.txt"), "same text\n").expect("a writes");
+    std::fs::write(source.join("b.txt"), "same text\n").expect("b writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+    assert_success(&run_loom(["hydrate", target.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "pin",
+        target.join("a.txt").to_str().expect("UTF-8 path"),
+    ]));
+
+    let prune = run_loom([
+        "cache",
+        "prune",
+        "--max-bytes",
+        "0",
+        target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&prune);
+    assert!(target.join("a.txt").exists());
+    assert!(!target.join("b.txt").exists());
+
+    let status = run_loom(["cache", "status", target.to_str().expect("UTF-8 path")]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("hydrated: 1"));
+    assert!(status_stdout.contains("partial: 1"));
+    assert!(status_stdout.contains("hydrated bytes: 10"));
+    assert!(status_stdout.contains("pinned: 1 files, 10 bytes"));
+    assert!(status_stdout.contains("evictable: 0 files, 0 bytes"));
+    assert!(!status_stdout.contains("hydrated bytes: 20"));
+}
+
+#[test]
 fn devbox_hosted_remote_sync_and_clone_move_folder_state() {
     let dir = tempfile::tempdir().expect("temp dir");
     let api =
