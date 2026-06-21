@@ -4,9 +4,9 @@
 //! hosted API that stores packs, cursors, sessions, devices, and shared-folder
 //! membership.
 
-use loom_core::{FolderRevisionId, SharedFolderId};
+use loom_core::{FolderRevisionId, ObjectId, SharedFolderId};
 use loom_pack::LoomPack;
-use loom_sync::{LoomRemote, SyncError, SyncResult};
+use loom_sync::{LoomRemote, ObjectTransferCapability, SyncError, SyncResult};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -178,6 +178,10 @@ impl DevboxHostedRemote {
 }
 
 impl LoomRemote for DevboxHostedRemote {
+    fn object_transfer_capability(&self) -> ObjectTransferCapability {
+        ObjectTransferCapability::InlinePackObjects
+    }
+
     fn get_cursor(&self, cursor_id: &str) -> SyncResult<Option<FolderRevisionId>> {
         let url = self.config.url(&self.config.loom_path(&format!(
             "cursors/{}",
@@ -288,6 +292,24 @@ impl LoomRemote for DevboxHostedRemote {
                 "devbox hosted pack download failed with HTTP status {status}"
             ))),
         }
+    }
+
+    fn has_object(&self, object_id: &ObjectId) -> SyncResult<bool> {
+        Err(SyncError::RemoteTransport(format!(
+            "devbox hosted remote does not expose separate object availability yet for {object_id}"
+        )))
+    }
+
+    fn put_object(&self, object_id: &ObjectId, _bytes: &[u8]) -> SyncResult<()> {
+        Err(SyncError::RemoteTransport(format!(
+            "devbox hosted remote does not expose separate object upload yet for {object_id}"
+        )))
+    }
+
+    fn get_object(&self, object_id: &ObjectId) -> SyncResult<Vec<u8>> {
+        Err(SyncError::RemoteTransport(format!(
+            "devbox hosted remote does not expose separate object download yet for {object_id}"
+        )))
     }
 }
 

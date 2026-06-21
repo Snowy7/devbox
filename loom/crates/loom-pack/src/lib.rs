@@ -1,8 +1,9 @@
 //! Loom pack-format boundary.
 //!
-//! PR4 uses a deterministic uncompressed envelope: metadata rows plus
-//! content-addressed object bytes. The object envelope is explicit so a future
-//! compressed representation can keep the same manifest semantics.
+//! The format uses a deterministic envelope: metadata rows, object
+//! availability rows, and optional content-addressed object payload rows.
+//! Compression is still `None`; the manifest keeps that field explicit so later
+//! compression can fit without changing folder-state semantics.
 
 use loom_core::{
     Checkpoint, CheckpointId, FileKind, FileVersion, FileVersionId, FolderEntry, FolderRevision,
@@ -11,17 +12,31 @@ use loom_core::{
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-const PACK_MAGIC: &str = "loom-pack-v1";
+const PACK_MAGIC_V1: &str = "loom-pack-v1";
+const PACK_MAGIC_V2: &str = "loom-pack-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackCompression {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackPayloadAvailability {
+    Inline,
+    Remote,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackObject {
     pub object_id: ObjectId,
     pub size_bytes: u64,
+    pub compression: PackCompression,
+    pub availability: PackPayloadAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackObjectPayload {
+    pub object_id: ObjectId,
     pub compression: PackCompression,
     pub payload: Vec<u8>,
 }
@@ -47,6 +62,7 @@ pub struct LoomPack {
     pub revisions: Vec<FolderRevision>,
     pub checkpoints: Vec<Checkpoint>,
     pub pins: Vec<Pin>,
+    pub object_payloads: Vec<PackObjectPayload>,
 }
 
 impl LoomPack {
@@ -59,6 +75,7 @@ impl LoomPack {
         checkpoints: Vec<Checkpoint>,
         pins: Vec<Pin>,
         objects: Vec<PackObject>,
+        object_payloads: Vec<PackObjectPayload>,
     ) -> Result<Self, PackError> {
         let display_name = display_name.into();
         if display_name.trim().is_empty() {
@@ -66,6 +83,7 @@ impl LoomPack {
                 "shared folder display name cannot be empty".to_string(),
             ));
         }
+        validate_object_payloads(&objects, &object_payloads)?;
 
         Ok(Self {
             manifest: PackManifest {
@@ -78,12 +96,31 @@ impl LoomPack {
             revisions,
             checkpoints,
             pins,
+            object_payloads,
         })
     }
 
+    pub fn object_payload(&self, object_id: &ObjectId) -> Option<&PackObjectPayload> {
+        self.object_payloads
+            .iter()
+            .find(|payload| &payload.object_id == object_id)
+    }
+
+    pub fn inline_object_count(&self) -> usize {
+        self.object_payloads.len()
+    }
+
     pub fn encode(&self) -> Vec<u8> {
+        let uses_v2_envelope = self.uses_v2_envelope();
         let mut rows = Vec::new();
-        rows.push(PACK_MAGIC.to_string());
+        rows.push(
+            if uses_v2_envelope {
+                PACK_MAGIC_V2
+            } else {
+                PACK_MAGIC_V1
+            }
+            .to_string(),
+        );
         rows.push(format!(
             "shared\t{}\t{}",
             encode_field(self.manifest.shared_folder_id.as_str()),
@@ -155,17 +192,48 @@ impl LoomPack {
         }
 
         for object in &self.manifest.objects {
-            rows.push(format!(
-                "object\t{}\t{}\t{}\t{}",
-                encode_field(object.object_id.as_str()),
-                object.size_bytes,
-                compression_to_pack(object.compression.clone()),
-                hex_encode(&object.payload)
-            ));
+            if uses_v2_envelope {
+                rows.push(format!(
+                    "object\t{}\t{}\t{}\t{}",
+                    encode_field(object.object_id.as_str()),
+                    object.size_bytes,
+                    compression_to_pack(object.compression.clone()),
+                    availability_to_pack(object.availability)
+                ));
+            } else {
+                let payload = self
+                    .object_payload(&object.object_id)
+                    .expect("validated inline packs always have payload rows");
+                rows.push(format!(
+                    "object\t{}\t{}\t{}\t{}",
+                    encode_field(object.object_id.as_str()),
+                    object.size_bytes,
+                    compression_to_pack(object.compression.clone()),
+                    hex_encode(&payload.payload)
+                ));
+            }
+        }
+
+        if uses_v2_envelope {
+            for payload in &self.object_payloads {
+                rows.push(format!(
+                    "object-payload\t{}\t{}\t{}",
+                    encode_field(payload.object_id.as_str()),
+                    compression_to_pack(payload.compression.clone()),
+                    hex_encode(&payload.payload)
+                ));
+            }
         }
 
         rows.push(String::new());
         rows.join("\n").into_bytes()
+    }
+
+    fn uses_v2_envelope(&self) -> bool {
+        self.manifest
+            .objects
+            .iter()
+            .any(|object| object.availability != PackPayloadAvailability::Inline)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, PackError> {
@@ -175,11 +243,15 @@ impl LoomPack {
         let magic = lines
             .next()
             .ok_or_else(|| PackError::InvalidFormat("empty pack".to_string()))?;
-        if magic != PACK_MAGIC {
-            return Err(PackError::InvalidFormat(format!(
-                "unknown pack magic {magic}"
-            )));
-        }
+        let is_v2 = match magic {
+            PACK_MAGIC_V1 => false,
+            PACK_MAGIC_V2 => true,
+            _ => {
+                return Err(PackError::InvalidFormat(format!(
+                    "unknown pack magic {magic}"
+                )));
+            }
+        };
 
         let mut shared_folder_id = None;
         let mut display_name = None;
@@ -190,6 +262,7 @@ impl LoomPack {
         let mut checkpoints = Vec::new();
         let mut pins = Vec::new();
         let mut objects = Vec::new();
+        let mut object_payloads = Vec::new();
 
         for (line_index, line) in lines.enumerate() {
             if line.trim().is_empty() {
@@ -298,18 +371,40 @@ impl LoomPack {
                             line_index + 2
                         ))
                     })?;
-                    let payload = hex_decode(fields[4])?;
-                    if payload.len() as u64 != size_bytes {
-                        return Err(PackError::InvalidFormat(format!(
-                            "line {} object payload size does not match manifest",
-                            line_index + 2
-                        )));
-                    }
+                    let availability = if is_v2 {
+                        availability_from_pack(fields[4]).ok_or_else(|| {
+                            PackError::InvalidFormat(format!(
+                                "line {} has unknown object availability",
+                                line_index + 2
+                            ))
+                        })?
+                    } else {
+                        let payload = hex_decode(fields[4])?;
+                        object_payloads.push(PackObjectPayload {
+                            object_id: object_id.clone(),
+                            compression: compression.clone(),
+                            payload,
+                        });
+                        PackPayloadAvailability::Inline
+                    };
                     objects.push(PackObject {
                         object_id,
                         size_bytes,
                         compression,
-                        payload,
+                        availability,
+                    });
+                }
+                Some("object-payload") if is_v2 => {
+                    expect_fields(&fields, 4, line_index + 2)?;
+                    object_payloads.push(PackObjectPayload {
+                        object_id: ObjectId::from_blake3_hex(decode_field(fields[1])?)?,
+                        compression: compression_from_pack(fields[2]).ok_or_else(|| {
+                            PackError::InvalidFormat(format!(
+                                "line {} has unknown compression",
+                                line_index + 2
+                            ))
+                        })?,
+                        payload: hex_decode(fields[3])?,
                     });
                 }
                 Some(tag) => {
@@ -357,6 +452,7 @@ impl LoomPack {
             checkpoints,
             pins,
             objects,
+            object_payloads,
         )
     }
 }
@@ -405,6 +501,60 @@ fn expect_fields(fields: &[&str], expected: usize, line_number: usize) -> Result
             "line {line_number} has {} fields, expected {expected}",
             fields.len()
         )));
+    }
+
+    Ok(())
+}
+
+fn validate_object_payloads(
+    objects: &[PackObject],
+    payloads: &[PackObjectPayload],
+) -> Result<(), PackError> {
+    for object in objects {
+        let payload = payloads
+            .iter()
+            .find(|payload| payload.object_id == object.object_id);
+        match (object.availability, payload) {
+            (PackPayloadAvailability::Inline, Some(payload)) => {
+                if payload.payload.len() as u64 != object.size_bytes {
+                    return Err(PackError::InvalidFormat(format!(
+                        "object {} payload size does not match manifest",
+                        object.object_id
+                    )));
+                }
+                if payload.compression != object.compression {
+                    return Err(PackError::InvalidFormat(format!(
+                        "object {} payload compression does not match manifest",
+                        object.object_id
+                    )));
+                }
+            }
+            (PackPayloadAvailability::Inline, None) => {
+                return Err(PackError::InvalidFormat(format!(
+                    "object {} is marked inline but has no payload row",
+                    object.object_id
+                )));
+            }
+            (PackPayloadAvailability::Remote, Some(_)) => {
+                return Err(PackError::InvalidFormat(format!(
+                    "object {} is marked remote but has inline payload bytes",
+                    object.object_id
+                )));
+            }
+            (PackPayloadAvailability::Remote, None) => {}
+        }
+    }
+
+    for payload in payloads {
+        if !objects
+            .iter()
+            .any(|object| object.object_id == payload.object_id)
+        {
+            return Err(PackError::InvalidFormat(format!(
+                "payload row references unknown object {}",
+                payload.object_id
+            )));
+        }
     }
 
     Ok(())
@@ -461,6 +611,21 @@ fn compression_to_pack(compression: PackCompression) -> &'static str {
 fn compression_from_pack(value: &str) -> Option<PackCompression> {
     match value {
         "none" => Some(PackCompression::None),
+        _ => None,
+    }
+}
+
+fn availability_to_pack(availability: PackPayloadAvailability) -> &'static str {
+    match availability {
+        PackPayloadAvailability::Inline => "inline",
+        PackPayloadAvailability::Remote => "remote",
+    }
+}
+
+fn availability_from_pack(value: &str) -> Option<PackPayloadAvailability> {
+    match value {
+        "inline" => Some(PackPayloadAvailability::Inline),
+        "remote" => Some(PackPayloadAvailability::Remote),
         _ => None,
     }
 }
@@ -579,7 +744,7 @@ mod tests {
                 object_id: object_id(),
                 size_bytes: 12,
                 compression: PackCompression::None,
-                payload: b"hello world!".to_vec(),
+                availability: PackPayloadAvailability::Inline,
             }],
         };
 
@@ -608,6 +773,7 @@ mod tests {
             "unix:2",
         )
         .expect("revision");
+        let expected_object_id = object_id.to_string();
         let pack = LoomPack::new(
             shared_folder_id,
             "devbox",
@@ -617,17 +783,93 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![PackObject {
-                object_id,
+                object_id: object_id.clone(),
                 size_bytes: 12,
+                compression: PackCompression::None,
+                availability: PackPayloadAvailability::Inline,
+            }],
+            vec![PackObjectPayload {
+                object_id,
                 compression: PackCompression::None,
                 payload: b"hello world!".to_vec(),
             }],
         )
         .expect("pack");
 
-        let decoded = LoomPack::decode(&pack.encode()).expect("pack decodes");
+        let encoded = pack.encode();
+        let encoded_text = std::str::from_utf8(&encoded).expect("pack is utf8");
+
+        assert!(encoded_text.starts_with(PACK_MAGIC_V1));
+        assert!(encoded_text.contains(&format!(
+            "object\t{}\t12\tnone\t{}",
+            expected_object_id,
+            hex_encode(b"hello world!")
+        )));
+        assert!(!encoded_text.contains("\tinline"));
+        assert!(!encoded_text.contains("object-payload"));
+
+        let decoded = LoomPack::decode(&encoded).expect("pack decodes");
 
         assert_eq!(decoded, pack);
         assert_eq!(decoded.manifest.object_count(), 1);
+        assert_eq!(decoded.inline_object_count(), 1);
+    }
+
+    #[test]
+    fn metadata_only_pack_round_trips_object_manifest() {
+        let shared_folder_id = SharedFolderId::new("folder-devbox").expect("folder id");
+        let object_id = object_id();
+        let revision_id = FolderRevisionId::new("revision-1").expect("revision id");
+        let pack = LoomPack::new(
+            shared_folder_id,
+            "devbox",
+            revision_id,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![PackObject {
+                object_id: object_id.clone(),
+                size_bytes: 12,
+                compression: PackCompression::None,
+                availability: PackPayloadAvailability::Remote,
+            }],
+            Vec::new(),
+        )
+        .expect("pack");
+
+        let encoded = pack.encode();
+        let encoded_text = std::str::from_utf8(&encoded).expect("pack is utf8");
+
+        assert!(encoded_text.starts_with(PACK_MAGIC_V2));
+        assert!(encoded_text.contains(&format!("object\t{object_id}\t12\tnone\tremote")));
+
+        let decoded = LoomPack::decode(&encoded).expect("pack decodes");
+
+        assert_eq!(decoded.manifest.object_count(), 1);
+        assert_eq!(decoded.inline_object_count(), 0);
+        assert_eq!(decoded.manifest.objects[0].object_id, object_id);
+        assert_eq!(
+            decoded.manifest.objects[0].availability,
+            PackPayloadAvailability::Remote
+        );
+    }
+
+    #[test]
+    fn legacy_inline_object_rows_still_decode() {
+        let encoded = format!(
+            "loom-pack-v1\nshared\tfolder-devbox\tdevbox\nlatest\trevision-1\nobject\t{}\t12\tnone\t{}\n",
+            object_id(),
+            hex_encode(b"hello world!")
+        );
+
+        let decoded = LoomPack::decode(encoded.as_bytes()).expect("legacy pack decodes");
+
+        assert_eq!(decoded.manifest.object_count(), 1);
+        assert_eq!(decoded.inline_object_count(), 1);
+        assert_eq!(
+            decoded.manifest.objects[0].availability,
+            PackPayloadAvailability::Inline
+        );
     }
 }
