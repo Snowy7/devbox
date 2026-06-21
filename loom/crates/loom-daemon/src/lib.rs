@@ -8,7 +8,7 @@ use devbox_remote::{DevboxHostedRemote, DevboxHostedRemoteConfig, DEVBOX_HOSTED_
 use loom_core::{FolderRevision, FolderRevisionId, RevisionBoundary};
 use loom_store::{path_to_store_string, LocalStore, RemoteConfig, StoreError};
 use loom_sync::{
-    import_pack, sync_store_to_remote, LocalFilesystemRemote, LoomRemote, SyncError,
+    import_pack_from_remote, sync_store_to_remote, LocalFilesystemRemote, LoomRemote, SyncError,
     DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME, LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
@@ -548,7 +548,7 @@ pub fn reconcile_once(
             });
         }
 
-        import_pack(store, &pack)?;
+        import_pack_from_remote(store, &pack, remote)?;
         let revision = store.revision_by_id(&remote_revision_id)?.ok_or_else(|| {
             DaemonError::Sync(SyncError::MissingRevision(remote_revision_id.clone()))
         })?;
@@ -1411,7 +1411,7 @@ mod tests {
                 pack.manifest.display_name.clone(),
             )
             .expect("target clone store");
-            import_pack(&target_store, &pack).expect("pack imports");
+            import_pack_from_remote(&target_store, &pack, &remote).expect("pack imports");
             let current = CaptureEngine::new(&target_store)
                 .capture(&CaptureRequest::new(
                     target_store.shared_folder().clone(),

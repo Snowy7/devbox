@@ -989,7 +989,10 @@ fn product_sync_error(error: SyncError) -> String {
         SyncError::CursorConflict { .. } | SyncError::DivergentState { .. } => {
             "Sync paused because this folder changed in more than one place. Run devbox status before resuming.".to_string()
         }
-        SyncError::MissingRemotePack(_) | SyncError::MissingRevision(_) | SyncError::Pack(_) => {
+        SyncError::MissingRemotePack(_)
+        | SyncError::MissingRevision(_)
+        | SyncError::MissingObjectPayload(_)
+        | SyncError::Pack(_) => {
             "Devbox could not read the latest shared folder data; try again".to_string()
         }
         SyncError::NoLocalRevision => {

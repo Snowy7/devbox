@@ -3,9 +3,12 @@
 //! Human Loom commands use `sync` and `clone`; this crate deliberately uses
 //! folder-continuity vocabulary instead of Git-shaped transport commands.
 
-use loom_core::{FolderRevision, FolderRevisionId, SharedFolderId};
-use loom_pack::{LoomPack, PackCompression, PackError, PackManifest, PackObject};
-use loom_store::{LocalStore, StoreError};
+use loom_core::{FolderRevision, FolderRevisionId, ObjectId, SharedFolderId};
+use loom_pack::{
+    LoomPack, PackCompression, PackError, PackManifest, PackObject, PackObjectPayload,
+    PackPayloadAvailability,
+};
+use loom_store::{LocalStore, ObjectCache, StoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -52,7 +55,16 @@ pub struct ImportReport {
     pub imported_objects: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectTransferCapability {
+    InlinePackObjects,
+    SeparateObjects,
+}
+
 pub trait LoomRemote {
+    fn object_transfer_capability(&self) -> ObjectTransferCapability {
+        ObjectTransferCapability::InlinePackObjects
+    }
     fn get_cursor(&self, cursor_id: &str) -> SyncResult<Option<FolderRevisionId>>;
     fn compare_and_set_cursor(
         &self,
@@ -62,6 +74,9 @@ pub trait LoomRemote {
     ) -> SyncResult<()>;
     fn put_pack(&self, pack: &LoomPack) -> SyncResult<()>;
     fn get_pack(&self, revision_id: &FolderRevisionId) -> SyncResult<LoomPack>;
+    fn has_object(&self, object_id: &ObjectId) -> SyncResult<bool>;
+    fn put_object(&self, object_id: &ObjectId, bytes: &[u8]) -> SyncResult<()>;
+    fn get_object(&self, object_id: &ObjectId) -> SyncResult<Vec<u8>>;
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +112,14 @@ impl LocalFilesystemRemote {
         self.root.join("cursors")
     }
 
+    fn object_cache_root(&self) -> PathBuf {
+        self.root.join("object-cache")
+    }
+
+    fn object_cache(&self) -> SyncResult<ObjectCache> {
+        ObjectCache::open(self.object_cache_root()).map_err(SyncError::Store)
+    }
+
     fn marker_path(&self) -> PathBuf {
         self.root.join("loom-remote-v1")
     }
@@ -105,6 +128,7 @@ impl LocalFilesystemRemote {
         create_dir_all(&self.root)?;
         create_dir_all(self.packs_dir())?;
         create_dir_all(self.cursors_dir())?;
+        self.object_cache()?;
         fs::write(self.marker_path(), b"loom local filesystem remote\n").map_err(|source| {
             SyncError::Io {
                 path: self.marker_path(),
@@ -170,6 +194,10 @@ impl LocalFilesystemRemote {
 }
 
 impl LoomRemote for LocalFilesystemRemote {
+    fn object_transfer_capability(&self) -> ObjectTransferCapability {
+        ObjectTransferCapability::SeparateObjects
+    }
+
     fn get_cursor(&self, cursor_id: &str) -> SyncResult<Option<FolderRevisionId>> {
         let path = self.cursor_path(cursor_id)?;
         match fs::read_to_string(&path) {
@@ -218,6 +246,22 @@ impl LoomRemote for LocalFilesystemRemote {
         let bytes = fs::read(&path).map_err(|source| SyncError::Io { path, source })?;
         LoomPack::decode(&bytes).map_err(SyncError::Pack)
     }
+
+    fn has_object(&self, object_id: &ObjectId) -> SyncResult<bool> {
+        Ok(self.object_cache()?.exists(object_id))
+    }
+
+    fn put_object(&self, object_id: &ObjectId, bytes: &[u8]) -> SyncResult<()> {
+        self.ensure_layout()?;
+        self.object_cache()?.import_bytes(object_id, bytes)?;
+        Ok(())
+    }
+
+    fn get_object(&self, object_id: &ObjectId) -> SyncResult<Vec<u8>> {
+        self.object_cache()?
+            .read(object_id)
+            .map_err(SyncError::Store)
+    }
 }
 
 pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> SyncResult<SyncReport> {
@@ -239,8 +283,25 @@ pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> Sync
         }
     }
 
-    let pack = build_pack(store, latest.id())?;
-    let uploaded_objects = pack.manifest.objects.len();
+    let (pack, uploaded_objects) = match remote.object_transfer_capability() {
+        ObjectTransferCapability::SeparateObjects => {
+            let pack = build_metadata_pack(store, latest.id())?;
+            let mut uploaded_objects = 0;
+            for object in &pack.manifest.objects {
+                if !remote.has_object(&object.object_id)? {
+                    let payload = store.object_cache().read(&object.object_id)?;
+                    remote.put_object(&object.object_id, &payload)?;
+                    uploaded_objects += 1;
+                }
+            }
+            (pack, uploaded_objects)
+        }
+        ObjectTransferCapability::InlinePackObjects => {
+            let pack = build_pack(store, latest.id())?;
+            let uploaded_objects = pack.manifest.objects.len();
+            (pack, uploaded_objects)
+        }
+    };
     remote.put_pack(&pack)?;
     remote.compare_and_set_cursor(
         DEFAULT_CURSOR_ID,
@@ -256,10 +317,33 @@ pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> Sync
 }
 
 pub fn import_pack(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportReport> {
+    import_pack_with_remote(store, pack, None)
+}
+
+pub fn import_pack_from_remote(
+    store: &LocalStore,
+    pack: &LoomPack,
+    remote: &dyn LoomRemote,
+) -> SyncResult<ImportReport> {
+    import_pack_with_remote(store, pack, Some(remote))
+}
+
+fn import_pack_with_remote(
+    store: &LocalStore,
+    pack: &LoomPack,
+    remote: Option<&dyn LoomRemote>,
+) -> SyncResult<ImportReport> {
     let mut imported_objects = 0;
     for object in &pack.manifest.objects {
         if !store.object_cache().exists(&object.object_id) {
-            store.import_object_bytes(&object.object_id, &object.payload)?;
+            let payload = if let Some(payload) = pack.object_payload(&object.object_id) {
+                payload.payload.clone()
+            } else if let Some(remote) = remote {
+                remote.get_object(&object.object_id)?
+            } else {
+                return Err(SyncError::MissingObjectPayload(object.object_id.clone()));
+            };
+            store.import_object_bytes(&object.object_id, &payload)?;
             imported_objects += 1;
         } else {
             store.record_cached_object_hydrated(&object.object_id, object.size_bytes)?;
@@ -302,6 +386,21 @@ pub fn build_pack(
     store: &LocalStore,
     latest_revision_id: &FolderRevisionId,
 ) -> SyncResult<LoomPack> {
+    build_pack_with_payload_mode(store, latest_revision_id, true)
+}
+
+pub fn build_metadata_pack(
+    store: &LocalStore,
+    latest_revision_id: &FolderRevisionId,
+) -> SyncResult<LoomPack> {
+    build_pack_with_payload_mode(store, latest_revision_id, false)
+}
+
+fn build_pack_with_payload_mode(
+    store: &LocalStore,
+    latest_revision_id: &FolderRevisionId,
+    include_payloads: bool,
+) -> SyncResult<LoomPack> {
     let export = store.export_state()?;
     let file_versions = export.file_versions;
     let revisions = export.revisions;
@@ -320,14 +419,26 @@ pub fn build_pack(
     }
 
     let mut objects = Vec::new();
+    let mut object_payloads = Vec::new();
     for object_id in object_ids {
         let payload = store.object_cache().read(&object_id)?;
         objects.push(PackObject {
-            object_id,
+            object_id: object_id.clone(),
             size_bytes: payload.len() as u64,
             compression: PackCompression::None,
-            payload,
+            availability: if include_payloads {
+                PackPayloadAvailability::Inline
+            } else {
+                PackPayloadAvailability::Remote
+            },
         });
+        if include_payloads {
+            object_payloads.push(PackObjectPayload {
+                object_id,
+                compression: PackCompression::None,
+                payload,
+            });
+        }
     }
 
     LoomPack::new(
@@ -339,6 +450,7 @@ pub fn build_pack(
         export.checkpoints,
         export.pins,
         objects,
+        object_payloads,
     )
     .map_err(SyncError::Pack)
 }
@@ -379,6 +491,7 @@ pub enum SyncError {
     Loom(loom_core::LoomError),
     NoLocalRevision,
     MissingRevision(FolderRevisionId),
+    MissingObjectPayload(ObjectId),
     InvalidCursor(String),
     CursorLockBusy {
         cursor_id: String,
@@ -412,6 +525,9 @@ impl fmt::Display for SyncError {
             }
             Self::MissingRevision(revision_id) => {
                 write!(f, "missing local folder revision {revision_id}")
+            }
+            Self::MissingObjectPayload(object_id) => {
+                write!(f, "pack does not include payload bytes for object {object_id}")
             }
             Self::InvalidCursor(cursor_id) => {
                 write!(f, "invalid cursor id '{cursor_id}'")
@@ -459,6 +575,7 @@ impl std::error::Error for SyncError {
             Self::Loom(error) => Some(error),
             Self::NoLocalRevision
             | Self::MissingRevision(_)
+            | Self::MissingObjectPayload(_)
             | Self::InvalidCursor(_)
             | Self::CursorLockBusy { .. }
             | Self::CursorConflict { .. }
@@ -552,6 +669,7 @@ mod tests {
             .expect("pack exists");
 
         assert_eq!(report.latest_revision_id, *revision.id());
+        assert_eq!(report.uploaded_objects, 1);
         assert_eq!(
             remote
                 .get_cursor(DEFAULT_CURSOR_ID)
@@ -561,6 +679,10 @@ mod tests {
         );
         assert_eq!(pack.manifest.latest_revision_id, *revision.id());
         assert_eq!(pack.manifest.object_count(), 1);
+        assert_eq!(pack.inline_object_count(), 0);
+        assert!(remote
+            .has_object(object.id())
+            .expect("remote object metadata reads"));
     }
 
     #[test]
@@ -614,6 +736,56 @@ mod tests {
                 .read(object.id())
                 .expect("target object reads"),
             b"hello from pack\n"
+        );
+    }
+
+    #[test]
+    fn pack_import_can_fetch_metadata_only_objects_from_remote() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_folder = dir.path().join("source");
+        let target_folder = dir.path().join("target");
+        fs::create_dir_all(&source_folder).expect("source folder creates");
+        let source_store = LocalStore::open_or_init(&source_folder)
+            .expect("source store initializes")
+            .into_store();
+        let object = source_store
+            .object_cache()
+            .write_bytes(b"hello from remote object\n")
+            .expect("source object writes");
+        let version = loom_core::FileVersion::new(
+            loom_core::FileVersionId::new("file-version-remote-object").expect("file version id"),
+            "README.md",
+            loom_core::FileKind::File,
+            Some(object.id().clone()),
+            Some(object.size_bytes()),
+            "unix:1",
+        )
+        .expect("file version");
+        let revision = source_store
+            .coalesce_folder_revision(RevisionBoundary::Sync, &[version])
+            .expect("revision")
+            .revision()
+            .clone();
+        let remote = LocalFilesystemRemote::new(dir.path().join("remote"));
+        sync_store_to_remote(&source_store, &remote).expect("sync succeeds");
+        let pack = remote.get_pack(revision.id()).expect("pack reads");
+        let target_store = LocalStore::init_clone(
+            &target_folder,
+            pack.manifest.shared_folder_id.clone(),
+            pack.manifest.display_name.clone(),
+        )
+        .expect("target store initializes");
+
+        let report = import_pack_from_remote(&target_store, &pack, &remote).expect("pack imports");
+
+        assert_eq!(report.imported_objects, 1);
+        assert_eq!(pack.inline_object_count(), 0);
+        assert_eq!(
+            target_store
+                .object_cache()
+                .read(object.id())
+                .expect("target object reads"),
+            b"hello from remote object\n"
         );
     }
 

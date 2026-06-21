@@ -9,8 +9,8 @@ use loom_store::{
     ResolvedRevisionTarget,
 };
 use loom_sync::{
-    import_pack, sync_store_to_remote, LocalFilesystemRemote, LoomRemote, DEFAULT_REMOTE_NAME,
-    LOCAL_FILESYSTEM_REMOTE_KIND,
+    import_pack_from_remote, sync_store_to_remote, LocalFilesystemRemote, LoomRemote,
+    DEFAULT_REMOTE_NAME, LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
     diff_revision_to_capture, evaluate_directory_policy, CaptureEngine, CaptureRequest,
@@ -513,7 +513,8 @@ fn run_clone(args: &[String]) -> Result<(), String> {
         pack.manifest.display_name.clone(),
     )
     .map_err(|error| error.to_string())?;
-    let import_report = import_pack(&store, &pack).map_err(|error| error.to_string())?;
+    let import_report = import_pack_from_remote(&store, &pack, remote.as_ref())
+        .map_err(|error| error.to_string())?;
     let current = capture_worktree(&store, RevisionBoundary::Restore)?;
     ensure_no_blocked_or_deferred(&current, "clone")?;
     if !current.file_versions().is_empty() {
