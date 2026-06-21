@@ -9,7 +9,7 @@ use loom_pack::{
     PackPayloadAvailability,
 };
 use loom_store::{LocalStore, ObjectCache, StoreError};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -449,20 +449,38 @@ fn build_pack_with_payload_mode(
         return Err(SyncError::MissingRevision(latest_revision_id.clone()));
     }
 
-    let mut object_ids = BTreeSet::new();
+    let mut object_sizes = BTreeMap::new();
     for version in &file_versions {
         if let Some(object_id) = version.object_id() {
-            object_ids.insert(object_id.clone());
+            let size_bytes = version
+                .size_bytes()
+                .or_else(|| {
+                    store
+                        .cache_entry(object_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|entry| entry.size_bytes())
+                })
+                .ok_or_else(|| SyncError::MissingObjectSize(object_id.clone()))?;
+            object_sizes.entry(object_id.clone()).or_insert(size_bytes);
         }
     }
 
     let mut objects = Vec::new();
     let mut object_payloads = Vec::new();
-    for object_id in object_ids {
-        let payload = store.object_cache().read(&object_id)?;
+    for (object_id, size_bytes) in object_sizes {
+        let payload = if include_payloads {
+            Some(store.object_cache().read(&object_id)?)
+        } else {
+            None
+        };
+        let size_bytes = payload
+            .as_ref()
+            .map(|payload| payload.len() as u64)
+            .unwrap_or(size_bytes);
         objects.push(PackObject {
             object_id: object_id.clone(),
-            size_bytes: payload.len() as u64,
+            size_bytes,
             compression: PackCompression::None,
             availability: if include_payloads {
                 PackPayloadAvailability::Inline
@@ -470,7 +488,7 @@ fn build_pack_with_payload_mode(
                 PackPayloadAvailability::Remote
             },
         });
-        if include_payloads {
+        if let Some(payload) = payload {
             object_payloads.push(PackObjectPayload {
                 object_id,
                 compression: PackCompression::None,
@@ -530,6 +548,7 @@ pub enum SyncError {
     NoLocalRevision,
     MissingRevision(FolderRevisionId),
     MissingObjectPayload(ObjectId),
+    MissingObjectSize(ObjectId),
     InvalidCursor(String),
     CursorLockBusy {
         cursor_id: String,
@@ -566,6 +585,9 @@ impl fmt::Display for SyncError {
             }
             Self::MissingObjectPayload(object_id) => {
                 write!(f, "pack does not include payload bytes for object {object_id}")
+            }
+            Self::MissingObjectSize(object_id) => {
+                write!(f, "missing size metadata for object {object_id}")
             }
             Self::InvalidCursor(cursor_id) => {
                 write!(f, "invalid cursor id '{cursor_id}'")
@@ -614,6 +636,7 @@ impl std::error::Error for SyncError {
             Self::NoLocalRevision
             | Self::MissingRevision(_)
             | Self::MissingObjectPayload(_)
+            | Self::MissingObjectSize(_)
             | Self::InvalidCursor(_)
             | Self::CursorLockBusy { .. }
             | Self::CursorConflict { .. }

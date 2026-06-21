@@ -334,6 +334,7 @@ impl<'a> CaptureEngine<'a> {
         let captured_at = current_timestamp();
         let mut capture = WorktreeCapture::new(root.clone(), captured_at.clone());
         walk_directory(self.store, &root, &root, &captured_at, &mut capture)?;
+        preserve_remote_only_latest_entries(self.store, &root, &mut capture)?;
         capture.file_versions.sort_by(|left, right| {
             path_to_store_string(left.path()).cmp(&path_to_store_string(right.path()))
         });
@@ -1315,6 +1316,84 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
         || left == right
         || left.starts_with(right)
         || right.starts_with(left)
+}
+
+fn preserve_remote_only_latest_entries(
+    store: &LocalStore,
+    root: &Path,
+    capture: &mut WorktreeCapture,
+) -> CaptureResult<()> {
+    let Some(revision) = store.latest_revision().map_err(CaptureError::Store)? else {
+        return Ok(());
+    };
+
+    let file_versions = store
+        .file_versions()
+        .map_err(CaptureError::Store)?
+        .into_iter()
+        .map(|version| (version.id().clone(), version))
+        .collect::<BTreeMap<_, _>>();
+    let captured_paths = capture
+        .file_versions
+        .iter()
+        .map(|version| version.path().to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let mut latest_versions = Vec::new();
+
+    for entry in revision.entries() {
+        let version = file_versions.get(entry.file_version_id()).ok_or_else(|| {
+            CaptureError::MissingRevisionFileVersion {
+                revision_id: revision.id().clone(),
+                file_version_id: entry.file_version_id().clone(),
+            }
+        })?;
+        if version.path() != entry.path() {
+            return Err(CaptureError::UnsafeRestore {
+                path: entry.path().to_path_buf(),
+                reason: format!(
+                    "revision entry points at file version for {}",
+                    path_to_store_string(version.path())
+                ),
+            });
+        }
+        latest_versions.push(version.clone());
+    }
+
+    let remote_only_files = latest_versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter(|version| !captured_paths.contains(version.path()))
+        .filter(|version| !root.join(version.path()).exists())
+        .filter_map(|version| {
+            let object_id = version.object_id()?;
+            match store.cache_entry(object_id) {
+                Ok(Some(entry)) if entry.hydration_state() == HydrationState::RemoteOnly => {
+                    Some(version.path().to_path_buf())
+                }
+                _ => None,
+            }
+        })
+        .collect::<BTreeSet<_>>();
+
+    for version in latest_versions {
+        if captured_paths.contains(version.path()) || root.join(version.path()).exists() {
+            continue;
+        }
+
+        let preserve = match version.kind() {
+            FileKind::File => remote_only_files.contains(version.path()),
+            FileKind::Directory => remote_only_files
+                .iter()
+                .any(|file_path| file_path.starts_with(version.path())),
+            FileKind::Symlink | FileKind::Unsupported => false,
+        };
+
+        if preserve {
+            capture.file_versions.push(version);
+        }
+    }
+
+    Ok(())
 }
 
 fn restore_remove_dir_error(

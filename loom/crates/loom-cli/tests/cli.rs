@@ -250,6 +250,17 @@ fn sparse_clone_hydrate_evict_pin_and_cache_status_control_materialization() {
     assert!(sparse_status_stdout.contains("remote-only: 2"));
     assert!(sparse_status_stdout.contains("total files: 2"));
 
+    let status_after_sparse = run_loom(["status", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&status_after_sparse);
+    let status_after_sparse_stdout = stdout(&status_after_sparse);
+    assert!(
+        status_after_sparse_stdout.contains("No source changes since the latest folder revision.")
+    );
+    assert!(!status_after_sparse_stdout.contains("Captured new folder revision"));
+
+    let sync_after_sparse = run_loom(["sync", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&sync_after_sparse);
+
     let hydrate_readme = run_loom([
         "hydrate",
         sparse_target
@@ -263,6 +274,19 @@ fn sparse_clone_hydrate_evict_pin_and_cache_status_control_materialization() {
         "hello from source\n"
     );
     assert!(!sparse_target.join("src").join("main.rs").exists());
+
+    std::fs::write(sparse_target.join("README.md"), "changed sparse file\n")
+        .expect("sparse readme edits");
+    let sync_after_sparse_edit = run_loom(["sync", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&sync_after_sparse_edit);
+    assert!(stdout(&sync_after_sparse_edit).contains("Pack objects: 1"));
+
+    std::fs::write(sparse_target.join("README.md"), "hello from source\n")
+        .expect("clean hydrated file restores");
+    assert_success(&run_loom([
+        "sync",
+        sparse_target.to_str().expect("UTF-8 path"),
+    ]));
 
     std::fs::write(sparse_target.join("README.md"), "dirty after hydrate\n")
         .expect("dirty hydrated file writes");
