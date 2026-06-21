@@ -4,7 +4,7 @@ use loom_core::{RevisionBoundary, SharedFolderId};
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
 use loom_store::{LocalStore, RemoteConfig, StoreError};
 use loom_sync::{
-    import_pack, sync_store_to_remote, LoomRemote, SyncError, DEFAULT_CURSOR_ID,
+    import_pack_from_remote, sync_store_to_remote, LoomRemote, SyncError, DEFAULT_CURSOR_ID,
     DEFAULT_REMOTE_NAME,
 };
 use loom_worktree::{
@@ -268,7 +268,7 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
         pack.manifest.display_name.clone(),
     )
     .map_err(product_store_error)?;
-    import_pack(&store, &pack)
+    import_pack_from_remote(&store, &pack, &remote)
         .map_err(|_| "could not prepare shared folder data on this machine".to_string())?;
     let current = capture_worktree(&store, RevisionBoundary::Restore)?;
     ensure_no_blocked_or_deferred(&current, "clone")?;

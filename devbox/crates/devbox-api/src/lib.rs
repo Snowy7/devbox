@@ -9,7 +9,7 @@ use devbox_sync::{
     ObjectKey, RemoteBlobProvider, S3CompatibleBlobProvider, S3CompatibleConfig,
     S3CredentialsSource, SyncError,
 };
-use loom_core::{CursorId, FolderRevisionId, SharedFolderId};
+use loom_core::{CursorId, FolderRevisionId, ObjectId, SharedFolderId};
 use postgres::{Client as PostgresClient, NoTls, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -150,7 +150,7 @@ impl fmt::Display for ApiError {
                 expected.as_deref().unwrap_or("-"),
                 actual.as_deref().unwrap_or("-")
             ),
-            Self::RemoteStorage(message) => write!(f, "hosted pack storage error: {message}"),
+            Self::RemoteStorage(message) => write!(f, "hosted storage error: {message}"),
             Self::Database(message) => write!(f, "metadata database error: {message}"),
             Self::Json(message) => write!(f, "{message}"),
         }
@@ -210,6 +210,9 @@ trait PackStorage: fmt::Debug + Send + Sync {
     fn label(&self) -> &'static str;
     fn put_pack(&self, folder_id: &str, revision_id: &str, bytes: &[u8]) -> ApiResult<bool>;
     fn get_pack(&self, folder_id: &str, revision_id: &str) -> ApiResult<Vec<u8>>;
+    fn has_object(&self, folder_id: &str, object_id: &str) -> ApiResult<bool>;
+    fn put_object(&self, folder_id: &str, object_id: &str, bytes: &[u8]) -> ApiResult<bool>;
+    fn get_object(&self, folder_id: &str, object_id: &str) -> ApiResult<Vec<u8>>;
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +235,12 @@ impl LocalFilePackStorage {
             .join("packs")
             .join(folder_id)
             .join(format!("{revision_id}.loompack")))
+    }
+
+    fn object_path(&self, folder_id: &str, object_id: &str) -> ApiResult<PathBuf> {
+        let folder_id = validate_id(folder_id, "shared folder id")?;
+        let object_id = validate_object_id(object_id)?;
+        Ok(self.root.join("objects").join(folder_id).join(object_id))
     }
 }
 
@@ -265,6 +274,46 @@ impl PackStorage for LocalFilePackStorage {
         fs::read(&path).map_err(|source| {
             if source.kind() == io::ErrorKind::NotFound {
                 ApiError::NotFound("pack not found".to_string())
+            } else {
+                ApiError::Io { path, source }
+            }
+        })
+    }
+
+    fn has_object(&self, folder_id: &str, object_id: &str) -> ApiResult<bool> {
+        let path = self.object_path(folder_id, object_id)?;
+        match fs::metadata(&path) {
+            Ok(metadata) => Ok(metadata.is_file()),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(ApiError::Io { path, source }),
+        }
+    }
+
+    fn put_object(&self, folder_id: &str, object_id: &str, bytes: &[u8]) -> ApiResult<bool> {
+        let object_id = validate_object_payload(object_id, bytes)?;
+        let path = self.object_path(folder_id, &object_id)?;
+        if let Ok(existing) = fs::read(&path) {
+            return if existing == bytes {
+                Ok(false)
+            } else {
+                Err(ApiError::Conflict {
+                    expected: Some(object_id),
+                    actual: Some("different object bytes".to_string()),
+                })
+            };
+        }
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent)?;
+        }
+        fs::write(&path, bytes).map_err(|source| ApiError::Io { path, source })?;
+        Ok(true)
+    }
+
+    fn get_object(&self, folder_id: &str, object_id: &str) -> ApiResult<Vec<u8>> {
+        let path = self.object_path(folder_id, object_id)?;
+        fs::read(&path).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                ApiError::NotFound("object not found".to_string())
             } else {
                 ApiError::Io { path, source }
             }
@@ -313,6 +362,12 @@ impl RemotePackStorage {
         let revision_id = validate_id(revision_id, "folder revision id")?;
         ObjectKey::new(format!("packs/{folder_id}/{revision_id}.loompack")).map_err(sync_error)
     }
+
+    fn object_key(folder_id: &str, object_id: &str) -> ApiResult<ObjectKey> {
+        let folder_id = validate_id(folder_id, "shared folder id")?;
+        let object_id = validate_object_id(object_id)?;
+        ObjectKey::new(format!("objects/{folder_id}/{object_id}")).map_err(sync_error)
+    }
 }
 
 impl PackStorage for RemotePackStorage {
@@ -334,6 +389,31 @@ impl PackStorage for RemotePackStorage {
             .get(&key)
             .map_err(sync_error)?
             .ok_or_else(|| ApiError::NotFound("pack not found".to_string()))
+    }
+
+    fn has_object(&self, folder_id: &str, object_id: &str) -> ApiResult<bool> {
+        let key = Self::object_key(folder_id, object_id)?;
+        self.provider
+            .head(&key)
+            .map(|metadata| metadata.is_some())
+            .map_err(sync_error)
+    }
+
+    fn put_object(&self, folder_id: &str, object_id: &str, bytes: &[u8]) -> ApiResult<bool> {
+        validate_object_payload(object_id, bytes)?;
+        let key = Self::object_key(folder_id, object_id)?;
+        self.provider
+            .put(&key, bytes)
+            .map(|outcome| outcome.uploaded)
+            .map_err(sync_error)
+    }
+
+    fn get_object(&self, folder_id: &str, object_id: &str) -> ApiResult<Vec<u8>> {
+        let key = Self::object_key(folder_id, object_id)?;
+        self.provider
+            .get(&key)
+            .map_err(sync_error)?
+            .ok_or_else(|| ApiError::NotFound("object not found".to_string()))
     }
 }
 
@@ -1231,6 +1311,37 @@ impl LocalDevboxApi {
         self.pack_storage.get_pack(folder_id, revision_id)
     }
 
+    pub fn has_object(
+        &self,
+        auth: &AuthContext,
+        folder_id: &str,
+        object_id: &str,
+    ) -> ApiResult<bool> {
+        self.require_membership(auth, folder_id)?;
+        self.pack_storage.has_object(folder_id, object_id)
+    }
+
+    pub fn put_object(
+        &self,
+        auth: &AuthContext,
+        folder_id: &str,
+        object_id: &str,
+        bytes: &[u8],
+    ) -> ApiResult<bool> {
+        self.require_membership(auth, folder_id)?;
+        self.pack_storage.put_object(folder_id, object_id, bytes)
+    }
+
+    pub fn get_object(
+        &self,
+        auth: &AuthContext,
+        folder_id: &str,
+        object_id: &str,
+    ) -> ApiResult<Vec<u8>> {
+        self.require_membership(auth, folder_id)?;
+        self.pack_storage.get_object(folder_id, object_id)
+    }
+
     pub fn get_cursor(
         &self,
         auth: &AuthContext,
@@ -1496,6 +1607,27 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
             let bytes = api.get_pack(&auth, folder_id, revision_id)?;
             bytes_response(200, "application/octet-stream", bytes)
         }
+        ("HEAD", ["v1", "loom", "shared-folders", folder_id, "objects", object_id]) => {
+            let auth = auth_from_request(api, &request)?;
+            if api.has_object(&auth, folder_id, object_id)? {
+                bytes_response(200, "application/octet-stream", Vec::new())
+            } else {
+                Err(ApiError::NotFound("object not found".to_string()))
+            }
+        }
+        ("PUT", ["v1", "loom", "shared-folders", folder_id, "objects", object_id]) => {
+            let auth = auth_from_request(api, &request)?;
+            let uploaded = api.put_object(&auth, folder_id, object_id, &request.body)?;
+            json_response(
+                if uploaded { 201 } else { 200 },
+                &serde_json::json!({ "uploaded": uploaded, "size_bytes": request.body.len() }),
+            )
+        }
+        ("GET", ["v1", "loom", "shared-folders", folder_id, "objects", object_id]) => {
+            let auth = auth_from_request(api, &request)?;
+            let bytes = api.get_object(&auth, folder_id, object_id)?;
+            bytes_response(200, "application/octet-stream", bytes)
+        }
         ("GET", ["v1", "loom", "shared-folders", folder_id, "cursors", cursor_id]) => {
             let auth = auth_from_request(api, &request)?;
             let revision_id = api.get_cursor(&auth, folder_id, cursor_id)?;
@@ -1731,6 +1863,23 @@ fn validate_id(value: &str, label: &'static str) -> ApiResult<String> {
     Ok(value.to_string())
 }
 
+fn validate_object_id(value: &str) -> ApiResult<String> {
+    ObjectId::from_blake3_hex(value)
+        .map(|object_id| object_id.to_string())
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+fn validate_object_payload(object_id: &str, bytes: &[u8]) -> ApiResult<String> {
+    let object_id = validate_object_id(object_id)?;
+    let actual = blake3::hash(bytes).to_hex().to_string();
+    if actual != object_id {
+        return Err(ApiError::BadRequest(
+            "object bytes do not match object id".to_string(),
+        ));
+    }
+    Ok(object_id)
+}
+
 fn validate_non_empty(value: &str, label: &'static str) -> ApiResult<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -1796,11 +1945,16 @@ mod tests {
     #[derive(Debug, Default)]
     struct MemoryPackStorage {
         packs: Mutex<BTreeMap<String, Vec<u8>>>,
+        objects: Mutex<BTreeMap<String, Vec<u8>>>,
     }
 
     impl MemoryPackStorage {
         fn key(folder_id: &str, revision_id: &str) -> String {
             format!("{folder_id}/{revision_id}")
+        }
+
+        fn object_key(folder_id: &str, object_id: &str) -> String {
+            format!("{folder_id}/{object_id}")
         }
     }
 
@@ -1837,6 +1991,46 @@ mod tests {
                 .get(&Self::key(folder_id, revision_id))
                 .cloned()
                 .ok_or_else(|| ApiError::NotFound("pack not found".to_string()))
+        }
+
+        fn has_object(&self, folder_id: &str, object_id: &str) -> ApiResult<bool> {
+            validate_id(folder_id, "shared folder id")?;
+            validate_object_id(object_id)?;
+            Ok(self
+                .objects
+                .lock()
+                .expect("memory storage lock")
+                .contains_key(&Self::object_key(folder_id, object_id)))
+        }
+
+        fn put_object(&self, folder_id: &str, object_id: &str, bytes: &[u8]) -> ApiResult<bool> {
+            validate_id(folder_id, "shared folder id")?;
+            validate_object_payload(object_id, bytes)?;
+            let key = Self::object_key(folder_id, object_id);
+            let mut objects = self.objects.lock().expect("memory storage lock");
+            if let Some(existing) = objects.get(&key) {
+                return if existing.as_slice() == bytes {
+                    Ok(false)
+                } else {
+                    Err(ApiError::Conflict {
+                        expected: Some(object_id.to_string()),
+                        actual: Some("different object bytes".to_string()),
+                    })
+                };
+            }
+            objects.insert(key, bytes.to_vec());
+            Ok(true)
+        }
+
+        fn get_object(&self, folder_id: &str, object_id: &str) -> ApiResult<Vec<u8>> {
+            validate_id(folder_id, "shared folder id")?;
+            validate_object_id(object_id)?;
+            self.objects
+                .lock()
+                .expect("memory storage lock")
+                .get(&Self::object_key(folder_id, object_id))
+                .cloned()
+                .ok_or_else(|| ApiError::NotFound("object not found".to_string()))
         }
     }
 
@@ -1889,6 +2083,22 @@ mod tests {
                 .expect("pack reads"),
             b"pack"
         );
+        let object_bytes = b"object-bytes";
+        let object_id = object_id_for(object_bytes);
+        assert!(!api
+            .has_object(&auth, "shared-folder-1", &object_id)
+            .expect("object head reads"));
+        assert!(api
+            .put_object(&auth, "shared-folder-1", &object_id, object_bytes)
+            .expect("object writes"));
+        assert!(api
+            .has_object(&auth, "shared-folder-1", &object_id)
+            .expect("object head reads"));
+        assert_eq!(
+            api.get_object(&auth, "shared-folder-1", &object_id)
+                .expect("object reads"),
+            object_bytes
+        );
         assert_eq!(
             api.get_cursor(&auth, "shared-folder-1", "shared-folder")
                 .expect("cursor reads"),
@@ -1915,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn api_can_use_non_local_pack_storage() {
+    fn api_can_use_non_local_remote_storage() {
         let dir = tempfile::tempdir().expect("temp dir");
         let api = LocalDevboxApi::open_with_pack_storage(
             dir.path(),
@@ -1945,9 +2155,23 @@ mod tests {
                 .expect("pack reads"),
             b"remote-pack"
         );
+        let object_bytes = b"remote-object";
+        let object_id = object_id_for(object_bytes);
+        assert!(api
+            .put_object(&auth, "shared-folder-1", &object_id, object_bytes)
+            .expect("object writes"));
+        assert_eq!(
+            api.get_object(&auth, "shared-folder-1", &object_id)
+                .expect("object reads"),
+            object_bytes
+        );
         assert!(
             !dir.path().join("packs").exists(),
             "custom pack storage should not create local pack files"
+        );
+        assert!(
+            !dir.path().join("objects").exists(),
+            "custom object storage should not create local object files"
         );
     }
 
@@ -1979,8 +2203,52 @@ mod tests {
             Err(ApiError::Forbidden(_))
         ));
         assert!(matches!(
+            api.has_object(
+                &bob_auth,
+                "shared-folder-1",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ),
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            api.get_pack(&bob_auth, "shared-folder-1", "folder-revision-1"),
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
             api.ensure_shared_folder(&bob_auth, "shared-folder-1", "Code"),
             Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn object_upload_rejects_hash_mismatch_without_persisting_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open(dir.path()).expect("api opens");
+        let session = api
+            .create_dev_session(Some("alice"), Some("laptop"), Some("Laptop"))
+            .expect("session creates");
+        let auth = api
+            .authenticate(&session.session_token, &session.device_id)
+            .expect("auth works");
+        api.ensure_shared_folder(&auth, "shared-folder-1", "Code")
+            .expect("folder creates");
+        let object_id = object_id_for(b"correct bytes");
+
+        let error = api
+            .put_object(&auth, "shared-folder-1", &object_id, b"wrong bytes")
+            .expect_err("mismatched object body is rejected");
+
+        assert!(matches!(
+            error,
+            ApiError::BadRequest(message)
+                if message.contains("object bytes do not match object id")
+        ));
+        assert!(!api
+            .has_object(&auth, "shared-folder-1", &object_id)
+            .expect("object head reads"));
+        assert!(matches!(
+            api.get_object(&auth, "shared-folder-1", &object_id),
+            Err(ApiError::NotFound(_))
         ));
     }
 
@@ -2004,5 +2272,9 @@ mod tests {
         assert!(text.contains("\"service\":\"devbox-api\""));
         assert!(text.contains("\"metadata\":\"memory\""));
         assert!(text.contains("\"storage\":\"local-file\""));
+    }
+
+    fn object_id_for(bytes: &[u8]) -> String {
+        blake3::hash(bytes).to_hex().to_string()
     }
 }

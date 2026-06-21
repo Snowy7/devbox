@@ -8,12 +8,17 @@ Devbox API owns:
 - local-dev session creation and bearer session validation
 - device registration and device-scoped requests
 - shared folder registry and account membership checks
-- Loom pack byte storage
+- Loom metadata pack byte storage
+- Loom object byte storage for metadata/data split sync
 - shared-folder cursor metadata with compare-and-set semantics
+
+Devbox hides the server-owned storage layout from clients. Hosted remotes address
+metadata packs and object bytes through the Devbox API; they do not receive
+bucket names, object keys, or direct storage credentials.
 
 Loom owns:
 
-- object identity and pack contents
+- object identity, object hydration state, and pack contents
 - file versions and folder revisions
 - checkpoints, pins, restore safety, and divergent-state refusal
 - secret blocking, generated ignores, and Git metadata protection
@@ -37,6 +42,6 @@ Known follow-up work:
 
 - replace deterministic local-dev sessions with production auth
 - issue clone/share tokens instead of embedding session material in URLs
-- add durable cloud storage behind the API boundary
+- harden durable cloud storage behind the API boundary
 - add richer folder permissions beyond owner access
 - hide remote details from normal Devbox users
