@@ -290,7 +290,7 @@ impl PackStorage for LocalFilePackStorage {
     }
 
     fn put_object(&self, folder_id: &str, object_id: &str, bytes: &[u8]) -> ApiResult<bool> {
-        let object_id = validate_object_id(object_id)?;
+        let object_id = validate_object_payload(object_id, bytes)?;
         let path = self.object_path(folder_id, &object_id)?;
         if let Ok(existing) = fs::read(&path) {
             return if existing == bytes {
@@ -400,6 +400,7 @@ impl PackStorage for RemotePackStorage {
     }
 
     fn put_object(&self, folder_id: &str, object_id: &str, bytes: &[u8]) -> ApiResult<bool> {
+        validate_object_payload(object_id, bytes)?;
         let key = Self::object_key(folder_id, object_id)?;
         self.provider
             .put(&key, bytes)
@@ -1868,6 +1869,17 @@ fn validate_object_id(value: &str) -> ApiResult<String> {
         .map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
+fn validate_object_payload(object_id: &str, bytes: &[u8]) -> ApiResult<String> {
+    let object_id = validate_object_id(object_id)?;
+    let actual = blake3::hash(bytes).to_hex().to_string();
+    if actual != object_id {
+        return Err(ApiError::BadRequest(
+            "object bytes do not match object id".to_string(),
+        ));
+    }
+    Ok(object_id)
+}
+
 fn validate_non_empty(value: &str, label: &'static str) -> ApiResult<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -1993,7 +2005,7 @@ mod tests {
 
         fn put_object(&self, folder_id: &str, object_id: &str, bytes: &[u8]) -> ApiResult<bool> {
             validate_id(folder_id, "shared folder id")?;
-            validate_object_id(object_id)?;
+            validate_object_payload(object_id, bytes)?;
             let key = Self::object_key(folder_id, object_id);
             let mut objects = self.objects.lock().expect("memory storage lock");
             if let Some(existing) = objects.get(&key) {
@@ -2071,20 +2083,21 @@ mod tests {
                 .expect("pack reads"),
             b"pack"
         );
-        let object_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let object_bytes = b"object-bytes";
+        let object_id = object_id_for(object_bytes);
         assert!(!api
-            .has_object(&auth, "shared-folder-1", object_id)
+            .has_object(&auth, "shared-folder-1", &object_id)
             .expect("object head reads"));
         assert!(api
-            .put_object(&auth, "shared-folder-1", object_id, b"object-bytes")
+            .put_object(&auth, "shared-folder-1", &object_id, object_bytes)
             .expect("object writes"));
         assert!(api
-            .has_object(&auth, "shared-folder-1", object_id)
+            .has_object(&auth, "shared-folder-1", &object_id)
             .expect("object head reads"));
         assert_eq!(
-            api.get_object(&auth, "shared-folder-1", object_id)
+            api.get_object(&auth, "shared-folder-1", &object_id)
                 .expect("object reads"),
-            b"object-bytes"
+            object_bytes
         );
         assert_eq!(
             api.get_cursor(&auth, "shared-folder-1", "shared-folder")
@@ -2142,14 +2155,15 @@ mod tests {
                 .expect("pack reads"),
             b"remote-pack"
         );
-        let object_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let object_bytes = b"remote-object";
+        let object_id = object_id_for(object_bytes);
         assert!(api
-            .put_object(&auth, "shared-folder-1", object_id, b"remote-object")
+            .put_object(&auth, "shared-folder-1", &object_id, object_bytes)
             .expect("object writes"));
         assert_eq!(
-            api.get_object(&auth, "shared-folder-1", object_id)
+            api.get_object(&auth, "shared-folder-1", &object_id)
                 .expect("object reads"),
-            b"remote-object"
+            object_bytes
         );
         assert!(
             !dir.path().join("packs").exists(),
@@ -2207,6 +2221,38 @@ mod tests {
     }
 
     #[test]
+    fn object_upload_rejects_hash_mismatch_without_persisting_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open(dir.path()).expect("api opens");
+        let session = api
+            .create_dev_session(Some("alice"), Some("laptop"), Some("Laptop"))
+            .expect("session creates");
+        let auth = api
+            .authenticate(&session.session_token, &session.device_id)
+            .expect("auth works");
+        api.ensure_shared_folder(&auth, "shared-folder-1", "Code")
+            .expect("folder creates");
+        let object_id = object_id_for(b"correct bytes");
+
+        let error = api
+            .put_object(&auth, "shared-folder-1", &object_id, b"wrong bytes")
+            .expect_err("mismatched object body is rejected");
+
+        assert!(matches!(
+            error,
+            ApiError::BadRequest(message)
+                if message.contains("object bytes do not match object id")
+        ));
+        assert!(!api
+            .has_object(&auth, "shared-folder-1", &object_id)
+            .expect("object head reads"));
+        assert!(matches!(
+            api.get_object(&auth, "shared-folder-1", &object_id),
+            Err(ApiError::NotFound(_))
+        ));
+    }
+
+    #[test]
     fn ready_route_reports_service_health_without_auth() {
         let dir = tempfile::tempdir().expect("temp dir");
         let api = LocalDevboxApi::open(dir.path()).expect("api opens");
@@ -2226,5 +2272,9 @@ mod tests {
         assert!(text.contains("\"service\":\"devbox-api\""));
         assert!(text.contains("\"metadata\":\"memory\""));
         assert!(text.contains("\"storage\":\"local-file\""));
+    }
+
+    fn object_id_for(bytes: &[u8]) -> String {
+        blake3::hash(bytes).to_hex().to_string()
     }
 }
