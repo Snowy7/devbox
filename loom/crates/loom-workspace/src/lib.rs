@@ -1195,12 +1195,16 @@ fn generated_session_id(shared_folder_id: &str) -> WorkspaceSessionId {
 }
 
 fn validate_session_id(value: &str) -> WorkspaceResult<()> {
+    if value.trim().is_empty() || value.contains('/') || value.contains('\\') {
+        return Err(WorkspaceError::InvalidSessionId(value.to_string()));
+    }
+
     let mut components = Path::new(value).components();
     let valid = matches!(
         (components.next(), components.next()),
         (Some(Component::Normal(component)), None) if component == std::ffi::OsStr::new(value)
     );
-    if value.trim().is_empty() || !valid {
+    if !valid {
         return Err(WorkspaceError::InvalidSessionId(value.to_string()));
     }
     Ok(())
