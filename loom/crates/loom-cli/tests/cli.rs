@@ -229,8 +229,119 @@ fn workspace_help_lists_agent_session_commands() {
     assert!(stdout.contains("loom workspace open"));
     assert!(stdout.contains("loom workspace read"));
     assert!(stdout.contains("loom workspace write"));
+    assert!(stdout.contains("loom workspace exec"));
+    assert!(stdout.contains("loom workspace materialize-run"));
     assert!(stdout.contains("loom workspace checkpoint"));
     assert!(stdout.contains("agent virtual sessions"));
+}
+
+#[test]
+fn workspace_exec_reports_virtual_output_and_unsupported_commands() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "hello virtual\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "workspace",
+        "open",
+        fixture.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-cli-exec",
+    ]));
+
+    let cat = run_loom([
+        "workspace",
+        "exec",
+        fixture.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-cli-exec",
+        "--",
+        "cat",
+        "README.md",
+    ]);
+    assert_success(&cat);
+    let cat_stdout = stdout(&cat);
+    assert!(cat_stdout.contains("Mode: virtual"));
+    assert!(cat_stdout.contains("Exit status: 0"));
+    assert!(cat_stdout.contains("--- stdout"));
+    assert!(cat_stdout.contains("hello virtual"));
+
+    let unsupported = run_loom([
+        "workspace",
+        "exec",
+        fixture.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-cli-exec",
+        "--",
+        "cargo",
+        "test",
+    ]);
+    assert!(!unsupported.status.success());
+    let unsupported_stdout = stdout(&unsupported);
+    assert!(unsupported_stdout.contains("Exit status: 127"));
+    assert!(unsupported_stdout.contains("unsupported virtual workspace command 'cargo'"));
+    assert!(unsupported_stdout.contains("materialized sandbox fallback"));
+    assert!(stderr(&unsupported).contains("workspace exec exited with status 127"));
+}
+
+#[test]
+fn workspace_materialize_run_captures_diff_and_checkpoint() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "before\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "workspace",
+        "open",
+        fixture.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-cli-materialized",
+    ]));
+
+    let mut args = vec![
+        "workspace".to_string(),
+        "materialize-run".to_string(),
+        fixture.to_str().expect("UTF-8 path").to_string(),
+        "--session".to_string(),
+        "agent-cli-materialized".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(cli_write_command("after materialized\n", "fn cli() {}\n"));
+    let materialized = run_loom_vec(args);
+    assert_success(&materialized);
+    let materialized_stdout = stdout(&materialized);
+    assert!(materialized_stdout.contains("Mode: materialized-sandbox"));
+    assert!(materialized_stdout.contains("Exit status: 0"));
+    assert!(materialized_stdout.contains("Captured: 2 changed"));
+    assert!(materialized_stdout.contains("Sandbox cleanup: removed"));
+
+    let diff = run_loom([
+        "workspace",
+        "diff",
+        fixture.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-cli-materialized",
+    ]);
+    assert_success(&diff);
+    let diff_stdout = stdout(&diff);
+    assert!(diff_stdout.contains("Changes: 1 created, 1 modified"));
+    assert!(diff_stdout.contains("src/new.rs"));
+
+    let checkpoint = run_loom([
+        "workspace",
+        "checkpoint",
+        fixture.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-cli-materialized",
+        "-m",
+        "cli materialized checkpoint",
+    ]);
+    assert_success(&checkpoint);
+    let checkpoint_stdout = stdout(&checkpoint);
+    assert!(checkpoint_stdout.contains("Boundary: sandbox-merge"));
+    assert!(checkpoint_stdout.contains("Overlay files: 2"));
 }
 
 #[test]
@@ -1462,6 +1573,32 @@ fn value_after(output: &str, prefix: &str) -> String {
         .expect("prefixed line exists")
         .trim()
         .to_string()
+}
+
+#[cfg(windows)]
+fn cli_write_command(readme: &str, new_file: &str) -> Vec<String> {
+    vec![
+        "cmd".to_string(),
+        "/C".to_string(),
+        format!(
+            "echo {}>README.md && mkdir src 2>NUL & echo {}>src\\new.rs",
+            readme.trim_end(),
+            new_file.trim_end()
+        ),
+    ]
+}
+
+#[cfg(not(windows))]
+fn cli_write_command(readme: &str, new_file: &str) -> Vec<String> {
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "printf '{}' > README.md; mkdir -p src; printf '{}' > src/new.rs",
+            readme.replace('\'', "'\\''"),
+            new_file.replace('\'', "'\\''")
+        ),
+    ]
 }
 
 fn count_files(path: &std::path::Path) -> usize {

@@ -13,12 +13,12 @@ use loom_core::{
 use loom_store::{path_to_store_string, CoalescedRevision, LocalStore, StoreError};
 use loom_sync::{hydrate_object_from_remote, LoomRemote, SyncError};
 use loom_worktree::{evaluate_file_capture_policy, FileCapturePolicyDecision};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process;
+use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,10 +26,12 @@ pub const CRATE_ROLE: &str = "Loom workspace adapter core for virtual agent sess
 
 const WORKSPACES_DIR: &str = "workspaces";
 const SESSIONS_DIR: &str = "sessions";
+const MATERIALIZED_DIR: &str = "materialized";
 const SESSION_FILE: &str = "session.tsv";
 const OVERLAY_FILE: &str = "overlay.tsv";
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceAdapterKind {
@@ -317,6 +319,189 @@ impl WorkspaceCloseReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceCommandMode {
+    Virtual,
+    MaterializedSandbox,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceCommandRequest {
+    command: Vec<String>,
+    cwd: PathBuf,
+}
+
+impl WorkspaceCommandRequest {
+    pub fn new(command: Vec<String>) -> Self {
+        Self {
+            command,
+            cwd: PathBuf::new(),
+        }
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = cwd.into();
+        self
+    }
+
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMaterializedRunOptions {
+    keep_sandbox: bool,
+}
+
+impl WorkspaceMaterializedRunOptions {
+    pub fn cleanup() -> Self {
+        Self {
+            keep_sandbox: false,
+        }
+    }
+
+    pub fn keep_sandbox() -> Self {
+        Self { keep_sandbox: true }
+    }
+
+    pub fn keeps_sandbox(&self) -> bool {
+        self.keep_sandbox
+    }
+}
+
+impl Default for WorkspaceMaterializedRunOptions {
+    fn default() -> Self {
+        Self::cleanup()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceMaterializedRunReport {
+    sandbox_path: PathBuf,
+    materialized_files: usize,
+    materialized_directories: usize,
+    captured_files: usize,
+    unchanged_files: usize,
+    ignored_entries: usize,
+    cleaned_up: bool,
+}
+
+impl WorkspaceMaterializedRunReport {
+    fn new(sandbox_path: PathBuf) -> Self {
+        Self {
+            sandbox_path,
+            ..Self::default()
+        }
+    }
+
+    fn apply_capture(&mut self, capture: SandboxCapturePlan) {
+        self.captured_files = capture.changed_files.len();
+        self.unchanged_files = capture.unchanged_files;
+        self.ignored_entries = capture.ignored_entries;
+    }
+
+    pub fn sandbox_path(&self) -> &Path {
+        &self.sandbox_path
+    }
+
+    pub fn materialized_files(&self) -> usize {
+        self.materialized_files
+    }
+
+    pub fn materialized_directories(&self) -> usize {
+        self.materialized_directories
+    }
+
+    pub fn captured_files(&self) -> usize {
+        self.captured_files
+    }
+
+    pub fn unchanged_files(&self) -> usize {
+        self.unchanged_files
+    }
+
+    pub fn ignored_entries(&self) -> usize {
+        self.ignored_entries
+    }
+
+    pub fn cleaned_up(&self) -> bool {
+        self.cleaned_up
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceCommandOutput {
+    mode: WorkspaceCommandMode,
+    command: Vec<String>,
+    cwd: PathBuf,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: i32,
+    materialized: Option<WorkspaceMaterializedRunReport>,
+}
+
+impl WorkspaceCommandOutput {
+    fn new(
+        mode: WorkspaceCommandMode,
+        request: &WorkspaceCommandRequest,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        exit_code: i32,
+    ) -> Self {
+        Self {
+            mode,
+            command: request.command.clone(),
+            cwd: request.cwd.clone(),
+            stdout,
+            stderr,
+            exit_code,
+            materialized: None,
+        }
+    }
+
+    fn with_materialized_report(mut self, report: WorkspaceMaterializedRunReport) -> Self {
+        self.materialized = Some(report);
+        self
+    }
+
+    pub fn mode(&self) -> WorkspaceCommandMode {
+        self.mode
+    }
+
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    pub fn stdout(&self) -> &[u8] {
+        &self.stdout
+    }
+
+    pub fn stderr(&self) -> &[u8] {
+        &self.stderr
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+
+    pub fn materialized_report(&self) -> Option<&WorkspaceMaterializedRunReport> {
+        self.materialized.as_ref()
+    }
+
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OverlayFile {
     path: PathBuf,
@@ -476,6 +661,109 @@ impl<'a> AgentWorkspaceSession<'a> {
         self.overlay.len()
     }
 
+    pub fn execute_virtual_command(
+        &mut self,
+        request: WorkspaceCommandRequest,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        let request = normalize_command_request(request)?;
+        if request.command.is_empty() {
+            return Err(WorkspaceError::EmptyCommand);
+        }
+
+        match request.command[0].as_str() {
+            "pwd" => self.exec_virtual_pwd(&request),
+            "ls" => self.exec_virtual_ls(&request),
+            "cat" => self.exec_virtual_cat(&request),
+            "stat" => self.exec_virtual_stat(&request),
+            "rg" => self.exec_virtual_rg(&request),
+            "write" => self.exec_virtual_write(&request),
+            command => Ok(WorkspaceCommandOutput::new(
+                WorkspaceCommandMode::Virtual,
+                &request,
+                Vec::new(),
+                format!(
+                    "unsupported virtual workspace command '{command}'\nUse materialized sandbox fallback for real shell commands.\n"
+                )
+                .into_bytes(),
+                127,
+            )),
+        }
+    }
+
+    pub fn run_materialized_command(
+        &mut self,
+        request: WorkspaceCommandRequest,
+        options: WorkspaceMaterializedRunOptions,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        let request = normalize_command_request(request)?;
+        if request.command.is_empty() {
+            return Err(WorkspaceError::EmptyCommand);
+        }
+
+        let mut report = WorkspaceMaterializedRunReport::new(self.create_sandbox_dir()?);
+        let sandbox_path = report.sandbox_path().to_path_buf();
+        if let Err(error) = self.materialize_session_view(&sandbox_path, &mut report) {
+            if !options.keep_sandbox {
+                let _ = remove_dir_all(&sandbox_path);
+            }
+            return Err(error);
+        }
+        let cwd = sandbox_path.join(request.cwd());
+        if !cwd.is_dir() {
+            if !options.keep_sandbox {
+                let _ = remove_dir_all(&sandbox_path);
+            }
+            return Err(WorkspaceError::InvalidPath {
+                path: request.cwd().to_path_buf(),
+                reason: "materialized command cwd is not a directory in the session view",
+            });
+        }
+
+        let host_before = scan_host_folder_for_guard(self.store.folder_root())?;
+        let output = match Command::new(&request.command[0])
+            .args(&request.command[1..])
+            .current_dir(&cwd)
+            .output()
+        {
+            Ok(output) => output,
+            Err(source) => {
+                if !options.keep_sandbox {
+                    let _ = remove_dir_all(&sandbox_path);
+                }
+                return Err(WorkspaceError::ProcessLaunch {
+                    command: request.command[0].clone(),
+                    source,
+                });
+            }
+        };
+        let host_after = scan_host_folder_for_guard(self.store.folder_root())?;
+        let host_mutations = host_folder_mutations(&host_before, &host_after);
+        if !host_mutations.is_empty() {
+            return Err(WorkspaceError::HostFolderMutated {
+                sandbox_path,
+                paths: host_mutations,
+            });
+        }
+        let capture = self.capture_sandbox_changes(&sandbox_path)?;
+        report.apply_capture(capture);
+
+        if options.keep_sandbox {
+            report.cleaned_up = false;
+        } else {
+            remove_dir_all(&sandbox_path)?;
+            report.cleaned_up = true;
+        }
+
+        Ok(WorkspaceCommandOutput::new(
+            WorkspaceCommandMode::MaterializedSandbox,
+            &request,
+            output.stdout,
+            output.stderr,
+            output.status.code().unwrap_or(1),
+        )
+        .with_materialized_report(report))
+    }
+
     fn session_dir(&self) -> PathBuf {
         self.store
             .store_root()
@@ -490,6 +778,458 @@ impl<'a> AgentWorkspaceSession<'a> {
 
     fn persist_session(&self) -> WorkspaceResult<()> {
         write_session_file(&self.session_dir(), &self.session)
+    }
+
+    fn materialized_root(&self) -> PathBuf {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"loom-materialized-sandbox-root-v1\n");
+        hasher.update(self.store.folder_root().to_string_lossy().as_bytes());
+        let shared_folder_key = format!("shared-folder-b3-{}", hasher.finalize().to_hex().as_str());
+        std::env::temp_dir()
+            .join("loom-workspaces")
+            .join(MATERIALIZED_DIR)
+            .join(shared_folder_key)
+            .join(self.session.id().as_str())
+    }
+
+    fn create_sandbox_dir(&self) -> WorkspaceResult<PathBuf> {
+        let counter = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let sandbox = self
+            .materialized_root()
+            .join(format!("run-{}-{counter}-{nanos}", process::id()));
+        create_dir_all(&sandbox)?;
+        Ok(sandbox)
+    }
+
+    fn exec_virtual_pwd(
+        &self,
+        request: &WorkspaceCommandRequest,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        let path = if request.cwd().as_os_str().is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", path_to_store_string(request.cwd()))
+        };
+        Ok(WorkspaceCommandOutput::new(
+            WorkspaceCommandMode::Virtual,
+            request,
+            format!("{path}\n").into_bytes(),
+            Vec::new(),
+            0,
+        ))
+    }
+
+    fn exec_virtual_ls(
+        &self,
+        request: &WorkspaceCommandRequest,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        let entries = self.visible_entries()?;
+        let targets = if request.command.len() == 1 {
+            vec![request.cwd().to_path_buf()]
+        } else {
+            request.command[1..]
+                .iter()
+                .map(|arg| command_path(request.cwd(), arg, true))
+                .collect::<WorkspaceResult<Vec<_>>>()?
+        };
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = 0;
+
+        for target in targets {
+            if target.as_os_str().is_empty() || path_is_directory_in_entries(&entries, &target) {
+                let mut children = entries
+                    .keys()
+                    .filter_map(|path| immediate_child(path, &target))
+                    .collect::<Vec<_>>();
+                children.sort();
+                children.dedup();
+                for child in children {
+                    stdout.push_str(&path_to_store_string(&child));
+                    stdout.push('\n');
+                }
+            } else if entries.contains_key(&target) {
+                stdout.push_str(&path_to_store_string(&target));
+                stdout.push('\n');
+            } else {
+                exit_code = 1;
+                stderr.push_str(&format!(
+                    "ls: {}: no such workspace path\n",
+                    path_to_store_string(&target)
+                ));
+            }
+        }
+
+        Ok(WorkspaceCommandOutput::new(
+            WorkspaceCommandMode::Virtual,
+            request,
+            stdout.into_bytes(),
+            stderr.into_bytes(),
+            exit_code,
+        ))
+    }
+
+    fn exec_virtual_cat(
+        &self,
+        request: &WorkspaceCommandRequest,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        if request.command.len() == 1 {
+            return Ok(virtual_usage_error(
+                request,
+                "cat requires at least one path\nUsage: cat <PATH> [PATH...]\n",
+            ));
+        }
+
+        let mut stdout = Vec::new();
+        let mut stderr = String::new();
+        let mut exit_code = 0;
+        for arg in &request.command[1..] {
+            let path = command_path(request.cwd(), arg, false)?;
+            match self.read_file(&path) {
+                Ok(bytes) => stdout.extend(bytes),
+                Err(error) => {
+                    exit_code = 1;
+                    stderr.push_str(&format!("cat: {}: {error}\n", path_to_store_string(&path)));
+                }
+            }
+        }
+
+        Ok(WorkspaceCommandOutput::new(
+            WorkspaceCommandMode::Virtual,
+            request,
+            stdout,
+            stderr.into_bytes(),
+            exit_code,
+        ))
+    }
+
+    fn exec_virtual_stat(
+        &self,
+        request: &WorkspaceCommandRequest,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        if request.command.len() == 1 {
+            return Ok(virtual_usage_error(
+                request,
+                "stat requires at least one path\nUsage: stat <PATH> [PATH...]\n",
+            ));
+        }
+
+        let entries = self.visible_entries()?;
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = 0;
+        for arg in &request.command[1..] {
+            let path = command_path(request.cwd(), arg, true)?;
+            if path.as_os_str().is_empty() {
+                stdout.push_str(
+                    "Path: .\nKind: directory\nHydration: hydrated\nSource: base\nBytes: -\n",
+                );
+                continue;
+            }
+            let Some(entry) = entries.get(&path) else {
+                exit_code = 1;
+                stderr.push_str(&format!(
+                    "stat: {}: no such workspace path\n",
+                    path_to_store_string(&path)
+                ));
+                continue;
+            };
+            stdout.push_str(&format!(
+                "Path: {}\nKind: {}\nHydration: {}\nSource: {}\nBytes: {}\n",
+                path_to_store_string(entry.path()),
+                file_kind_label(entry.kind()),
+                hydration_label(entry.hydration_state()),
+                workspace_entry_source_label(entry.source()),
+                entry
+                    .size_bytes()
+                    .map(|bytes| bytes.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            ));
+        }
+
+        Ok(WorkspaceCommandOutput::new(
+            WorkspaceCommandMode::Virtual,
+            request,
+            stdout.into_bytes(),
+            stderr.into_bytes(),
+            exit_code,
+        ))
+    }
+
+    fn exec_virtual_rg(
+        &self,
+        request: &WorkspaceCommandRequest,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        if request.command.len() == 1 {
+            return Ok(virtual_usage_error(
+                request,
+                "rg requires a literal pattern\nUsage: rg <PATTERN> [PATH...]\n",
+            ));
+        }
+
+        let pattern = &request.command[1];
+        let entries = self.visible_entries()?;
+        let scopes = if request.command.len() == 2 {
+            vec![request.cwd().to_path_buf()]
+        } else {
+            request.command[2..]
+                .iter()
+                .map(|arg| command_path(request.cwd(), arg, true))
+                .collect::<WorkspaceResult<Vec<_>>>()?
+        };
+        let mut paths = Vec::new();
+        let mut stderr = String::new();
+        let mut search_error = false;
+        for scope in scopes {
+            if scope.as_os_str().is_empty() || path_is_directory_in_entries(&entries, &scope) {
+                paths.extend(entries.iter().filter_map(|(path, entry)| {
+                    (path_is_in_scope(path, &scope) && entry.kind() == &FileKind::File)
+                        .then(|| path.clone())
+                }));
+            } else if entries
+                .get(&scope)
+                .is_some_and(|entry| entry.kind() == &FileKind::File)
+            {
+                paths.push(scope);
+            } else {
+                search_error = true;
+                stderr.push_str(&format!(
+                    "rg: {}: no such searchable workspace path\n",
+                    path_to_store_string(&scope)
+                ));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+
+        let mut stdout = String::new();
+        let mut matched = false;
+        for path in paths {
+            match self.read_file(&path) {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    for (index, line) in text.lines().enumerate() {
+                        if line.contains(pattern) {
+                            matched = true;
+                            stdout.push_str(&format!(
+                                "{}:{}:{}\n",
+                                path_to_store_string(&path),
+                                index + 1,
+                                line
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    search_error = true;
+                    stderr.push_str(&format!("rg: {}: {error}\n", path_to_store_string(&path)));
+                }
+            }
+        }
+
+        let exit_code = if search_error {
+            2
+        } else if matched {
+            0
+        } else {
+            1
+        };
+        Ok(WorkspaceCommandOutput::new(
+            WorkspaceCommandMode::Virtual,
+            request,
+            stdout.into_bytes(),
+            stderr.into_bytes(),
+            exit_code,
+        ))
+    }
+
+    fn exec_virtual_write(
+        &mut self,
+        request: &WorkspaceCommandRequest,
+    ) -> WorkspaceResult<WorkspaceCommandOutput> {
+        if request.command.len() < 3 {
+            return Ok(virtual_usage_error(
+                request,
+                "write requires a path and text\nUsage: write <PATH> <TEXT...>\n",
+            ));
+        }
+
+        let path = command_path(request.cwd(), &request.command[1], false)?;
+        let text = request.command[2..].join(" ");
+        match self.write_file(&path, text.as_bytes()) {
+            Ok(()) => Ok(WorkspaceCommandOutput::new(
+                WorkspaceCommandMode::Virtual,
+                request,
+                format!(
+                    "Wrote overlay: {}\nBytes: {}\n",
+                    path_to_store_string(&path),
+                    text.len()
+                )
+                .into_bytes(),
+                Vec::new(),
+                0,
+            )),
+            Err(error) => Ok(WorkspaceCommandOutput::new(
+                WorkspaceCommandMode::Virtual,
+                request,
+                Vec::new(),
+                format!("write: {}: {error}\n", path_to_store_string(&path)).into_bytes(),
+                1,
+            )),
+        }
+    }
+
+    fn visible_entries(&self) -> WorkspaceResult<BTreeMap<PathBuf, WorkspaceEntryMetadata>> {
+        let mut entries = BTreeMap::new();
+        for version in self.base_versions.values() {
+            entries.insert(
+                version.path().to_path_buf(),
+                self.base_metadata_for(version)?,
+            );
+        }
+        for overlay in self.overlay.values() {
+            entries.insert(
+                overlay.path.clone(),
+                WorkspaceEntryMetadata::new(
+                    overlay.path.clone(),
+                    FileKind::File,
+                    Some(overlay.size_bytes),
+                    HydrationState::Hydrated,
+                    WorkspaceEntrySource::Overlay,
+                ),
+            );
+        }
+
+        let paths = entries.keys().cloned().collect::<Vec<_>>();
+        for path in paths {
+            for ancestor in ancestors(&path) {
+                entries.entry(ancestor.clone()).or_insert_with(|| {
+                    WorkspaceEntryMetadata::new(
+                        ancestor,
+                        FileKind::Directory,
+                        None,
+                        HydrationState::Hydrated,
+                        WorkspaceEntrySource::Overlay,
+                    )
+                });
+            }
+        }
+
+        Ok(entries)
+    }
+
+    fn materialize_session_view(
+        &self,
+        sandbox_path: &Path,
+        report: &mut WorkspaceMaterializedRunReport,
+    ) -> WorkspaceResult<()> {
+        let entries = self.visible_entries()?;
+        for (path, entry) in entries {
+            let target = sandbox_target(sandbox_path, &path)?;
+            match entry.kind() {
+                FileKind::Directory => {
+                    create_dir_all(&target)?;
+                    report.materialized_directories += 1;
+                }
+                FileKind::File => {
+                    let bytes = self.read_file(&path)?;
+                    write_sandbox_file(&target, &bytes)?;
+                    report.materialized_files += 1;
+                }
+                FileKind::Symlink | FileKind::Unsupported => {
+                    return Err(WorkspaceError::UnsupportedOperation {
+                        operation: "materialize symlink or unsupported entry",
+                        adapter: "agent virtual workspace",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn capture_sandbox_changes(
+        &mut self,
+        sandbox_path: &Path,
+    ) -> WorkspaceResult<SandboxCapturePlan> {
+        let scan = scan_sandbox(sandbox_path)?;
+        if let Some(blocked) = scan.blocked.first() {
+            return Err(WorkspaceError::SandboxCaptureBlocked {
+                sandbox_path: sandbox_path.to_path_buf(),
+                reason: format!(
+                    "{} is secret-blocked: {}",
+                    path_to_store_string(&blocked.path),
+                    blocked.reason
+                ),
+            });
+        }
+        if let Some(deferred) = scan.deferred.first() {
+            return Err(WorkspaceError::SandboxCaptureBlocked {
+                sandbox_path: sandbox_path.to_path_buf(),
+                reason: format!(
+                    "{} is deferred: {}",
+                    path_to_store_string(&deferred.path),
+                    deferred.reason
+                ),
+            });
+        }
+
+        let present = scan
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<BTreeSet<_>>();
+        let deleted = self
+            .visible_file_paths()
+            .into_iter()
+            .filter(|path| !present.contains(path))
+            .collect::<Vec<_>>();
+        if !deleted.is_empty() {
+            return Err(WorkspaceError::SandboxDeletedTrackedFiles {
+                sandbox_path: sandbox_path.to_path_buf(),
+                paths: deleted,
+            });
+        }
+
+        let mut plan = SandboxCapturePlan {
+            changed_files: Vec::new(),
+            unchanged_files: 0,
+            ignored_entries: scan.ignored_entries,
+        };
+        for file in scan.files {
+            match self.read_file(&file.path) {
+                Ok(existing) if existing == file.bytes => {
+                    plan.unchanged_files += 1;
+                }
+                Ok(_) | Err(WorkspaceError::MissingPath(_)) | Err(WorkspaceError::NotAFile(_)) => {
+                    plan.changed_files.push(file);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        validate_sandbox_capture_targets(&self.base_versions, &self.overlay, &plan.changed_files)?;
+        for file in &plan.changed_files {
+            self.write_file(&file.path, &file.bytes)?;
+        }
+        Ok(plan)
+    }
+
+    fn visible_file_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self
+            .base_versions
+            .values()
+            .filter_map(|version| {
+                (version.kind() == &FileKind::File).then(|| version.path().to_path_buf())
+            })
+            .collect::<Vec<_>>();
+        paths.extend(self.overlay.keys().cloned());
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     fn base_metadata_for(&self, version: &FileVersion) -> WorkspaceResult<WorkspaceEntryMetadata> {
@@ -899,6 +1639,23 @@ pub enum WorkspaceError {
         path: PathBuf,
         reason: String,
     },
+    EmptyCommand,
+    ProcessLaunch {
+        command: String,
+        source: io::Error,
+    },
+    SandboxCaptureBlocked {
+        sandbox_path: PathBuf,
+        reason: String,
+    },
+    SandboxDeletedTrackedFiles {
+        sandbox_path: PathBuf,
+        paths: Vec<PathBuf>,
+    },
+    HostFolderMutated {
+        sandbox_path: PathBuf,
+        paths: Vec<PathBuf>,
+    },
     UnsupportedOperation {
         operation: &'static str,
         adapter: &'static str,
@@ -965,6 +1722,46 @@ impl fmt::Display for WorkspaceError {
             Self::PolicyBlocked { path, reason } => {
                 write!(f, "workspace write blocked for {}: {reason}", path.display())
             }
+            Self::EmptyCommand => write!(f, "workspace command cannot be empty"),
+            Self::ProcessLaunch { command, source } => {
+                write!(f, "could not launch materialized command '{command}': {source}")
+            }
+            Self::SandboxCaptureBlocked {
+                sandbox_path,
+                reason,
+            } => write!(
+                f,
+                "materialized sandbox capture refused for {}: {reason}; sandbox kept for inspection",
+                sandbox_path.display()
+            ),
+            Self::SandboxDeletedTrackedFiles {
+                sandbox_path,
+                paths,
+            } => write!(
+                f,
+                "materialized sandbox capture refused for {} because tracked files were deleted: {}; sandbox kept for inspection",
+                sandbox_path.display(),
+                paths
+                    .iter()
+                    .take(5)
+                    .map(|path| path_to_store_string(path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::HostFolderMutated {
+                sandbox_path,
+                paths,
+            } => write!(
+                f,
+                "materialized sandbox command mutated the real shared folder outside capture: {}; sandbox kept at {} for inspection",
+                paths
+                    .iter()
+                    .take(8)
+                    .map(|path| path_to_store_string(path))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                sandbox_path.display()
+            ),
             Self::UnsupportedOperation { operation, adapter } => {
                 write!(f, "{operation} is not supported by {adapter}")
             }
@@ -995,6 +1792,7 @@ impl std::error::Error for WorkspaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::ProcessLaunch { source, .. } => Some(source),
             Self::Store(error) => Some(error),
             Self::Sync(error) => Some(error),
             Self::Loom(error) => Some(error),
@@ -1011,6 +1809,10 @@ impl std::error::Error for WorkspaceError {
             | Self::PathConflict { .. }
             | Self::PolicyIgnored { .. }
             | Self::PolicyBlocked { .. }
+            | Self::EmptyCommand
+            | Self::SandboxCaptureBlocked { .. }
+            | Self::SandboxDeletedTrackedFiles { .. }
+            | Self::HostFolderMutated { .. }
             | Self::UnsupportedOperation { .. }
             | Self::EmptyMessage(_)
             | Self::StaleBaseRevision { .. }
@@ -1039,6 +1841,48 @@ impl From<LoomError> for WorkspaceError {
 }
 
 pub type WorkspaceResult<T> = Result<T, WorkspaceError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SandboxCapturedFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SandboxNotice {
+    path: PathBuf,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SandboxScan {
+    files: Vec<SandboxCapturedFile>,
+    ignored_entries: usize,
+    blocked: Vec<SandboxNotice>,
+    deferred: Vec<SandboxNotice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SandboxCapturePlan {
+    changed_files: Vec<SandboxCapturedFile>,
+    unchanged_files: usize,
+    ignored_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostEntryFingerprint {
+    kind: HostEntryKind,
+    size_bytes: Option<u64>,
+    fingerprint: Option<String>,
+}
 
 fn versions_for_revision(
     store: &LocalStore,
@@ -1084,6 +1928,347 @@ fn enforce_capture_policy(path: &Path, bytes: &[u8]) -> WorkspaceResult<()> {
         FileCapturePolicyDecision::Block { path, reason } => {
             Err(WorkspaceError::PolicyBlocked { path, reason })
         }
+    }
+}
+
+fn normalize_command_request(
+    request: WorkspaceCommandRequest,
+) -> WorkspaceResult<WorkspaceCommandRequest> {
+    Ok(WorkspaceCommandRequest {
+        command: request.command,
+        cwd: normalize_relative_path(&request.cwd, true)?,
+    })
+}
+
+fn command_path(cwd: &Path, value: &str, allow_empty: bool) -> WorkspaceResult<PathBuf> {
+    let path = Path::new(value);
+    let mut joined = cwd.to_path_buf();
+    joined.push(path);
+    normalize_relative_path(&joined, allow_empty)
+}
+
+fn virtual_usage_error(request: &WorkspaceCommandRequest, message: &str) -> WorkspaceCommandOutput {
+    WorkspaceCommandOutput::new(
+        WorkspaceCommandMode::Virtual,
+        request,
+        Vec::new(),
+        message.as_bytes().to_vec(),
+        2,
+    )
+}
+
+fn path_is_directory_in_entries(
+    entries: &BTreeMap<PathBuf, WorkspaceEntryMetadata>,
+    path: &Path,
+) -> bool {
+    path.as_os_str().is_empty()
+        || entries
+            .get(path)
+            .is_some_and(|entry| entry.kind() == &FileKind::Directory)
+        || entries
+            .keys()
+            .any(|candidate| candidate != path && candidate.starts_with(path))
+}
+
+fn immediate_child(path: &Path, scope: &Path) -> Option<PathBuf> {
+    if path == scope || !path_is_in_scope(path, scope) {
+        return None;
+    }
+    let relative = if scope.as_os_str().is_empty() {
+        path
+    } else {
+        path.strip_prefix(scope).ok()?
+    };
+    let first = relative
+        .components()
+        .find_map(|component| match component {
+            Component::Normal(part) => Some(part.to_owned()),
+            _ => None,
+        })?;
+    let mut child = scope.to_path_buf();
+    child.push(first);
+    Some(child)
+}
+
+fn sandbox_target(root: &Path, relative_path: &Path) -> WorkspaceResult<PathBuf> {
+    let relative_path = normalize_relative_path(relative_path, false)?;
+    Ok(root.join(relative_path))
+}
+
+fn write_sandbox_file(path: &Path, bytes: &[u8]) -> WorkspaceResult<()> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    fs::write(path, bytes).map_err(|source| WorkspaceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn scan_sandbox(root: &Path) -> WorkspaceResult<SandboxScan> {
+    let mut scan = SandboxScan::default();
+    scan_sandbox_dir(root, root, &mut scan)?;
+    scan.files.sort_by(|left, right| {
+        path_to_store_string(&left.path).cmp(&path_to_store_string(&right.path))
+    });
+    scan.blocked.sort_by(|left, right| {
+        path_to_store_string(&left.path).cmp(&path_to_store_string(&right.path))
+    });
+    scan.deferred.sort_by(|left, right| {
+        path_to_store_string(&left.path).cmp(&path_to_store_string(&right.path))
+    });
+    Ok(scan)
+}
+
+fn scan_sandbox_dir(root: &Path, dir: &Path, scan: &mut SandboxScan) -> WorkspaceResult<()> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|source| WorkspaceError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| WorkspaceError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let entry_path = entry.path();
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|source| WorkspaceError::Io {
+            path: entry_path.clone(),
+            source,
+        })?;
+        let relative_path = relative_sandbox_path(root, &entry_path)?;
+        if metadata.is_dir() {
+            match loom_worktree::evaluate_directory_policy(&relative_path) {
+                loom_worktree::DirectoryPolicyDecision::Include => {
+                    scan_sandbox_dir(root, &entry_path, scan)?;
+                }
+                loom_worktree::DirectoryPolicyDecision::Ignore { .. } => {
+                    scan.ignored_entries += 1;
+                }
+            }
+        } else if metadata.is_file() {
+            let bytes = fs::read(&entry_path).map_err(|source| WorkspaceError::Io {
+                path: entry_path.clone(),
+                source,
+            })?;
+            match evaluate_file_capture_policy(&relative_path, &bytes) {
+                FileCapturePolicyDecision::Capture => {
+                    scan.files.push(SandboxCapturedFile {
+                        path: relative_path,
+                        bytes,
+                    });
+                }
+                FileCapturePolicyDecision::Ignore { .. } => {
+                    scan.ignored_entries += 1;
+                }
+                FileCapturePolicyDecision::Block { path, reason } => {
+                    scan.blocked.push(SandboxNotice { path, reason });
+                }
+            }
+        } else if metadata.file_type().is_symlink() {
+            scan.deferred.push(SandboxNotice {
+                path: relative_path,
+                reason: "symlink capture is deferred until restore safety rules exist".to_string(),
+            });
+        } else {
+            scan.deferred.push(SandboxNotice {
+                path: relative_path,
+                reason: "unsupported file type is deferred".to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn relative_sandbox_path(root: &Path, path: &Path) -> WorkspaceResult<PathBuf> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| WorkspaceError::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "sandbox entry is outside the sandbox root",
+        })?;
+    normalize_relative_path(relative, false)
+}
+
+fn validate_sandbox_capture_targets(
+    base_versions: &BTreeMap<PathBuf, FileVersion>,
+    overlay: &BTreeMap<PathBuf, OverlayFile>,
+    files: &[SandboxCapturedFile],
+) -> WorkspaceResult<()> {
+    let changed_paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
+    for path in &changed_paths {
+        if let Some(base) = base_versions.get(path) {
+            if base.kind() != &FileKind::File {
+                return Err(WorkspaceError::PathConflict {
+                    path: path.clone(),
+                    reason: "cannot capture a file over a base directory or unsupported entry"
+                        .to_string(),
+                });
+            }
+        }
+
+        for ancestor in ancestors(path) {
+            if let Some(base) = base_versions.get(&ancestor) {
+                if base.kind() == &FileKind::File {
+                    return Err(WorkspaceError::PathConflict {
+                        path: path.clone(),
+                        reason: format!("parent {} is a file", path_to_store_string(&ancestor)),
+                    });
+                }
+            }
+            if overlay.contains_key(&ancestor) || changed_paths.contains(&ancestor) {
+                return Err(WorkspaceError::PathConflict {
+                    path: path.clone(),
+                    reason: format!(
+                        "parent {} is an overlay file",
+                        path_to_store_string(&ancestor)
+                    ),
+                });
+            }
+        }
+
+        for existing in base_versions
+            .keys()
+            .chain(overlay.keys())
+            .chain(changed_paths.iter())
+        {
+            if existing.starts_with(path) && existing != path {
+                return Err(WorkspaceError::PathConflict {
+                    path: path.clone(),
+                    reason: "cannot capture a file over a directory with children".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scan_host_folder_for_guard(
+    root: &Path,
+) -> WorkspaceResult<BTreeMap<PathBuf, HostEntryFingerprint>> {
+    let mut entries = BTreeMap::new();
+    scan_host_guard_dir(root, root, &mut entries)?;
+    Ok(entries)
+}
+
+fn scan_host_guard_dir(
+    root: &Path,
+    dir: &Path,
+    entries: &mut BTreeMap<PathBuf, HostEntryFingerprint>,
+) -> WorkspaceResult<()> {
+    let mut children = fs::read_dir(dir)
+        .map_err(|source| WorkspaceError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| WorkspaceError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+    children.sort_by_key(|entry| entry.file_name());
+
+    for child in children {
+        let path = child.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|source| WorkspaceError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let relative_path = relative_sandbox_path(root, &path)?;
+        if metadata.is_dir() {
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::Directory,
+                    size_bytes: None,
+                    fingerprint: None,
+                },
+            );
+            scan_host_guard_dir(root, &path, entries)?;
+        } else if metadata.is_file() {
+            let bytes = fs::read(&path).map_err(|source| WorkspaceError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::File,
+                    size_bytes: Some(metadata.len()),
+                    fingerprint: Some(blake3::hash(&bytes).to_hex().to_string()),
+                },
+            );
+        } else if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path).map_err(|source| WorkspaceError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::Symlink,
+                    size_bytes: None,
+                    fingerprint: Some(target.to_string_lossy().into_owned()),
+                },
+            );
+        } else {
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::Other,
+                    size_bytes: Some(metadata.len()),
+                    fingerprint: None,
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn host_folder_mutations(
+    before: &BTreeMap<PathBuf, HostEntryFingerprint>,
+    after: &BTreeMap<PathBuf, HostEntryFingerprint>,
+) -> Vec<PathBuf> {
+    let paths = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    paths
+        .into_iter()
+        .filter(|path| before.get(path) != after.get(path))
+        .collect()
+}
+
+fn file_kind_label(kind: &FileKind) -> &'static str {
+    match kind {
+        FileKind::File => "file",
+        FileKind::Directory => "directory",
+        FileKind::Symlink => "symlink",
+        FileKind::Unsupported => "unsupported",
+    }
+}
+
+fn hydration_label(state: HydrationState) -> &'static str {
+    match state {
+        HydrationState::RemoteOnly => "remote-only",
+        HydrationState::Partial => "partial",
+        HydrationState::Hydrated => "hydrated",
+    }
+}
+
+fn workspace_entry_source_label(source: WorkspaceEntrySource) -> &'static str {
+    match source {
+        WorkspaceEntrySource::BaseRevision => "base",
+        WorkspaceEntrySource::Overlay => "overlay",
     }
 }
 
@@ -1499,6 +2684,18 @@ fn create_dir_all(path: impl AsRef<Path>) -> WorkspaceResult<()> {
     })
 }
 
+fn remove_dir_all(path: impl AsRef<Path>) -> WorkspaceResult<()> {
+    let path = path.as_ref();
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(WorkspaceError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 fn current_timestamp() -> String {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1681,6 +2878,289 @@ mod tests {
                 adapter: "agent virtual workspace"
             }
         ));
+    }
+
+    #[test]
+    fn virtual_exec_supports_agent_inspect_and_write_loop() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store);
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id = Some(WorkspaceSessionId::new("agent-exec").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+
+        let pwd = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec!["pwd".to_string()]))
+            .expect("pwd runs");
+        assert_eq!(pwd.exit_code(), 0);
+        assert_eq!(text(pwd.stdout()), "/\n");
+
+        let ls = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec!["ls".to_string()]))
+            .expect("ls runs");
+        assert_eq!(ls.exit_code(), 0);
+        assert!(text(ls.stdout()).contains("README.md\n"));
+
+        let cat = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec![
+                "cat".to_string(),
+                "README.md".to_string(),
+            ]))
+            .expect("cat runs");
+        assert_eq!(cat.exit_code(), 0);
+        assert_eq!(cat.stdout(), b"base\n");
+
+        let rg = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec![
+                "rg".to_string(),
+                "bas".to_string(),
+            ]))
+            .expect("rg runs");
+        assert_eq!(rg.exit_code(), 0);
+        assert_eq!(text(rg.stdout()), "README.md:1:base\n");
+
+        let stat = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec![
+                "stat".to_string(),
+                "README.md".to_string(),
+            ]))
+            .expect("stat runs");
+        assert_eq!(stat.exit_code(), 0);
+        let stat_stdout = text(stat.stdout());
+        assert!(stat_stdout.contains("Kind: file"));
+        assert!(stat_stdout.contains("Source: base"));
+
+        let write = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec![
+                "write".to_string(),
+                "src/new.rs".to_string(),
+                "fn new() {}".to_string(),
+            ]))
+            .expect("write runs");
+        assert_eq!(write.exit_code(), 0);
+        assert_eq!(
+            session
+                .read_file(Path::new("src/new.rs"))
+                .expect("overlay read"),
+            b"fn new() {}"
+        );
+        assert_eq!(
+            store_paths(session.diff_overlay().expect("diff").created()),
+            vec!["src/new.rs"]
+        );
+
+        let ls_src = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec![
+                "ls".to_string(),
+                "src".to_string(),
+            ]))
+            .expect("ls src runs");
+        assert_eq!(ls_src.exit_code(), 0);
+        assert_eq!(text(ls_src.stdout()), "src/new.rs\n");
+    }
+
+    #[test]
+    fn virtual_exec_unsupported_command_suggests_materialized_fallback() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store);
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id =
+            Some(WorkspaceSessionId::new("agent-unsupported-exec").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+
+        let output = session
+            .execute_virtual_command(WorkspaceCommandRequest::new(vec![
+                "cargo".to_string(),
+                "test".to_string(),
+            ]))
+            .expect("unsupported command is captured");
+
+        assert_eq!(output.exit_code(), 127);
+        let stderr = text(output.stderr());
+        assert!(stderr.contains("unsupported virtual workspace command 'cargo'"));
+        assert!(stderr.contains("materialized sandbox fallback"));
+    }
+
+    #[test]
+    fn materialized_run_captures_overlay_diff_and_checkpoint() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id =
+            Some(WorkspaceSessionId::new("agent-materialized").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+
+        let output = session
+            .run_materialized_command(
+                WorkspaceCommandRequest::new(shell_command(
+                    "write-readme-and-new-file",
+                    "materialized\n",
+                    "fn materialized() {}\n",
+                )),
+                WorkspaceMaterializedRunOptions::cleanup(),
+            )
+            .expect("materialized command runs");
+
+        assert_eq!(output.exit_code(), 0);
+        let report = output.materialized_report().expect("materialized report");
+        assert!(report.cleaned_up());
+        assert!(!report.sandbox_path().exists());
+        assert_eq!(report.captured_files(), 2);
+        let diff = session.diff_overlay().expect("diff");
+        assert_eq!(store_paths(diff.modified()), vec!["README.md"]);
+        assert_eq!(store_paths(diff.created()), vec!["src/new.rs"]);
+        assert!(
+            text(&session.read_file(Path::new("README.md")).expect("readme"))
+                .contains("materialized")
+        );
+
+        let checkpoint = session
+            .checkpoint_overlay("materialized fallback checkpoint")
+            .expect("checkpoint");
+        assert_eq!(checkpoint.overlay_files(), 2);
+        assert_eq!(
+            checkpoint.checkpoint().message(),
+            "materialized fallback checkpoint"
+        );
+    }
+
+    #[test]
+    fn materialized_sandboxes_and_overlays_are_session_isolated() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store);
+        let mut first = WorkspaceSessionRequest::new();
+        first.session_id = Some(WorkspaceSessionId::new("agent-mat-a").expect("session id"));
+        let mut second = WorkspaceSessionRequest::new();
+        second.session_id = Some(WorkspaceSessionId::new("agent-mat-b").expect("session id"));
+        let mut session_a = adapter.create_session(first).expect("session A creates");
+        let mut session_b = adapter.create_session(second).expect("session B creates");
+
+        let output_a = session_a
+            .run_materialized_command(
+                WorkspaceCommandRequest::new(shell_command(
+                    "write-readme",
+                    "from materialized A\n",
+                    "a\n",
+                )),
+                WorkspaceMaterializedRunOptions::keep_sandbox(),
+            )
+            .expect("A materialized command");
+        let output_b = session_b
+            .run_materialized_command(
+                WorkspaceCommandRequest::new(shell_command(
+                    "write-readme",
+                    "from materialized B\n",
+                    "b\n",
+                )),
+                WorkspaceMaterializedRunOptions::keep_sandbox(),
+            )
+            .expect("B materialized command");
+
+        let report_a = output_a.materialized_report().expect("A report");
+        let report_b = output_b.materialized_report().expect("B report");
+        assert_ne!(report_a.sandbox_path(), report_b.sandbox_path());
+        assert!(report_a.sandbox_path().exists());
+        assert!(report_b.sandbox_path().exists());
+        assert!(
+            text(&session_a.read_file(Path::new("README.md")).expect("A read"))
+                .contains("from materialized A")
+        );
+        assert!(
+            text(&session_b.read_file(Path::new("README.md")).expect("B read"))
+                .contains("from materialized B")
+        );
+    }
+
+    #[test]
+    fn materialized_capture_blocks_secrets_before_overlay_object_write() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id =
+            Some(WorkspaceSessionId::new("agent-materialized-secret").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        let object_count_before = fixture.object_file_count();
+
+        let error = session
+            .run_materialized_command(
+                WorkspaceCommandRequest::new(secret_command(&raw_secret)),
+                WorkspaceMaterializedRunOptions::cleanup(),
+            )
+            .expect_err("secret capture is blocked");
+
+        assert!(matches!(
+            error,
+            WorkspaceError::SandboxCaptureBlocked { .. }
+        ));
+        assert_eq!(session.overlay_file_count(), 0);
+        assert_eq!(fixture.object_file_count(), object_count_before);
+        assert!(!fixture.object_cache_contains(raw_secret.as_bytes()));
+    }
+
+    #[test]
+    fn materialized_capture_refuses_deleted_tracked_files_and_keeps_sandbox() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store);
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id =
+            Some(WorkspaceSessionId::new("agent-materialized-delete").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+
+        let error = session
+            .run_materialized_command(
+                WorkspaceCommandRequest::new(delete_readme_command()),
+                WorkspaceMaterializedRunOptions::cleanup(),
+            )
+            .expect_err("delete capture is refused");
+
+        match error {
+            WorkspaceError::SandboxDeletedTrackedFiles {
+                sandbox_path,
+                paths,
+            } => {
+                assert!(sandbox_path.exists());
+                assert_eq!(store_paths(&paths), vec!["README.md"]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        assert_eq!(session.overlay_file_count(), 0);
+    }
+
+    #[test]
+    fn materialized_run_refuses_shared_folder_escape_without_overlay_capture() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id =
+            Some(WorkspaceSessionId::new("agent-materialized-escape").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        let leaked = fixture.store.folder_root().join("leaked.env");
+        let object_count_before = fixture.object_file_count();
+
+        let error = session
+            .run_materialized_command(
+                WorkspaceCommandRequest::new(escape_shared_folder_command(&leaked, &raw_secret)),
+                WorkspaceMaterializedRunOptions::cleanup(),
+            )
+            .expect_err("host folder mutation is refused");
+
+        match error {
+            WorkspaceError::HostFolderMutated {
+                sandbox_path,
+                paths,
+            } => {
+                assert!(sandbox_path.exists());
+                assert_eq!(store_paths(&paths), vec!["leaked.env"]);
+                remove_dir_all(&sandbox_path).expect("test cleans kept sandbox");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        assert!(leaked.exists());
+        assert_eq!(session.overlay_file_count(), 0);
+        assert!(!session.diff_overlay().expect("diff").has_changes());
+        assert_eq!(fixture.object_file_count(), object_count_before);
+        assert!(!fixture.object_cache_contains(raw_secret.as_bytes()));
     }
 
     #[test]
@@ -1941,6 +3421,97 @@ mod tests {
             .iter()
             .map(|path| path_to_store_string(path))
             .collect()
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        String::from_utf8(bytes.to_vec()).expect("bytes are UTF-8")
+    }
+
+    #[cfg(windows)]
+    fn shell_command(_name: &str, readme: &str, new_file: &str) -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            format!(
+                "echo {}>README.md && mkdir src 2>NUL & echo {}>src\\new.rs",
+                readme.trim_end(),
+                new_file.trim_end()
+            ),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn shell_command(_name: &str, readme: &str, new_file: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '{}' > README.md; mkdir -p src; printf '{}' > src/new.rs",
+                readme.replace('\'', "'\\''"),
+                new_file.replace('\'', "'\\''")
+            ),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn secret_command(raw_secret: &str) -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            format!("echo OPENAI_API_KEY={raw_secret}>secrets.env"),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn secret_command(raw_secret: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf 'OPENAI_API_KEY={raw_secret}\\n' > secrets.env"),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn escape_shared_folder_command(path: &Path, raw_secret: &str) -> Vec<String> {
+        vec![
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            format!(
+                "Set-Content -LiteralPath '{}' -Value 'OPENAI_API_KEY={raw_secret}'",
+                path.to_string_lossy().replace('\'', "''")
+            ),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn escape_shared_folder_command(path: &Path, raw_secret: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf 'OPENAI_API_KEY={raw_secret}\\n' > '{}'",
+                path.to_string_lossy().replace('\'', "'\\''")
+            ),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn delete_readme_command() -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "del README.md".to_string(),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn delete_readme_command() -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "rm README.md".to_string(),
+        ]
     }
 
     fn count_files(path: &Path) -> usize {

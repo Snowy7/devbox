@@ -17,8 +17,9 @@ use loom_sync::{
     RemoteCheckReport, DEFAULT_REMOTE_NAME, LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_workspace::{
-    AgentWorkspaceAdapter, WorkspaceEntryMetadata, WorkspaceEntrySource, WorkspaceOverlayDiff,
-    WorkspaceSessionRequest, WorkspaceView,
+    AgentWorkspaceAdapter, WorkspaceCommandMode, WorkspaceCommandOutput, WorkspaceCommandRequest,
+    WorkspaceEntryMetadata, WorkspaceEntrySource, WorkspaceMaterializedRunOptions,
+    WorkspaceOverlayDiff, WorkspaceSessionRequest, WorkspaceView,
 };
 use loom_worktree::{
     cache_policy_presets, cache_status_for_scope, diff_revision_to_capture,
@@ -161,10 +162,10 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "workspace",
-        usage: "loom workspace open [FOLDER] [--session <ID>] [--revision <REVISION|CHECKPOINT>]\n       loom workspace sessions [FOLDER]\n       loom workspace list [FOLDER] --session <ID> [PATH]\n       loom workspace read [FOLDER] --session <ID> <PATH>\n       loom workspace write [FOLDER] --session <ID> <PATH> --text <TEXT>\n       loom workspace hydrate [FOLDER] --session <ID> <PATH>\n       loom workspace dehydrate [FOLDER] --session <ID> <PATH>\n       loom workspace pin [FOLDER] --session <ID> <PATH>\n       loom workspace diff [FOLDER] --session <ID>\n       loom workspace checkpoint [FOLDER] --session <ID> -m <MESSAGE>\n       loom workspace close [FOLDER] --session <ID>\n       loom workspace discard [FOLDER] --session <ID>",
+        usage: "loom workspace open [FOLDER] [--session <ID>] [--revision <REVISION|CHECKPOINT>]\n       loom workspace sessions [FOLDER]\n       loom workspace list [FOLDER] --session <ID> [PATH]\n       loom workspace read [FOLDER] --session <ID> <PATH>\n       loom workspace write [FOLDER] --session <ID> <PATH> --text <TEXT>\n       loom workspace exec [FOLDER] --session <ID> [--cwd <PATH>] -- <COMMAND> [ARGS...]\n       loom workspace materialize-run [FOLDER] --session <ID> [--cwd <PATH>] [--keep-sandbox] -- <COMMAND> [ARGS...]\n       loom workspace hydrate [FOLDER] --session <ID> <PATH>\n       loom workspace dehydrate [FOLDER] --session <ID> <PATH>\n       loom workspace pin [FOLDER] --session <ID> <PATH>\n       loom workspace diff [FOLDER] --session <ID>\n       loom workspace checkpoint [FOLDER] --session <ID> -m <MESSAGE>\n       loom workspace close [FOLDER] --session <ID>\n       loom workspace discard [FOLDER] --session <ID>",
         summary: "Use virtual workspace sessions over Loom revisions",
         implemented: true,
-        planned_behavior: "open agent virtual sessions, read lazily, write isolated overlays, diff, checkpoint, and discard without OS filesystem mounting",
+        planned_behavior: "open agent virtual sessions, run deterministic virtual commands, fall back to isolated materialized sandboxes, diff, checkpoint, and discard without OS filesystem mounting",
     },
 ];
 
@@ -1073,6 +1074,10 @@ fn run_workspace(args: &[String]) -> Result<(), String> {
         Some((subcommand, rest)) if subcommand == "list" => run_workspace_list(rest),
         Some((subcommand, rest)) if subcommand == "read" => run_workspace_read(rest),
         Some((subcommand, rest)) if subcommand == "write" => run_workspace_write(rest),
+        Some((subcommand, rest)) if subcommand == "exec" => run_workspace_exec(rest),
+        Some((subcommand, rest)) if subcommand == "materialize-run" => {
+            run_workspace_materialize_run(rest)
+        }
         Some((subcommand, rest)) if subcommand == "hydrate" => run_workspace_hydrate(rest),
         Some((subcommand, rest)) if subcommand == "dehydrate" => run_workspace_dehydrate(rest),
         Some((subcommand, rest)) if subcommand == "pin" => run_workspace_pin(rest),
@@ -1242,6 +1247,79 @@ fn run_workspace_write(args: &[String]) -> Result<(), String> {
     println!("Wrote overlay: {}", path_to_store_string(&parsed.path));
     println!("Bytes: {}", parsed.text.len());
     Ok(())
+}
+
+fn run_workspace_exec(args: &[String]) -> Result<(), String> {
+    let parsed = parse_workspace_exec_args("exec", args, false)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let remote = optional_workspace_remote(&store)?;
+    let request = WorkspaceCommandRequest::new(parsed.command).with_cwd(parsed.cwd);
+    let output = if let Some(remote) = remote.as_deref() {
+        let adapter = AgentWorkspaceAdapter::with_remote(store, remote);
+        let mut session = adapter
+            .open_session(&parsed.session_id)
+            .map_err(|error| error.to_string())?;
+        session
+            .execute_virtual_command(request)
+            .map_err(|error| error.to_string())?
+    } else {
+        let adapter = AgentWorkspaceAdapter::new(store);
+        let mut session = adapter
+            .open_session(&parsed.session_id)
+            .map_err(|error| error.to_string())?;
+        session
+            .execute_virtual_command(request)
+            .map_err(|error| error.to_string())?
+    };
+
+    print_workspace_command_output(&parsed.session_id, &output)?;
+    if output.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "workspace exec exited with status {}",
+            output.exit_code()
+        ))
+    }
+}
+
+fn run_workspace_materialize_run(args: &[String]) -> Result<(), String> {
+    let parsed = parse_workspace_exec_args("materialize-run", args, true)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let remote = optional_workspace_remote(&store)?;
+    let request = WorkspaceCommandRequest::new(parsed.command).with_cwd(parsed.cwd);
+    let options = if parsed.keep_sandbox {
+        WorkspaceMaterializedRunOptions::keep_sandbox()
+    } else {
+        WorkspaceMaterializedRunOptions::cleanup()
+    };
+    let output = if let Some(remote) = remote.as_deref() {
+        let adapter = AgentWorkspaceAdapter::with_remote(store, remote);
+        let mut session = adapter
+            .open_session(&parsed.session_id)
+            .map_err(|error| error.to_string())?;
+        session
+            .run_materialized_command(request, options)
+            .map_err(|error| error.to_string())?
+    } else {
+        let adapter = AgentWorkspaceAdapter::new(store);
+        let mut session = adapter
+            .open_session(&parsed.session_id)
+            .map_err(|error| error.to_string())?;
+        session
+            .run_materialized_command(request, options)
+            .map_err(|error| error.to_string())?
+    };
+
+    print_workspace_command_output(&parsed.session_id, &output)?;
+    if output.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "workspace materialized command exited with status {}",
+            output.exit_code()
+        ))
+    }
 }
 
 fn run_workspace_hydrate(args: &[String]) -> Result<(), String> {
@@ -1601,6 +1679,92 @@ fn print_workspace_diff(diff: &WorkspaceOverlayDiff) {
     print_paths("Created", diff.created());
     print_paths("Modified", diff.modified());
     print_paths("Deleted", diff.deleted());
+}
+
+fn print_workspace_command_output(
+    session_id: &WorkspaceSessionId,
+    output: &WorkspaceCommandOutput,
+) -> Result<(), String> {
+    println!("Workspace session: {session_id}");
+    println!("Mode: {}", workspace_command_mode_label(output.mode()));
+    println!("Command: {}", shell_join(output.command()));
+    println!(
+        "Cwd: {}",
+        if output.cwd().as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            path_to_store_string(output.cwd())
+        }
+    );
+    println!("Exit status: {}", output.exit_code());
+    if let Some(report) = output.materialized_report() {
+        println!("Sandbox: {}", report.sandbox_path().display());
+        println!(
+            "Materialized: {} files, {} directories",
+            report.materialized_files(),
+            report.materialized_directories()
+        );
+        println!(
+            "Captured: {} changed, {} unchanged, {} ignored",
+            report.captured_files(),
+            report.unchanged_files(),
+            report.ignored_entries()
+        );
+        println!(
+            "Sandbox cleanup: {}",
+            if report.cleaned_up() {
+                "removed"
+            } else {
+                "kept"
+            }
+        );
+    }
+    println!("Stdout bytes: {}", output.stdout().len());
+    if !output.stdout().is_empty() {
+        println!("--- stdout");
+        print_lossy_block(output.stdout())?;
+    }
+    println!("Stderr bytes: {}", output.stderr().len());
+    if !output.stderr().is_empty() {
+        println!("--- stderr");
+        print_lossy_block(output.stderr())?;
+    }
+    Ok(())
+}
+
+fn print_lossy_block(bytes: &[u8]) -> Result<(), String> {
+    let text = String::from_utf8_lossy(bytes);
+    print!("{text}");
+    if !text.ends_with('\n') {
+        println!();
+    }
+    std::io::stdout()
+        .flush()
+        .map_err(|error| format!("could not flush command output: {error}"))
+}
+
+fn workspace_command_mode_label(mode: WorkspaceCommandMode) -> &'static str {
+    match mode {
+        WorkspaceCommandMode::Virtual => "virtual",
+        WorkspaceCommandMode::MaterializedSandbox => "materialized-sandbox",
+    }
+}
+
+fn shell_join(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| {
+            if part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_./:=+".contains(character))
+            {
+                part.clone()
+            } else {
+                format!("'{}'", part.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn file_kind_label(kind: &FileKind) -> &'static str {
@@ -2154,6 +2318,15 @@ struct WorkspaceWriteArgs {
 }
 
 #[derive(Debug, Clone)]
+struct WorkspaceExecArgs {
+    folder: Option<PathBuf>,
+    session_id: WorkspaceSessionId,
+    cwd: PathBuf,
+    command: Vec<String>,
+    keep_sandbox: bool,
+}
+
+#[derive(Debug, Clone)]
 struct WorkspaceCheckpointArgs {
     folder: Option<PathBuf>,
     session_id: WorkspaceSessionId,
@@ -2599,6 +2772,85 @@ fn parse_workspace_write_args(args: &[String]) -> Result<WorkspaceWriteArgs, Str
         session_id,
         path,
         text,
+    })
+}
+
+fn parse_workspace_exec_args(
+    command_name: &str,
+    args: &[String],
+    allow_keep_sandbox: bool,
+) -> Result<WorkspaceExecArgs, String> {
+    let mut session_id = None;
+    let mut cwd = PathBuf::new();
+    let mut keep_sandbox = false;
+    let mut positional = Vec::new();
+    let mut index = 0;
+    let mut command = None;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            command = Some(args[index + 1..].to_vec());
+            break;
+        } else if arg == "--session" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| "--session requires a value".to_string())?;
+            session_id =
+                Some(WorkspaceSessionId::new(value.clone()).map_err(|error| error.to_string())?);
+        } else if let Some(value) = arg.strip_prefix("--session=") {
+            session_id = Some(
+                WorkspaceSessionId::new(value.to_string()).map_err(|error| error.to_string())?,
+            );
+        } else if arg == "--cwd" {
+            index += 1;
+            cwd = PathBuf::from(
+                args.get(index)
+                    .ok_or_else(|| "--cwd requires a value".to_string())?,
+            );
+        } else if let Some(value) = arg.strip_prefix("--cwd=") {
+            cwd = PathBuf::from(value);
+        } else if arg == "--keep-sandbox" && allow_keep_sandbox {
+            keep_sandbox = true;
+        } else if arg == "--keep-sandbox" {
+            return Err("workspace exec does not accept --keep-sandbox".to_string());
+        } else if arg.starts_with('-') {
+            return Err(format!("workspace {command_name} unknown option '{arg}'"));
+        } else {
+            positional.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let command = command.ok_or_else(|| {
+        format!(
+            "workspace {command_name} requires -- before the command\nUsage: loom workspace {command_name} [FOLDER] --session <ID> [--cwd <PATH>] -- <COMMAND> [ARGS...]"
+        )
+    })?;
+    if command.is_empty() {
+        return Err(format!(
+            "workspace {command_name} requires a command after --"
+        ));
+    }
+    let folder = match positional.as_slice() {
+        [] => None,
+        [folder] => Some(PathBuf::from(folder)),
+        _ => {
+            return Err(format!(
+                "workspace {command_name} accepts at most one folder before --"
+            ));
+        }
+    };
+    let session_id =
+        session_id.ok_or_else(|| format!("workspace {command_name} requires --session <ID>"))?;
+
+    Ok(WorkspaceExecArgs {
+        folder,
+        session_id,
+        cwd,
+        command,
+        keep_sandbox,
     })
 }
 
