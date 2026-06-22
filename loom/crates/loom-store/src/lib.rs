@@ -170,6 +170,88 @@ impl ObjectCache {
             .join(id.as_str())
     }
 
+    pub fn stored_objects(&self) -> StoreResult<Vec<StoredObject>> {
+        let objects_root = self.root.join(OBJECTS_DIR).join(HASH_ALGORITHM_DIR);
+        if !objects_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut objects = Vec::new();
+        let mut stack = vec![objects_root.clone()];
+        while let Some(path) = stack.pop() {
+            let entries = fs::read_dir(&path).map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|source| StoreError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                let entry_path = entry.path();
+                let metadata = entry.metadata().map_err(|source| StoreError::Io {
+                    path: entry_path.clone(),
+                    source,
+                })?;
+                if metadata.is_dir() {
+                    stack.push(entry_path);
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+
+                let Some(file_name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let Ok(id) = ObjectId::from_blake3_hex(file_name.to_string()) else {
+                    continue;
+                };
+                objects.push(StoredObject {
+                    id,
+                    size_bytes: metadata.len(),
+                });
+            }
+        }
+
+        objects.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(objects)
+    }
+
+    pub fn verify_bytes(&self, id: &ObjectId) -> StoreResult<StoredObject> {
+        let path = self.path_for(id);
+        let bytes = fs::read(&path).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                StoreError::MissingObject {
+                    id: id.clone(),
+                    path: path.clone(),
+                }
+            } else {
+                StoreError::Io {
+                    path: path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let actual = ObjectId::from_blake3_hex(blake3::hash(&bytes).to_hex().to_string())
+            .expect("BLAKE3 returns a 64-character hex digest");
+        if &actual != id {
+            return Err(StoreError::ObjectHashMismatch {
+                expected: id.clone(),
+                actual,
+            });
+        }
+
+        Ok(StoredObject {
+            id: id.clone(),
+            size_bytes: bytes.len() as u64,
+        })
+    }
+
+    pub fn object_ref_for(&self, id: &ObjectId) -> String {
+        object_ref_for_id(id)
+    }
+
     fn write_reader(&self, mut reader: impl Read) -> StoreResult<ObjectRef> {
         let (mut temp_file, temp_path) = self.create_temp_file()?;
         let mut hasher = blake3::Hasher::new();
@@ -433,6 +515,106 @@ impl RemoteConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationLevel {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationIssue {
+    level: VerificationLevel,
+    code: &'static str,
+    message: String,
+}
+
+impl VerificationIssue {
+    pub fn error(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            level: VerificationLevel::Error,
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn warning(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            level: VerificationLevel::Warning,
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn level(&self) -> VerificationLevel {
+        self.level
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreVerificationReport {
+    checked_file_versions: usize,
+    checked_revisions: usize,
+    checked_cache_entries: usize,
+    checked_local_objects: usize,
+    issues: Vec<VerificationIssue>,
+}
+
+impl StoreVerificationReport {
+    pub fn checked_file_versions(&self) -> usize {
+        self.checked_file_versions
+    }
+
+    pub fn checked_revisions(&self) -> usize {
+        self.checked_revisions
+    }
+
+    pub fn checked_cache_entries(&self) -> usize {
+        self.checked_cache_entries
+    }
+
+    pub fn checked_local_objects(&self) -> usize {
+        self.checked_local_objects
+    }
+
+    pub fn issues(&self) -> &[VerificationIssue] {
+        &self.issues
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| issue.level == VerificationLevel::Error)
+            .count()
+    }
+
+    pub fn warning_count(&self) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| issue.level == VerificationLevel::Warning)
+            .count()
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.error_count() > 0
+    }
+
+    fn push_error(&mut self, code: &'static str, message: impl Into<String>) {
+        self.issues.push(VerificationIssue::error(code, message));
+    }
+
+    fn push_warning(&mut self, code: &'static str, message: impl Into<String>) {
+        self.issues.push(VerificationIssue::warning(code, message));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedRevisionTarget {
     Revision(FolderRevision),
@@ -672,6 +854,338 @@ impl LocalStore {
 
     pub fn object_cache(&self) -> &ObjectCache {
         &self.object_cache
+    }
+
+    pub fn verify_integrity(&self) -> StoreResult<StoreVerificationReport> {
+        let file_versions = self.file_versions()?;
+        let revisions = self.revisions()?;
+        let checkpoints = self.checkpoints()?;
+        let pins = self.pins()?;
+        let cache_entries = self.cache_entries()?;
+        let stored_objects = self.object_cache.stored_objects()?;
+        let mut report = StoreVerificationReport {
+            checked_file_versions: file_versions.len(),
+            checked_revisions: revisions.len(),
+            checked_cache_entries: cache_entries.len(),
+            checked_local_objects: stored_objects.len(),
+            issues: Vec::new(),
+        };
+        let file_versions_by_id = file_versions
+            .iter()
+            .map(|version| (version.id().clone(), version))
+            .collect::<BTreeMap<_, _>>();
+        let revisions_by_id = revisions
+            .iter()
+            .map(|revision| (revision.id().clone(), revision))
+            .collect::<BTreeMap<_, _>>();
+        let cache_entries_by_object = cache_entries
+            .iter()
+            .map(|entry| (entry.object_id().clone(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut referenced_objects: BTreeMap<ObjectId, BTreeSet<u64>> = BTreeMap::new();
+
+        for version in &file_versions {
+            match version.kind() {
+                FileKind::File => {
+                    let Some(object_id) = version.object_id() else {
+                        report.push_error(
+                            "file-version-missing-object",
+                            format!(
+                                "file version {} for {} has no object id",
+                                version.id(),
+                                path_to_store_string(version.path())
+                            ),
+                        );
+                        continue;
+                    };
+                    if let Some(size_bytes) = version.size_bytes() {
+                        referenced_objects
+                            .entry(object_id.clone())
+                            .or_default()
+                            .insert(size_bytes);
+                    } else {
+                        referenced_objects.entry(object_id.clone()).or_default();
+                        report.push_warning(
+                            "file-version-missing-size",
+                            format!(
+                                "file version {} for {} has no size metadata",
+                                version.id(),
+                                path_to_store_string(version.path())
+                            ),
+                        );
+                    }
+                }
+                FileKind::Directory | FileKind::Symlink | FileKind::Unsupported => {
+                    if version.object_id().is_some() {
+                        report.push_warning(
+                            "non-file-version-object",
+                            format!(
+                                "non-file version {} for {} unexpectedly names an object",
+                                version.id(),
+                                path_to_store_string(version.path())
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        for revision in &revisions {
+            if revision.shared_folder_id() != self.shared_folder.id() {
+                report.push_error(
+                    "revision-shared-folder-mismatch",
+                    format!(
+                        "folder revision {} belongs to shared folder {} instead of {}",
+                        revision.id(),
+                        revision.shared_folder_id(),
+                        self.shared_folder.id()
+                    ),
+                );
+            }
+            if let Some(parent_id) = revision.parent_id() {
+                if !revisions_by_id.contains_key(parent_id) {
+                    report.push_error(
+                        "revision-missing-parent",
+                        format!(
+                            "folder revision {} references missing parent {}",
+                            revision.id(),
+                            parent_id
+                        ),
+                    );
+                }
+            }
+            for entry in revision.entries() {
+                let Some(version) = file_versions_by_id.get(entry.file_version_id()) else {
+                    report.push_error(
+                        "revision-missing-file-version",
+                        format!(
+                            "folder revision {} entry {} references missing file version {}",
+                            revision.id(),
+                            path_to_store_string(entry.path()),
+                            entry.file_version_id()
+                        ),
+                    );
+                    continue;
+                };
+                if entry.path() != version.path() {
+                    report.push_error(
+                        "revision-entry-path-mismatch",
+                        format!(
+                            "folder revision {} entry {} points at file version {} for {}",
+                            revision.id(),
+                            path_to_store_string(entry.path()),
+                            version.id(),
+                            path_to_store_string(version.path())
+                        ),
+                    );
+                }
+            }
+        }
+
+        for checkpoint in checkpoints {
+            if !revisions_by_id.contains_key(checkpoint.revision_id()) {
+                report.push_error(
+                    "checkpoint-missing-revision",
+                    format!(
+                        "checkpoint {} references missing folder revision {}",
+                        checkpoint.id(),
+                        checkpoint.revision_id()
+                    ),
+                );
+            }
+        }
+
+        for pin in pins {
+            if !revisions_by_id.contains_key(pin.revision_id()) {
+                report.push_error(
+                    "pin-missing-revision",
+                    format!(
+                        "pin {} references missing folder revision {}",
+                        pin.id(),
+                        pin.revision_id()
+                    ),
+                );
+                continue;
+            }
+
+            let Some(scope) = pin
+                .reason()
+                .strip_prefix("materialization-pin path=")
+                .map(store_string_to_path)
+            else {
+                continue;
+            };
+            let revision = revisions_by_id
+                .get(pin.revision_id())
+                .expect("pin revision existence was checked");
+            for entry in revision
+                .entries()
+                .iter()
+                .filter(|entry| path_is_in_scope(entry.path(), &scope))
+            {
+                let Some(version) = file_versions_by_id.get(entry.file_version_id()) else {
+                    continue;
+                };
+                if version.kind() != &FileKind::File {
+                    continue;
+                }
+                let Some(object_id) = version.object_id() else {
+                    continue;
+                };
+                let hydrated = self.object_cache.exists(object_id)
+                    && cache_entries_by_object
+                        .get(object_id)
+                        .is_some_and(|entry| entry.hydration_state() == HydrationState::Hydrated);
+                if !hydrated {
+                    report.push_warning(
+                        "pinned-path-not-hydrated",
+                        format!(
+                            "pin {} expects {} offline, but {} is not fully hydrated locally",
+                            pin.id(),
+                            path_to_store_string(&scope),
+                            path_to_store_string(version.path())
+                        ),
+                    );
+                }
+            }
+        }
+
+        for (object_id, expected_sizes) in &referenced_objects {
+            let exists = self.object_cache.exists(object_id);
+            let cache_entry = cache_entries_by_object.get(object_id);
+            if !exists {
+                match cache_entry.map(|entry| entry.hydration_state()) {
+                    Some(HydrationState::RemoteOnly) => {}
+                    Some(HydrationState::Partial | HydrationState::Hydrated) => {
+                        report.push_error(
+                            "cache-entry-missing-local-object",
+                            format!(
+                                "cache entry for object {object_id} says {:?} but local bytes are missing",
+                                cache_entry.expect("cache entry was checked").hydration_state()
+                            ),
+                        );
+                    }
+                    None => {
+                        report.push_error(
+                            "referenced-object-missing-cache-entry",
+                            format!(
+                                "file metadata references object {object_id} but local bytes and cache metadata are missing"
+                            ),
+                        );
+                    }
+                }
+                continue;
+            }
+
+            match self.object_cache.verify_bytes(object_id) {
+                Ok(stored) => {
+                    for expected_size in expected_sizes {
+                        if stored.size_bytes != *expected_size {
+                            report.push_error(
+                                "object-size-mismatch",
+                                format!(
+                                    "object {object_id} is {} bytes locally but file metadata expects {} bytes",
+                                    stored.size_bytes, expected_size
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(StoreError::ObjectHashMismatch { expected, actual }) => {
+                    report.push_error(
+                        "object-hash-mismatch",
+                        format!("object {expected} local bytes hash to {actual}"),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        for object in &stored_objects {
+            if !referenced_objects.contains_key(&object.id)
+                && !cache_entries_by_object.contains_key(&object.id)
+            {
+                report.push_warning(
+                    "unreferenced-local-object",
+                    format!("local object {} is not referenced by metadata", object.id),
+                );
+            }
+            if let Err(error) = self.object_cache.verify_bytes(&object.id) {
+                match error {
+                    StoreError::ObjectHashMismatch { expected, actual } => report.push_error(
+                        "object-hash-mismatch",
+                        format!("object {expected} local bytes hash to {actual}"),
+                    ),
+                    other => return Err(other),
+                }
+            }
+        }
+
+        for entry in &cache_entries {
+            let expected_ref = self.object_cache.object_ref_for(entry.object_id());
+            if path_to_store_string(entry.local_path()) != expected_ref {
+                report.push_warning(
+                    "cache-entry-path-mismatch",
+                    format!(
+                        "cache entry for object {} points at {} instead of {}",
+                        entry.object_id(),
+                        path_to_store_string(entry.local_path()),
+                        expected_ref
+                    ),
+                );
+            }
+            let exists = self.object_cache.exists(entry.object_id());
+            match entry.hydration_state() {
+                HydrationState::Hydrated | HydrationState::Partial if !exists => {
+                    report.push_error(
+                        "cache-entry-missing-local-object",
+                        format!(
+                            "cache entry for object {} says {:?} but local bytes are missing",
+                            entry.object_id(),
+                            entry.hydration_state()
+                        ),
+                    );
+                }
+                HydrationState::RemoteOnly if exists => {
+                    report.push_error(
+                        "remote-only-cache-has-local-bytes",
+                        format!(
+                            "cache entry for object {} says remote-only but local bytes are present",
+                            entry.object_id()
+                        ),
+                    );
+                }
+                _ => {}
+            }
+            if exists {
+                match self.object_cache.verify_bytes(entry.object_id()) {
+                    Ok(stored) => {
+                        if let Some(expected_size) = entry.size_bytes() {
+                            if stored.size_bytes != expected_size {
+                                report.push_error(
+                                    "cache-entry-size-mismatch",
+                                    format!(
+                                        "cache entry for object {} says {} bytes but local bytes are {} bytes",
+                                        entry.object_id(),
+                                        expected_size,
+                                        stored.size_bytes
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Err(StoreError::ObjectHashMismatch { expected, actual }) => {
+                        report.push_error(
+                            "object-hash-mismatch",
+                            format!("object {expected} local bytes hash to {actual}"),
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        Ok(report)
     }
 
     pub fn write_object_bytes(&self, bytes: impl AsRef<[u8]>) -> StoreResult<ObjectRef> {
@@ -1646,6 +2160,10 @@ fn same_entries(left: &[FolderEntry], right: &[FolderEntry]) -> bool {
         && left.iter().zip(right).all(|(left, right)| {
             left.path() == right.path() && left.file_version_id() == right.file_version_id()
         })
+}
+
+fn path_is_in_scope(path: &Path, scope: &Path) -> bool {
+    scope.as_os_str().is_empty() || path == scope || path.starts_with(scope)
 }
 
 fn folder_revision_id(

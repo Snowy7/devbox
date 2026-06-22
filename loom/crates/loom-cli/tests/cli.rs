@@ -7,6 +7,9 @@ fn help_lists_the_mvp_commands() {
     assert_success(&output);
     let stdout = stdout(&output);
     for command in [
+        "doctor",
+        "fsck",
+        "object",
         "track",
         "status",
         "history",
@@ -31,6 +34,117 @@ fn remaining_placeholder_commands_are_stable_and_successful() {
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("remote command requires"));
+}
+
+#[test]
+fn object_verify_detects_corrupted_local_object_bytes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "hello\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let object_path = first_file_under(&fixture.join(".loom").join("objects"));
+    std::fs::write(object_path, "corrupt\n").expect("object corrupts");
+
+    let verify = run_loom(["object", "verify", fixture.to_str().expect("UTF-8 path")]);
+
+    assert!(!verify.status.success());
+    assert!(stdout(&verify).contains("ERROR object-hash-mismatch"));
+    assert!(stderr(&verify).contains("object verification found"));
+}
+
+#[test]
+fn fsck_detects_missing_local_object_cache_inconsistency() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "hello\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let object_path = first_file_under(&fixture.join(".loom").join("objects"));
+    std::fs::remove_file(object_path).expect("object removes");
+
+    let fsck = run_loom(["fsck", fixture.to_str().expect("UTF-8 path")]);
+
+    assert!(!fsck.status.success());
+    assert!(stdout(&fsck).contains("ERROR cache-entry-missing-local-object"));
+    assert!(stderr(&fsck).contains("fsck found"));
+}
+
+#[test]
+fn remote_check_detects_missing_remote_object_bytes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("README.md"), "hello remote\n").expect("readme writes");
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+
+    let remote_object_path = first_file_under(&remote.join("object-cache").join("objects"));
+    std::fs::remove_file(remote_object_path).expect("remote object removes");
+
+    let check = run_loom(["remote", "check", source.to_str().expect("UTF-8 path")]);
+
+    assert!(!check.status.success());
+    assert!(stdout(&check).contains("ERROR missing-remote-object"));
+    assert!(stderr(&check).contains("remote check found"));
+}
+
+#[test]
+fn doctor_reports_healthy_after_normal_sync_and_sparse_clone() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let sparse_target = dir.path().join("sparse-target");
+    std::fs::create_dir_all(source.join("src")).expect("source creates");
+    std::fs::write(source.join("README.md"), "hello\n").expect("readme writes");
+    std::fs::write(source.join("src").join("main.rs"), "fn main() {}\n").expect("main writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        sparse_target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+
+    let source_doctor = run_loom(["doctor", source.to_str().expect("UTF-8 path")]);
+    assert_success(&source_doctor);
+    assert!(stdout(&source_doctor).contains("Status: healthy"));
+
+    let sparse_doctor = run_loom(["doctor", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&sparse_doctor);
+    assert!(stdout(&sparse_doctor).contains("Status: healthy"));
+
+    assert_success(&run_loom([
+        "pin",
+        sparse_target
+            .join("README.md")
+            .to_str()
+            .expect("UTF-8 path"),
+    ]));
+    let pinned_sparse_doctor = run_loom(["doctor", sparse_target.to_str().expect("UTF-8 path")]);
+    assert_success(&pinned_sparse_doctor);
+    let pinned_stdout = stdout(&pinned_sparse_doctor);
+    assert!(pinned_stdout.contains("WARN pinned-path-not-hydrated"));
+    assert!(pinned_stdout.contains("Status: warnings"));
 }
 
 #[test]
@@ -895,6 +1009,26 @@ fn count_files(path: &std::path::Path) -> usize {
     }
 
     count
+}
+
+fn first_file_under(path: &std::path::Path) -> std::path::PathBuf {
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let mut entries = std::fs::read_dir(&path)
+            .expect("directory reads")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("entries read");
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+            } else {
+                return entry_path;
+            }
+        }
+    }
+    panic!("no file under {}", path.display());
 }
 
 fn wait_for_status(folder: &std::path::Path, expected: &str) {
