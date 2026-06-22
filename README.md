@@ -24,6 +24,7 @@ This repository currently contains the product foundation and alpha planning art
 - [.plans](.plans/README.md) - MVP execution plan with static HTML pages for phases, architecture, and validation.
 - [docs/alpha-cli-distribution.md](docs/alpha-cli-distribution.md) - GitHub Release packaging, server-owned storage setup, and two-device alpha smoke testing.
 - [docs/devbox/loom-and-devbox.md](docs/devbox/loom-and-devbox.md) - the product/engine split and the vocabulary to use in new work.
+- [docs/devbox/workspace-adapters-alpha.md](docs/devbox/workspace-adapters-alpha.md) - current sparse folder, agent workspace, materialized fallback, and filesystem adapter alpha state.
 - [docs/architecture/loom-storage-consistency.md](docs/architecture/loom-storage-consistency.md) - current storage consistency guarantees, non-guarantees, and evidence path.
 - [docs/evidence/alpha-readiness.md](docs/evidence/alpha-readiness.md) - concise alpha evidence and the canonical smoke commands.
 
@@ -243,6 +244,7 @@ admin/debug smoke tests, but they are not the product path.
 
 Alpha helper scripts:
 
+- `scripts/alpha-workspace-adapters-smoke.ps1` runs the workspace adapter alpha proof for sparse folders, agent virtual sessions, materialized sandbox fallback, and filesystem adapter truthfulness.
 - `scripts/alpha-two-device-smoke.sh` runs a local two-device proof with pairing, pending receiver refusal, live publish, latest pull, materialization, and redacted evidence logs.
 - `scripts/devbox-live-sync-alpha.sh` maps `.env` values into a live daemon command for local, hosted object-transfer, or trusted direct-S3 remotes.
 - `scripts/package-cli.sh <VERSION>` builds macOS/Linux alpha tool archives with Loom, Devbox CLI, daemon, metadata server, docs, separate user/operator env templates, and helper scripts.

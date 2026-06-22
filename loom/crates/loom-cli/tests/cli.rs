@@ -222,6 +222,16 @@ fn command_help_prints_usage() {
 }
 
 #[test]
+fn cache_free_space_errors_use_free_space_wording() {
+    let output = run_loom(["cache", "free-space", "--bad"]);
+
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("cache free-space unknown option '--bad'"));
+    assert!(!stderr.contains("cache prune unknown option"));
+}
+
+#[test]
 fn workspace_help_lists_agent_session_commands() {
     let output = run_loom(["workspace", "--help"]);
 

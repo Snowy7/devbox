@@ -8,3 +8,4 @@ this folder for user-facing product, platform, hosted API, account, device, and 
 Current CLI model docs:
 
 - [Sparse Folders](sparse-folders.md)
+- [Workspace Adapter Alpha](workspace-adapters-alpha.md)
