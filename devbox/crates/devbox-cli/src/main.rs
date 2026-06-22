@@ -70,6 +70,10 @@ fn main() -> ExitCode {
         Some("pause") => product::run_command("pause", &args[1..]),
         Some("resume") => product::run_command("resume", &args[1..]),
         Some("unlink") => product::run_command("unlink", &args[1..]),
+        Some("warm") => product::run_command("warm", &args[1..]),
+        Some("hydrate") => product::run_command("hydrate", &args[1..]),
+        Some("keep") => product::run_command("keep", &args[1..]),
+        Some("free-space") => product::run_command("free-space", &args[1..]),
         Some("scan") => run_scan(&args[1..]),
         Some("init") => run_init(&args[1..]),
         Some("auth") => run_auth(&args[1..]),
@@ -6672,7 +6676,6 @@ fn open_existing_metadata_store(db_path: &str) -> Result<Store, Box<dyn std::err
 
 fn run_status(args: &[String]) -> ExitCode {
     match args {
-        [] => product::run_status(),
         [flag, path] if flag == "--db" => match status_for_db(path) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -6680,11 +6683,7 @@ fn run_status(args: &[String]) -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        _ => {
-            eprintln!("devbox: status accepts either no arguments or --db <PATH>");
-            eprintln!("Usage: devbox status --db <PATH>");
-            ExitCode::from(2)
-        }
+        _ => product::run_status(args),
     }
 }
 
@@ -6780,6 +6779,10 @@ fn print_help() {
     println!("  clone      Materialize a shared folder on this machine");
     println!("  manage     Manage a shared folder");
     println!("  status     Show shared-folder and machine sync status");
+    println!("  warm       Download useful small files for a folder path");
+    println!("  hydrate    Download a path or folder exactly");
+    println!("  keep       Protect a path from free-space cleanup");
+    println!("  free-space Safely remove backed-up local bytes");
     println!("  doctor     Check this machine and point to folder diagnostics");
     println!("  pause      Pause sync for a shared folder");
     println!("  resume     Resume sync for a shared folder");
