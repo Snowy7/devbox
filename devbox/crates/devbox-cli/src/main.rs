@@ -66,6 +66,7 @@ fn main() -> ExitCode {
         Some("share") => product::run_command("share", &args[1..]),
         Some("clone") => product::run_command("clone", &args[1..]),
         Some("manage") => product::run_command("manage", &args[1..]),
+        Some("doctor") => product::run_command("doctor", &args[1..]),
         Some("pause") => product::run_command("pause", &args[1..]),
         Some("resume") => product::run_command("resume", &args[1..]),
         Some("unlink") => product::run_command("unlink", &args[1..]),
@@ -6779,6 +6780,7 @@ fn print_help() {
     println!("  clone      Materialize a shared folder on this machine");
     println!("  manage     Manage a shared folder");
     println!("  status     Show shared-folder and machine sync status");
+    println!("  doctor     Check this machine and point to folder diagnostics");
     println!("  pause      Pause sync for a shared folder");
     println!("  resume     Resume sync for a shared folder");
     println!("  unlink     Remove this machine's link to a shared folder");

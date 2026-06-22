@@ -18,13 +18,14 @@ sandboxes, shared local overlays, and agent-friendly folder state. Git remains a
 developers use it today, not the foundation Devbox is trying to become. See
 [docs/devbox/loom-and-devbox.md](docs/devbox/loom-and-devbox.md).
 
-This repository currently contains the product foundation and MVP planning artifacts:
+This repository currently contains the product foundation and alpha planning artifacts:
 
 - [.product](.product/README.md) - product strategy, market sizing, KPIs, architecture, roadmap, and sources.
 - [.plans](.plans/README.md) - MVP execution plan with static HTML pages for phases, architecture, and validation.
 - [docs/alpha-cli-distribution.md](docs/alpha-cli-distribution.md) - GitHub Release packaging, server-owned storage setup, and two-device alpha smoke testing.
 - [docs/devbox/loom-and-devbox.md](docs/devbox/loom-and-devbox.md) - the product/engine split and the vocabulary to use in new work.
 - [docs/architecture/loom-storage-consistency.md](docs/architecture/loom-storage-consistency.md) - current storage consistency guarantees, non-guarantees, and evidence path.
+- [docs/evidence/alpha-readiness.md](docs/evidence/alpha-readiness.md) - concise alpha evidence and the canonical smoke commands.
 
 ## Current Code Shape
 
@@ -125,6 +126,9 @@ The smoke proves the current MVP path end to end:
 - Hosted metadata/object split, including object hash mismatch rejection.
 - Git metadata protection, generated dependency suppression, plain folders, nested folders, conflict refusal, and secret blocking.
 
+Run this before trusting a local alpha change. It is the canonical proof path for the current
+Devbox/Loom MVP.
+
 The product CLI path is intentionally small:
 
 ```text
@@ -133,6 +137,7 @@ devbox share <folder>
 devbox clone
 devbox clone <name> [target]
 devbox status
+devbox doctor
 devbox pause|resume|unlink [name]
 ```
 
@@ -174,6 +179,19 @@ devbox status
 devbox pause ./target
 devbox resume ./target
 devbox unlink ./target
+```
+
+Short Loom engine try path:
+
+```text
+mkdir source
+printf 'hello\n' > source/README.md
+loom track ./source
+loom remote add local ./remote ./source
+loom sync ./source
+loom clone ./remote ./sparse-target --sparse
+loom cache warm ./sparse-target
+loom doctor ./sparse-target
 ```
 
 `devbox share <folder>` registers the shared folder, configures the hidden Loom sync endpoint, syncs

@@ -11,11 +11,16 @@ fn help_separates_product_commands_from_alpha_compatibility() {
     assert!(help_stdout.contains("Product commands:"));
     assert!(help_stdout.contains("  login"));
     assert!(help_stdout.contains("  share"));
+    assert!(help_stdout.contains("  doctor"));
     assert!(help_stdout.contains("Advanced compatibility commands:"));
     assert!(help_stdout.contains("  snapshot"));
     assert_product_output_is_clean(&help_stdout);
 
-    for args in [["share", "--help"], ["clone", "--help"]] {
+    for args in [
+        ["share", "--help"],
+        ["clone", "--help"],
+        ["doctor", "--help"],
+    ] {
         let output = run_devbox_with_env([], args);
         assert_success(&output);
         let stdout = stdout(&output);
@@ -97,6 +102,13 @@ fn product_login_share_clone_status_pause_resume_and_unlink_flow() {
     assert!(status_stdout.contains("Machine: Desk"));
     assert!(status_stdout.contains("Shared folders:"));
     assert_product_output_is_clean(&status_stdout);
+
+    let doctor = fixture.devbox(["doctor"]);
+    assert_success(&doctor);
+    let doctor_stdout = stdout(&doctor);
+    assert!(doctor_stdout.contains("Loom diagnostics:"));
+    assert!(doctor_stdout.contains("loom doctor"));
+    assert!(doctor_stdout.contains(path_str(&fixture.source)));
 
     let pause = fixture.devbox(["pause", path_str(&fixture.target)]);
     assert_success(&pause);

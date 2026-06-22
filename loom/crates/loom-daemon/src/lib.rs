@@ -1240,6 +1240,7 @@ impl DaemonPaths {
 mod tests {
     use super::*;
     use loom_store::RemoteConfig;
+    use loom_sync::import_pack_metadata_only_from_remote;
     use std::fs;
 
     #[test]
@@ -1364,6 +1365,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconcile_preserves_sparse_remote_only_files_as_unchanged() {
+        let fixture = SparseRemoteFixture::new();
+        let remote_revision_id = fixture
+            .remote
+            .get_cursor(DEFAULT_CURSOR_ID)
+            .expect("cursor reads")
+            .expect("cursor exists");
+
+        let report =
+            reconcile_once(&fixture.target_store, &fixture.remote).expect("sparse reconcile");
+
+        assert_eq!(report.action, ReconcileAction::Unchanged);
+        assert_eq!(report.local_revision_id, remote_revision_id);
+        assert!(!fixture.target.join("README.md").exists());
+        assert!(!fixture.target.join("src").join("main.rs").exists());
+        assert_eq!(
+            fixture
+                .remote
+                .get_cursor(DEFAULT_CURSOR_ID)
+                .expect("cursor reads after reconcile")
+                .expect("cursor remains"),
+            report.local_revision_id
+        );
+    }
+
     struct RemoteFixture {
         _dir: tempfile::TempDir,
         source: PathBuf,
@@ -1440,6 +1467,78 @@ mod tests {
                 source,
                 target,
                 source_store,
+                target_store,
+                remote,
+            }
+        }
+    }
+
+    struct SparseRemoteFixture {
+        _dir: tempfile::TempDir,
+        target: PathBuf,
+        target_store: LocalStore,
+        remote: LocalFilesystemRemote,
+    }
+
+    impl SparseRemoteFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source = dir.path().join("source");
+            let target = dir.path().join("sparse-target");
+            let remote_path = dir.path().join("remote");
+            fs::create_dir_all(source.join("src")).expect("source creates");
+            fs::create_dir_all(&target).expect("target creates");
+            fs::write(source.join("README.md"), "one\n").expect("source readme writes");
+            fs::write(source.join("src").join("main.rs"), "fn main() {}\n")
+                .expect("source main writes");
+
+            let source_store = LocalStore::open_or_init(&source)
+                .expect("source store")
+                .into_store();
+            source_store
+                .upsert_remote(
+                    RemoteConfig::new(
+                        "local",
+                        LOCAL_FILESYSTEM_REMOTE_KIND,
+                        path_string(&remote_path),
+                    )
+                    .expect("remote config"),
+                )
+                .expect("source remote writes");
+            capture_and_coalesce(&source_store);
+            let remote = LocalFilesystemRemote::new(&remote_path);
+            sync_store_to_remote(&source_store, &remote).expect("initial sync");
+
+            let remote_revision_id = remote
+                .get_cursor(DEFAULT_CURSOR_ID)
+                .expect("cursor reads")
+                .expect("cursor exists");
+            let pack = remote.get_pack(&remote_revision_id).expect("pack reads");
+            let target_store = LocalStore::init_clone(
+                &target,
+                pack.manifest.shared_folder_id.clone(),
+                pack.manifest.display_name.clone(),
+            )
+            .expect("target clone store");
+            import_pack_metadata_only_from_remote(&target_store, &pack, &remote)
+                .expect("metadata-only pack imports");
+            target_store
+                .coalesce_folder_revision(RevisionBoundary::Sync, &pack.file_versions)
+                .expect("sparse revision coalesces");
+            target_store
+                .upsert_remote(
+                    RemoteConfig::new(
+                        DEFAULT_REMOTE_NAME,
+                        LOCAL_FILESYSTEM_REMOTE_KIND,
+                        path_string(&remote_path),
+                    )
+                    .expect("remote config"),
+                )
+                .expect("target remote writes");
+
+            Self {
+                _dir: dir,
+                target,
                 target_store,
                 remote,
             }
