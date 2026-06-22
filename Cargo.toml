@@ -17,6 +17,7 @@ members = [
     "loom/crates/loom-cli",
     "loom/crates/loom-core",
     "loom/crates/loom-daemon",
+    "loom/crates/loom-fs",
     "loom/crates/loom-git",
     "loom/crates/loom-pack",
     "loom/crates/loom-store",

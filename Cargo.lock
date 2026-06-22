@@ -1073,6 +1073,7 @@ dependencies = [
  "devbox-remote",
  "loom-core",
  "loom-daemon",
+ "loom-fs",
  "loom-store",
  "loom-sync",
  "loom-workspace",
@@ -1094,6 +1095,16 @@ dependencies = [
  "loom-sync",
  "loom-worktree",
  "notify",
+ "tempfile",
+]
+
+[[package]]
+name = "loom-fs"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+ "loom-store",
+ "loom-worktree",
  "tempfile",
 ]
 

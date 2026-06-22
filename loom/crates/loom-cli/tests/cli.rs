@@ -23,6 +23,7 @@ fn help_lists_the_mvp_commands() {
         "evict",
         "pin",
         "cache",
+        "fs",
         "workspace",
     ] {
         assert!(stdout.contains(command), "{command} missing from help");
@@ -1172,6 +1173,229 @@ fn cache_policy_show_exposes_internal_presets_without_mode_switching() {
         assert!(policy_stdout.contains(preset), "{preset} missing");
     }
     assert!(!policy_stdout.contains("cache mode"));
+}
+
+#[test]
+fn fs_help_lists_alpha_mount_surface() {
+    let output = run_loom(["fs", "--help"]);
+
+    assert_success(&output);
+    let output_stdout = stdout(&output);
+    assert!(output_stdout.contains("loom fs mount"));
+    assert!(output_stdout.contains("loom fs unmount"));
+    assert!(output_stdout.contains("loom fs status"));
+    assert!(output_stdout.contains("loom fs doctor"));
+    assert!(output_stdout.contains("local-dev"));
+}
+
+#[test]
+fn fs_local_dev_mount_status_and_idempotent_unmount_are_truthful() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    let mount_path = dir.path().join("mount-view");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "hello fs\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let mount = run_loom([
+        "fs",
+        "mount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        mount_path.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&mount);
+    let mount_stdout = stdout(&mount);
+    assert!(mount_stdout.contains("Adapter: local-dev"));
+    assert!(mount_stdout.contains("Mount: recorded"));
+    assert!(mount_stdout.contains("projection=simulated-metadata-only"));
+    assert!(mount_stdout.contains("Hydrate-on-open: no"));
+    assert!(!mount_path.exists());
+
+    let status = run_loom([
+        "fs",
+        "status",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        mount_path.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("Mount records:"));
+    assert!(status_stdout.contains("state=mounted"));
+    assert!(status_stdout.contains("hydrate_on_open=no"));
+
+    let first_unmount = run_loom([
+        "fs",
+        "unmount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        mount_path.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&first_unmount);
+    assert!(stdout(&first_unmount).contains("Unmount: recorded"));
+
+    let second_unmount = run_loom([
+        "fs",
+        "unmount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        mount_path.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&second_unmount);
+    assert!(stdout(&second_unmount).contains("Unmount: already unmounted"));
+}
+
+#[cfg(windows)]
+#[test]
+fn fs_windows_local_dev_mount_identity_is_case_insensitive() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    let mount_path = dir.path().join("Mount-View");
+    let uppercase_path = mount_path.to_string_lossy().to_ascii_uppercase();
+    let lowercase_path = mount_path.to_string_lossy().to_ascii_lowercase();
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "hello fs\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let first_mount = run_loom([
+        "fs",
+        "mount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &uppercase_path,
+    ]);
+    assert_success(&first_mount);
+    assert!(stdout(&first_mount).contains("Mount: recorded"));
+
+    let second_mount = run_loom([
+        "fs",
+        "mount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &lowercase_path,
+    ]);
+    assert_success(&second_mount);
+    assert!(stdout(&second_mount).contains("Mount: already recorded"));
+
+    let status = run_loom([
+        "fs",
+        "status",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+    ]);
+    assert_success(&status);
+    assert_eq!(stdout(&status).matches("state=mounted").count(), 1);
+
+    let filtered_status = run_loom([
+        "fs",
+        "status",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &lowercase_path,
+    ]);
+    assert_success(&filtered_status);
+    assert_eq!(stdout(&filtered_status).matches("state=mounted").count(), 1);
+
+    let first_unmount = run_loom([
+        "fs",
+        "unmount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &lowercase_path,
+    ]);
+    assert_success(&first_unmount);
+    assert!(stdout(&first_unmount).contains("Unmount: recorded"));
+
+    let second_unmount = run_loom([
+        "fs",
+        "unmount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &uppercase_path,
+    ]);
+    assert_success(&second_unmount);
+    assert!(stdout(&second_unmount).contains("Unmount: already unmounted"));
+}
+
+#[test]
+fn fs_native_mount_fails_closed_without_recording_success() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    let mount_path = dir.path().join("native-view");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "hello native\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let mount = run_loom([
+        "fs",
+        "mount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--mount",
+        mount_path.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!mount.status.success());
+    assert!(stderr(&mount).contains("adapter is unsupported for mount"));
+
+    let status = run_loom(["fs", "status", fixture.to_str().expect("UTF-8 path")]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("Can mount: no"));
+    assert!(status_stdout.contains("Hydrate-on-open: no"));
+    assert!(status_stdout.contains("Mount records: none"));
+}
+
+#[test]
+fn fs_local_dev_mount_refuses_dirty_folder() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    let mount_path = dir.path().join("mount-view");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "clean\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+    std::fs::write(fixture.join("dirty.txt"), "dirty\n").expect("dirty writes");
+
+    let mount = run_loom([
+        "fs",
+        "mount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        mount_path.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!mount.status.success());
+    assert!(stderr(&mount).contains("fs mount refused because the folder differs"));
+    let status = run_loom([
+        "fs",
+        "status",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+    ]);
+    assert_success(&status);
+    assert!(stdout(&status).contains("Mount records: none"));
 }
 
 #[test]

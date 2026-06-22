@@ -7,6 +7,11 @@ use loom_core::{
     WorkspaceSessionState,
 };
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
+use loom_fs::{
+    adapter_for_kind, native_adapter_kind, FsAdapterKind, FsCapabilities, FsDoctorReport,
+    FsMountRecord, FsMountReport, FsMountRequest, FsMountState, FsStatusReport, FsStatusRequest,
+    FsUnmountReport, FsUnmountRequest,
+};
 use loom_store::{
     path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore, RemoteConfig,
     ResolvedRevisionTarget, StoreVerificationReport, VerificationLevel,
@@ -161,6 +166,13 @@ const COMMANDS: &[CommandSpec] = &[
         planned_behavior: "summarize hydration, warm useful files, free clean bytes over a limit, and show internal policy presets",
     },
     CommandSpec {
+        name: "fs",
+        usage: "loom fs mount [FOLDER] --mount <PATH> [--adapter native|local-dev|windows|macos|linux]\n       loom fs unmount [FOLDER] --mount <PATH> [--adapter native|local-dev|windows|macos|linux]\n       loom fs status [FOLDER] [--mount <PATH>] [--adapter native|local-dev|windows|macos|linux]\n       loom fs doctor [FOLDER] [--adapter native|local-dev|windows|macos|linux]",
+        summary: "Inspect alpha native filesystem adapter boundaries",
+        implemented: true,
+        planned_behavior: "detect native filesystem capabilities, refuse unsupported mounts, and simulate mount metadata with the explicit local-dev adapter",
+    },
+    CommandSpec {
         name: "workspace",
         usage: "loom workspace open [FOLDER] [--session <ID>] [--revision <REVISION|CHECKPOINT>]\n       loom workspace sessions [FOLDER]\n       loom workspace list [FOLDER] --session <ID> [PATH]\n       loom workspace read [FOLDER] --session <ID> <PATH>\n       loom workspace write [FOLDER] --session <ID> <PATH> --text <TEXT>\n       loom workspace exec [FOLDER] --session <ID> [--cwd <PATH>] -- <COMMAND> [ARGS...]\n       loom workspace materialize-run [FOLDER] --session <ID> [--cwd <PATH>] [--keep-sandbox] -- <COMMAND> [ARGS...]\n       loom workspace hydrate [FOLDER] --session <ID> <PATH>\n       loom workspace dehydrate [FOLDER] --session <ID> <PATH>\n       loom workspace pin [FOLDER] --session <ID> <PATH>\n       loom workspace diff [FOLDER] --session <ID>\n       loom workspace checkpoint [FOLDER] --session <ID> -m <MESSAGE>\n       loom workspace close [FOLDER] --session <ID>\n       loom workspace discard [FOLDER] --session <ID>",
         summary: "Use virtual workspace sessions over Loom revisions",
@@ -221,6 +233,7 @@ fn run_command(command: &CommandSpec, args: &[String]) -> ExitCode {
         "evict" => result_to_exit(run_evict(args)),
         "pin" => result_to_exit(run_pin(args)),
         "cache" => result_to_exit(run_cache(args)),
+        "fs" => result_to_exit(run_fs(args)),
         "workspace" => result_to_exit(run_workspace(args)),
         _ => {
             run_placeholder(command);
@@ -1067,6 +1080,94 @@ fn run_cache_policy_show() -> Result<(), String> {
     Ok(())
 }
 
+fn run_fs(args: &[String]) -> Result<(), String> {
+    match args.split_first() {
+        Some((subcommand, rest)) if subcommand == "mount" => run_fs_mount(rest),
+        Some((subcommand, rest)) if subcommand == "unmount" => run_fs_unmount(rest),
+        Some((subcommand, rest)) if subcommand == "status" => run_fs_status(rest),
+        Some((subcommand, rest)) if subcommand == "doctor" => run_fs_doctor(rest),
+        Some((subcommand, _)) => Err(format!(
+            "fs unknown subcommand '{subcommand}'\nUsage: {}",
+            COMMANDS
+                .iter()
+                .find(|command| command.name == "fs")
+                .expect("fs command exists")
+                .usage
+        )),
+        None => Err(format!(
+            "fs requires a subcommand\nUsage: {}",
+            COMMANDS
+                .iter()
+                .find(|command| command.name == "fs")
+                .expect("fs command exists")
+                .usage
+        )),
+    }
+}
+
+fn run_fs_mount(args: &[String]) -> Result<(), String> {
+    let parsed = parse_fs_mount_args("mount", args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let adapter = adapter_for_kind(parsed.adapter_kind);
+    let report = adapter
+        .mount(&store, FsMountRequest::new(parsed.mount_path))
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    print_fs_capabilities(&adapter.capabilities());
+    print_fs_mount_report(&report);
+    Ok(())
+}
+
+fn run_fs_unmount(args: &[String]) -> Result<(), String> {
+    let parsed = parse_fs_mount_args("unmount", args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let adapter = adapter_for_kind(parsed.adapter_kind);
+    let report = adapter
+        .unmount(&store, FsUnmountRequest::new(parsed.mount_path))
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    print_fs_capabilities(&adapter.capabilities());
+    print_fs_unmount_report(&report);
+    Ok(())
+}
+
+fn run_fs_status(args: &[String]) -> Result<(), String> {
+    let parsed = parse_fs_status_args("status", args)?;
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let adapter = adapter_for_kind(parsed.adapter_kind);
+    let request = parsed
+        .mount_path
+        .map(FsStatusRequest::for_mount_path)
+        .unwrap_or_else(FsStatusRequest::all);
+    let report = adapter
+        .status(&store, request)
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    print_fs_status_report(&report);
+    Ok(())
+}
+
+fn run_fs_doctor(args: &[String]) -> Result<(), String> {
+    let parsed = parse_fs_status_args("doctor", args)?;
+    if parsed.mount_path.is_some() {
+        return Err("fs doctor does not accept --mount; use fs status --mount <PATH>".to_string());
+    }
+    let store = open_store_from_optional_folder(parsed.folder)?;
+    let adapter = adapter_for_kind(parsed.adapter_kind);
+    let report = adapter.doctor(&store).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    print_fs_doctor_report(&report);
+    if report.healthy() {
+        Ok(())
+    } else {
+        Err("fs doctor found adapter limitations".to_string())
+    }
+}
+
 fn run_workspace(args: &[String]) -> Result<(), String> {
     match args.split_first() {
         Some((subcommand, rest)) if subcommand == "open" => run_workspace_open(rest),
@@ -1651,6 +1752,117 @@ fn print_paths(label: &str, paths: &[PathBuf]) {
     }
     if paths.len() > 20 {
         println!("  ... {} more", paths.len() - 20);
+    }
+}
+
+fn print_fs_capabilities(capabilities: &FsCapabilities) {
+    println!("Adapter: {}", capabilities.adapter_kind().label());
+    println!("Direction: {}", capabilities.adapter_kind().direction());
+    println!("Host platform: {}", capabilities.host_platform().label());
+    println!("Host API: {}", capabilities.host_api());
+    println!(
+        "Host API detected: {}",
+        yes_no(capabilities.host_api_detected())
+    );
+    println!("Can mount: {}", yes_no(capabilities.can_mount()));
+    println!(
+        "Native OS integration: {}",
+        yes_no(capabilities.real_os_integration())
+    );
+    println!(
+        "Hydrate-on-open: {}",
+        yes_no(capabilities.supports_hydrate_on_open())
+    );
+    println!("Capability: {}", capabilities.message());
+    for detail in capabilities.details() {
+        println!("  {detail}");
+    }
+}
+
+fn print_fs_mount_report(report: &FsMountReport) {
+    println!(
+        "Mount: {}",
+        if report.already_mounted() {
+            "already recorded"
+        } else {
+            "recorded"
+        }
+    );
+    print_fs_mount_record(report.record());
+    println!("Safety revision: {}", report.safety().revision_id());
+    println!("Tracked entries: {}", report.safety().tracked_entries());
+    println!("Ignored entries: {}", report.safety().ignored_entries());
+}
+
+fn print_fs_unmount_report(report: &FsUnmountReport) {
+    println!("Mount path: {}", report.mount_path().display());
+    println!(
+        "Unmount: {}",
+        if report.changed() {
+            "recorded"
+        } else {
+            "already unmounted"
+        }
+    );
+    println!("Message: {}", report.message());
+    if let Some(record) = report.record() {
+        print_fs_mount_record(record);
+    }
+}
+
+fn print_fs_status_report(report: &FsStatusReport) {
+    print_fs_capabilities(report.capabilities());
+    if report.records().is_empty() {
+        println!("Mount records: none");
+        return;
+    }
+    println!("Mount records:");
+    for record in report.records() {
+        print_fs_mount_record(record);
+    }
+}
+
+fn print_fs_doctor_report(report: &FsDoctorReport) {
+    print_fs_capabilities(report.capabilities());
+    println!("Mount records: {}", report.records().len());
+    for record in report.records() {
+        print_fs_mount_record(record);
+    }
+    if report.issues().is_empty() {
+        println!("Status: healthy");
+    } else {
+        println!("Status: limited");
+        for issue in report.issues() {
+            println!("  ISSUE {issue}");
+        }
+    }
+}
+
+fn print_fs_mount_record(record: &FsMountRecord) {
+    println!(
+        "  {}  adapter={}  state={}  revision={}  projection={}  hydrate_on_open={}  path={}",
+        record.mount_id(),
+        record.adapter_kind().label(),
+        fs_mount_state_label(record.state()),
+        record.revision_id(),
+        record.projection_state(),
+        yes_no(record.hydrate_on_open()),
+        record.mount_path().display()
+    );
+}
+
+fn fs_mount_state_label(state: FsMountState) -> &'static str {
+    match state {
+        FsMountState::Mounted => "mounted",
+        FsMountState::Unmounted => "unmounted",
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
     }
 }
 
@@ -2296,6 +2508,20 @@ struct CachePrefetchArgs {
 }
 
 #[derive(Debug, Clone)]
+struct FsMountArgs {
+    folder: Option<PathBuf>,
+    mount_path: PathBuf,
+    adapter_kind: FsAdapterKind,
+}
+
+#[derive(Debug, Clone)]
+struct FsStatusArgs {
+    folder: Option<PathBuf>,
+    mount_path: Option<PathBuf>,
+    adapter_kind: FsAdapterKind,
+}
+
+#[derive(Debug, Clone)]
 struct WorkspaceOpenArgs {
     folder: Option<PathBuf>,
     session_id: Option<WorkspaceSessionId>,
@@ -2594,6 +2820,103 @@ fn parse_cache_prefetch_args(args: &[String]) -> Result<CachePrefetchArgs, Strin
     }
 
     Ok(CachePrefetchArgs { folder, max_bytes })
+}
+
+fn parse_fs_mount_args(command: &str, args: &[String]) -> Result<FsMountArgs, String> {
+    let mut folder = None;
+    let mut mount_path = None;
+    let mut adapter_kind = native_adapter_kind();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--mount" {
+            index += 1;
+            mount_path = Some(PathBuf::from(
+                args.get(index)
+                    .ok_or_else(|| "--mount requires a value".to_string())?,
+            ));
+        } else if let Some(value) = arg.strip_prefix("--mount=") {
+            mount_path = Some(PathBuf::from(value));
+        } else if arg == "--adapter" {
+            index += 1;
+            adapter_kind = parse_fs_adapter_kind(
+                args.get(index)
+                    .ok_or_else(|| "--adapter requires a value".to_string())?,
+            )?;
+        } else if let Some(value) = arg.strip_prefix("--adapter=") {
+            adapter_kind = parse_fs_adapter_kind(value)?;
+        } else if arg.starts_with('-') {
+            return Err(format!("fs {command} unknown option '{arg}'"));
+        } else if folder.replace(PathBuf::from(arg)).is_some() {
+            return Err(format!("fs {command} accepts at most one folder"));
+        }
+        index += 1;
+    }
+
+    let mount_path = mount_path.ok_or_else(|| {
+        format!(
+            "fs {command} requires --mount <PATH>\nUsage: loom fs {command} [FOLDER] --mount <PATH> [--adapter native|local-dev|windows|macos|linux]"
+        )
+    })?;
+
+    Ok(FsMountArgs {
+        folder,
+        mount_path,
+        adapter_kind,
+    })
+}
+
+fn parse_fs_status_args(command: &str, args: &[String]) -> Result<FsStatusArgs, String> {
+    let mut folder = None;
+    let mut mount_path = None;
+    let mut adapter_kind = native_adapter_kind();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--mount" {
+            index += 1;
+            mount_path = Some(PathBuf::from(
+                args.get(index)
+                    .ok_or_else(|| "--mount requires a value".to_string())?,
+            ));
+        } else if let Some(value) = arg.strip_prefix("--mount=") {
+            mount_path = Some(PathBuf::from(value));
+        } else if arg == "--adapter" {
+            index += 1;
+            adapter_kind = parse_fs_adapter_kind(
+                args.get(index)
+                    .ok_or_else(|| "--adapter requires a value".to_string())?,
+            )?;
+        } else if let Some(value) = arg.strip_prefix("--adapter=") {
+            adapter_kind = parse_fs_adapter_kind(value)?;
+        } else if arg.starts_with('-') {
+            return Err(format!("fs {command} unknown option '{arg}'"));
+        } else if folder.replace(PathBuf::from(arg)).is_some() {
+            return Err(format!("fs {command} accepts at most one folder"));
+        }
+        index += 1;
+    }
+
+    Ok(FsStatusArgs {
+        folder,
+        mount_path,
+        adapter_kind,
+    })
+}
+
+fn parse_fs_adapter_kind(value: &str) -> Result<FsAdapterKind, String> {
+    match value {
+        "native" => Ok(native_adapter_kind()),
+        "local-dev" => Ok(FsAdapterKind::LocalDev),
+        "windows" | "windows-cloud-files" => Ok(FsAdapterKind::WindowsCloudFiles),
+        "macos" | "macos-file-provider" => Ok(FsAdapterKind::MacOsFileProvider),
+        "linux" | "linux-fuse" => Ok(FsAdapterKind::LinuxFuse),
+        _ => Err(format!(
+            "unknown fs adapter '{value}'; expected native, local-dev, windows, macos, or linux"
+        )),
+    }
 }
 
 fn parse_workspace_open_args(args: &[String]) -> Result<WorkspaceOpenArgs, String> {
@@ -3085,6 +3408,7 @@ mod tests {
                 "evict",
                 "pin",
                 "cache",
+                "fs",
                 "workspace"
             ]
         );
