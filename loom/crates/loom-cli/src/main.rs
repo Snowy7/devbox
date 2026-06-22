@@ -935,7 +935,7 @@ fn run_cache_status(folder: Option<PathBuf>) -> Result<(), String> {
 }
 
 fn run_cache_free_space(args: &[String], command: &str) -> Result<(), String> {
-    let parsed = parse_cache_prune_args(args)?;
+    let parsed = parse_cache_prune_args(args, command)?;
     let store = open_store_from_optional_folder(parsed.folder)?;
     let versions =
         tracked_versions_for_scope(&store, Path::new("")).map_err(|error| error.to_string())?;
@@ -943,7 +943,7 @@ fn run_cache_free_space(args: &[String], command: &str) -> Result<(), String> {
     let current_status = cache_status_for_scope(&store, Path::new(""), &no_remote_proof)
         .map_err(|error| error.to_string())?;
     let remote_available_objects = if current_status.hydrated_bytes() > parsed.max_bytes {
-        remote_available_objects_for_versions(&store, &versions, "cache prune")?
+        remote_available_objects_for_versions(&store, &versions, command)?
     } else {
         no_remote_proof
     };
@@ -2725,7 +2725,7 @@ fn parse_sync_daemon_args(args: &[String], command: &str) -> Result<SyncDaemonAr
     })
 }
 
-fn parse_cache_prune_args(args: &[String]) -> Result<CachePruneArgs, String> {
+fn parse_cache_prune_args(args: &[String], command: &str) -> Result<CachePruneArgs, String> {
     let mut folder = None;
     let mut max_bytes = None;
     let mut index = 0;
@@ -2742,16 +2742,17 @@ fn parse_cache_prune_args(args: &[String]) -> Result<CachePruneArgs, String> {
         } else if let Some(value) = arg.strip_prefix("--max-bytes=") {
             max_bytes = Some(parse_u64_flag("--max-bytes", value)?);
         } else if arg.starts_with('-') {
-            return Err(format!("cache prune unknown option '{arg}'"));
+            return Err(format!("{command} unknown option '{arg}'"));
         } else if folder.replace(PathBuf::from(arg)).is_some() {
-            return Err("cache prune accepts at most one folder".to_string());
+            return Err(format!("{command} accepts at most one folder"));
         }
         index += 1;
     }
 
     let max_bytes = max_bytes.ok_or_else(|| {
-        "cache prune requires --max-bytes <BYTES>\nUsage: loom cache prune --max-bytes <BYTES> [FOLDER]"
-            .to_string()
+        format!(
+            "{command} requires --max-bytes <BYTES>\nUsage: loom {command} --max-bytes <BYTES> [FOLDER]"
+        )
     })?;
 
     Ok(CachePruneArgs { folder, max_bytes })

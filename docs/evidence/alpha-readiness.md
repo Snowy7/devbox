@@ -5,7 +5,7 @@ polish PR.
 
 ## Canonical Proof Path
 
-Run:
+For the product MVP path, run:
 
 ```text
 scripts/mvp-two-device-smoke
@@ -21,6 +21,17 @@ The smoke builds local binaries when needed, starts a temporary `devbox-api` wit
 metadata, simulates two machines, and writes redacted logs under the printed evidence directory.
 It does not require live R2 or Postgres.
 
+For the workspace adapter alpha path, run:
+
+```text
+powershell -ExecutionPolicy Bypass -File scripts/alpha-workspace-adapters-smoke.ps1
+```
+
+That smoke uses a temporary in-memory `devbox-api` plus local Loom folders to prove sparse folder
+intents, agent virtual sessions, materialized sandbox fallback, and filesystem adapter alpha
+truthfulness. It is local-dev evidence only; it does not claim native hydrate-on-open or OS
+placeholder support.
+
 ## What The Smoke Proves
 
 - Loom can track, checkpoint, sync, clone, sparse clone, hydrate, evict, pin, cache status, and
@@ -35,6 +46,19 @@ It does not require live R2 or Postgres.
 - Secret-looking files are blocked before sync; raw secret fixture bytes are absent from remote,
   object cache, and evidence logs.
 - Divergent cursor/conflict states refuse safely instead of auto-merging.
+
+## Workspace Adapter Alpha Proofs
+
+- Devbox sparse clone starts metadata-only, then `status`, `hydrate`, `warm`, `keep`, and
+  `free-space` expose cache intent without treating cloud-only files as deletions.
+- `free-space` succeeds only for clean, unpinned local bytes with hosted proof and refuses when that
+  proof is missing.
+- Loom agent workspace sessions can virtual-read, virtual-exec, write overlays, diff, checkpoint,
+  and discard without materializing the whole folder.
+- Materialized fallback runs a real command in an isolated sandbox, captures safe source changes,
+  and refuses host shared-folder mutation outside capture.
+- Native filesystem adapters report unsupported mount status truthfully and record no success, while
+  `--adapter local-dev` records only metadata-only simulated mount/status/unmount state.
 
 ## Focused Checks
 

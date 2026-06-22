@@ -222,6 +222,16 @@ fn command_help_prints_usage() {
 }
 
 #[test]
+fn cache_free_space_errors_use_free_space_wording() {
+    let output = run_loom(["cache", "free-space", "--bad"]);
+
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("cache free-space unknown option '--bad'"));
+    assert!(!stderr.contains("cache prune unknown option"));
+}
+
+#[test]
 fn workspace_help_lists_agent_session_commands() {
     let output = run_loom(["workspace", "--help"]);
 
@@ -1429,6 +1439,33 @@ fn cache_prune_refuses_without_remote_object_proof() {
     assert!(status_stdout.contains("evictable: 0 files, 0 bytes"));
     assert!(status_stdout.contains("pending uploads: unknown (no remote configured)"));
     assert!(status_stdout.contains("cache hits/misses: not measured yet"));
+}
+
+#[test]
+fn cache_free_space_refusal_uses_free_space_wording_without_remote() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "local only\n").expect("readme writes");
+
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let free_space = run_loom([
+        "cache",
+        "free-space",
+        "--max-bytes",
+        "0",
+        fixture.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!free_space.status.success());
+    let stderr = stderr(&free_space);
+    assert!(stderr.contains("cache free-space refused because no Loom remote is configured"));
+    assert!(!stderr.contains("cache prune refused because no Loom remote is configured"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("README.md")).expect("readme reads"),
+        "local only\n"
+    );
 }
 
 #[test]
