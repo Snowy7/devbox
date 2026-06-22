@@ -37,9 +37,11 @@ policy used by share, sync, and restore.
 
 ## Current Limits
 
-Before native OS filesystem adapters land, sparse folders are explicit CLI workflows. Cloud-only
-files do not appear as placeholder files in Explorer, Finder, or shells. A command that needs a file
-must run `devbox hydrate <path>` or `devbox warm <path>` first.
+Native OS filesystem adapters now have a Loom alpha boundary at `loom fs ...`, but real Windows,
+macOS, and Linux host integrations are not implemented yet. Sparse folders are still explicit CLI
+workflows. Cloud-only files do not appear as placeholder files in Explorer, Finder, or shells. A
+command that needs a file must run `devbox hydrate <path>` or `devbox warm <path>` first.
 
-Native Windows, macOS, and Linux filesystem adapters are the next layer. They should call the same
-Loom hydrate, keep, status, and free-space primitives rather than invent separate cache behavior.
+The `loom fs --adapter local-dev` path can simulate mount metadata for tests, while native adapters
+only report capabilities and fail closed. Future Devbox wrappers should call the same Loom hydrate,
+keep, status, and free-space primitives rather than invent separate cache behavior.
