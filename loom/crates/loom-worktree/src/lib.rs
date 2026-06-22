@@ -18,6 +18,81 @@ use std::path::{Component, Path, PathBuf};
 const OLD_SECRET_SCAN_PREFIX_BYTES: usize = 1024 * 1024;
 const MAX_SECRET_FINDINGS: usize = 16;
 pub const DEFAULT_PREFETCH_MAX_BYTES: u64 = 64 * 1024;
+pub const DEFAULT_WARM_MAX_BYTES: u64 = DEFAULT_PREFETCH_MAX_BYTES;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachePolicyPreset {
+    name: &'static str,
+    intent: &'static str,
+    warm_max_bytes: u64,
+    prune_target: Option<u64>,
+    pins_required: bool,
+}
+
+impl CachePolicyPreset {
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn intent(&self) -> &'static str {
+        self.intent
+    }
+
+    pub fn warm_max_bytes(&self) -> u64 {
+        self.warm_max_bytes
+    }
+
+    pub fn prune_target(&self) -> Option<u64> {
+        self.prune_target
+    }
+
+    pub fn pins_required(&self) -> bool {
+        self.pins_required
+    }
+}
+
+const CACHE_POLICY_PRESETS: &[CachePolicyPreset] = &[
+    CachePolicyPreset {
+        name: "online-first",
+        intent: "keep metadata complete and hydrate useful small files on demand",
+        warm_max_bytes: DEFAULT_WARM_MAX_BYTES,
+        prune_target: None,
+        pins_required: false,
+    },
+    CachePolicyPreset {
+        name: "offline-pinned",
+        intent: "keep pinned paths hydrated and protect them from free-space cleanup",
+        warm_max_bytes: DEFAULT_WARM_MAX_BYTES,
+        prune_target: None,
+        pins_required: true,
+    },
+    CachePolicyPreset {
+        name: "low-disk",
+        intent:
+            "prefer remote-only clean files and hydrate only manifests/config plus small source",
+        warm_max_bytes: 16 * 1024,
+        prune_target: Some(256 * 1024 * 1024),
+        pins_required: true,
+    },
+    CachePolicyPreset {
+        name: "agent-sandbox",
+        intent: "warm source/config deterministically while avoiding generated output and secrets",
+        warm_max_bytes: DEFAULT_WARM_MAX_BYTES,
+        prune_target: None,
+        pins_required: false,
+    },
+    CachePolicyPreset {
+        name: "ci-ephemeral",
+        intent: "hydrate exactly what the job asks for and leave cleanup explicit",
+        warm_max_bytes: 32 * 1024,
+        prune_target: Some(0),
+        pins_required: false,
+    },
+];
+
+pub fn cache_policy_presets() -> &'static [CachePolicyPreset] {
+    CACHE_POLICY_PRESETS
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureRequest {
@@ -250,13 +325,17 @@ impl CachePruneReport {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PrefetchSelection {
+pub struct WarmSelection {
     versions: Vec<FileVersion>,
     selected_files: usize,
+    selected_manifest_files: usize,
+    selected_source_files: usize,
+    selected_small_files: usize,
     skipped_large_files: usize,
+    skipped_non_manifest_files: usize,
 }
 
-impl PrefetchSelection {
+impl WarmSelection {
     pub fn versions(&self) -> &[FileVersion] {
         &self.versions
     }
@@ -265,10 +344,28 @@ impl PrefetchSelection {
         self.selected_files
     }
 
+    pub fn selected_manifest_files(&self) -> usize {
+        self.selected_manifest_files
+    }
+
+    pub fn selected_source_files(&self) -> usize {
+        self.selected_source_files
+    }
+
+    pub fn selected_small_files(&self) -> usize {
+        self.selected_small_files
+    }
+
     pub fn skipped_large_files(&self) -> usize {
         self.skipped_large_files
     }
+
+    pub fn skipped_non_manifest_files(&self) -> usize {
+        self.skipped_non_manifest_files
+    }
 }
+
+pub type PrefetchSelection = WarmSelection;
 
 #[derive(Debug, Clone)]
 pub struct RestoreEngine<'a> {
@@ -1024,7 +1121,16 @@ pub fn prefetch_versions_for_scope(
     scope: &Path,
     max_bytes: u64,
 ) -> CaptureResult<PrefetchSelection> {
-    let mut selection = PrefetchSelection::default();
+    warm_versions_for_scope(store, scope, max_bytes, false)
+}
+
+pub fn warm_versions_for_scope(
+    store: &LocalStore,
+    scope: &Path,
+    max_bytes: u64,
+    manifest_only: bool,
+) -> CaptureResult<WarmSelection> {
+    let mut selection = WarmSelection::default();
     let mut versions = tracked_versions_for_scope(store, scope)?
         .into_iter()
         .filter(|version| version.kind() == &FileKind::File)
@@ -1043,7 +1149,18 @@ pub fn prefetch_versions_for_scope(
             continue;
         }
 
+        let category = warm_category(version.path());
+        if manifest_only && category != WarmCategory::Manifest {
+            selection.skipped_non_manifest_files += 1;
+            continue;
+        }
+
         selection.selected_files += 1;
+        match category {
+            WarmCategory::Manifest => selection.selected_manifest_files += 1,
+            WarmCategory::Source => selection.selected_source_files += 1,
+            WarmCategory::Small => selection.selected_small_files += 1,
+        }
         selection.versions.push(version);
     }
 
@@ -1878,6 +1995,110 @@ pub fn evaluate_directory_policy(relative_path: &Path) -> DirectoryPolicyDecisio
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarmCategory {
+    Manifest,
+    Source,
+    Small,
+}
+
+fn warm_category(path: &Path) -> WarmCategory {
+    if is_manifest_or_config_file(path) {
+        return WarmCategory::Manifest;
+    }
+
+    if is_source_file(path) {
+        return WarmCategory::Source;
+    }
+
+    WarmCategory::Small
+}
+
+fn is_manifest_or_config_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = file_name.to_ascii_lowercase();
+    if path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|part| matches!(part, "config" | ".config"))
+    }) {
+        return true;
+    }
+
+    if lower.starts_with("readme")
+        || lower == "cargo.toml"
+        || lower == "cargo.lock"
+        || lower == "package.json"
+        || lower == "package-lock.json"
+        || lower == "pnpm-lock.yaml"
+        || lower == "yarn.lock"
+        || lower == "bun.lockb"
+        || lower == "pyproject.toml"
+        || lower == "requirements.txt"
+        || lower.starts_with("requirements-")
+        || lower == "go.mod"
+        || lower == "go.sum"
+        || lower == "gemfile"
+        || lower == "gemfile.lock"
+        || lower == "dockerfile"
+        || lower.starts_with("docker-compose")
+        || lower == "makefile"
+        || lower == ".env.example"
+    {
+        return true;
+    }
+
+    lower.ends_with(".config.js")
+        || lower.ends_with(".config.cjs")
+        || lower.ends_with(".config.mjs")
+        || lower.ends_with(".config.ts")
+        || lower.starts_with("tsconfig")
+        || lower.starts_with("vite.config")
+        || lower.starts_with("next.config")
+}
+
+fn is_source_file(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "rs" | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "py"
+            | "go"
+            | "java"
+            | "kt"
+            | "kts"
+            | "rb"
+            | "php"
+            | "cs"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "hpp"
+            | "swift"
+            | "scala"
+            | "clj"
+            | "ex"
+            | "exs"
+            | "css"
+            | "scss"
+            | "sass"
+            | "html"
+            | "md"
+    )
+}
+
 fn stable_file_version_id(
     relative_path: &Path,
     kind: FileKind,
@@ -2178,6 +2399,40 @@ mod tests {
 
         assert_eq!(request.shared_folder.display_name(), "devbox");
         assert_eq!(request.boundary, RevisionBoundary::LoomCommand);
+    }
+
+    #[test]
+    fn cache_policy_presets_are_deterministic_internal_data() {
+        let presets = cache_policy_presets();
+        let names = presets
+            .iter()
+            .map(CachePolicyPreset::name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "online-first",
+                "offline-pinned",
+                "low-disk",
+                "agent-sandbox",
+                "ci-ephemeral"
+            ]
+        );
+        assert_eq!(presets[0].warm_max_bytes(), DEFAULT_WARM_MAX_BYTES);
+        assert!(presets
+            .iter()
+            .find(|preset| preset.name() == "low-disk")
+            .expect("low-disk preset exists")
+            .pins_required());
+        assert_eq!(
+            presets
+                .iter()
+                .find(|preset| preset.name() == "ci-ephemeral")
+                .expect("ci preset exists")
+                .prune_target(),
+            Some(0)
+        );
     }
 
     #[test]

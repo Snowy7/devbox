@@ -38,8 +38,14 @@ future sparse filesystem or remote protocol.
 - Remote-only means Loom has file-version and cache metadata for the object but no local object bytes.
 - `loom hydrate <path>` fetches missing object bytes from the configured remote and materializes only
   the requested path or subtree.
-- `loom cache status` reports hydrated, remote-only, partial, pinned, and evictable files from the
-  current local metadata and best-effort remote object checks.
+- `loom cache warm <path>` hydrates useful tracked files deterministically: manifest/config files,
+  source files, and small files under the configured byte limit.
+- Warmup skips generated dependency/build output because capture policy excludes those folders. It
+  also leaves large files, deferred entries, and secret-blocked files unmaterialized.
+- `loom cache status` reports hydrated, remote-only, partial, pinned, evictable, local-download
+  avoidance, and pending-upload metrics from local metadata plus remote object checks when available.
+  It explicitly reports cache hits/misses as unmeasured because Loom does not collect those counters
+  yet.
 
 ### Evict And Pin Safety
 
@@ -48,6 +54,8 @@ future sparse filesystem or remote protocol.
 - Evict refuses dirty files, unsupported local entries, missing remote object proof, and pinned paths.
 - `loom pin <path>` records offline-retention intent for the latest folder revision. It protects the
   pinned path from explicit eviction and appears in cache status.
+- `loom cache free-space --max-bytes <bytes>` uses the same safety rules to reduce hydrated bytes.
+  The older `loom cache prune` wording is a compatibility alias, not a separate cleanup mode.
 
 ### Integrity
 
@@ -87,6 +95,8 @@ future sparse filesystem or remote protocol.
 - Repair remains intentionally conservative. The current inspection commands report corruption and
   missing availability; they do not rewrite metadata, discard objects, or advance cursors.
 - Pinning protects local eviction; it is not a remote legal-hold or team retention policy.
+- Cache policy presets are internal command/data presets. Users should not need to choose a normal
+  cache mode; diagnostic output may show presets through `loom cache policy show`.
 - Conflict refusal does not resolve conflicts. Users still need a manual recovery path after divergent
   folder state.
 - Hosted local-dev sessions and `devbox://` engine URLs are test/dev plumbing. They are not the final

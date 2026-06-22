@@ -14,10 +14,11 @@ use loom_sync::{
     RemoteCheckReport, DEFAULT_REMOTE_NAME, LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
-    cache_status_for_scope, diff_revision_to_capture, evaluate_directory_policy, evict_versions,
-    hydrate_versions, prefetch_versions_for_scope, prune_cache_to_limit, relative_scope_path,
-    tracked_versions_for_scope, CaptureEngine, CaptureRequest, DirectoryPolicyDecision,
-    RestoreEngine, WorktreeCapture, WorktreeDiff, DEFAULT_PREFETCH_MAX_BYTES,
+    cache_policy_presets, cache_status_for_scope, diff_revision_to_capture,
+    evaluate_directory_policy, evict_versions, hydrate_versions, prefetch_versions_for_scope,
+    prune_cache_to_limit, relative_scope_path, tracked_versions_for_scope, warm_versions_for_scope,
+    CaptureEngine, CaptureRequest, DirectoryPolicyDecision, RestoreEngine, WorktreeCapture,
+    WorktreeDiff, DEFAULT_PREFETCH_MAX_BYTES, DEFAULT_WARM_MAX_BYTES,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -145,10 +146,10 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "cache",
-        usage: "loom cache status [FOLDER]\n       loom cache prune --max-bytes <BYTES> [FOLDER]\n       loom cache prefetch [FOLDER] [--max-bytes <BYTES>]",
+        usage: "loom cache status [FOLDER]\n       loom cache warm <PATH|FOLDER> [--manifest] [--max-bytes <BYTES>]\n       loom cache free-space --max-bytes <BYTES> [FOLDER]\n       loom cache prune --max-bytes <BYTES> [FOLDER]\n       loom cache policy show",
         summary: "Show local cache hydration state",
         implemented: true,
-        planned_behavior: "summarize hydration, prune clean bytes over a limit, and prefetch small files",
+        planned_behavior: "summarize hydration, warm useful files, free clean bytes over a limit, and show internal policy presets",
     },
 ];
 
@@ -839,10 +840,15 @@ fn run_cache(args: &[String]) -> Result<(), String> {
         [subcommand, folder] if subcommand == "status" => {
             run_cache_status(Some(PathBuf::from(folder)))
         }
-        [subcommand, rest @ ..] if subcommand == "prune" => run_cache_prune(rest),
+        [subcommand, rest @ ..] if subcommand == "warm" => run_cache_warm(rest),
+        [subcommand, rest @ ..] if subcommand == "free-space" => {
+            run_cache_free_space(rest, "cache free-space")
+        }
+        [subcommand, rest @ ..] if subcommand == "prune" => run_cache_free_space(rest, "cache prune"),
         [subcommand, rest @ ..] if subcommand == "prefetch" => run_cache_prefetch(rest),
+        [subcommand, action] if subcommand == "policy" && action == "show" => run_cache_policy_show(),
         _ => Err(
-            "cache command requires 'status', 'prune', or 'prefetch'\nUsage: loom cache status [FOLDER]\n       loom cache prune --max-bytes <BYTES> [FOLDER]\n       loom cache prefetch [FOLDER] [--max-bytes <BYTES>]"
+            "cache command requires 'status', 'warm', 'free-space', 'prune', 'prefetch', or 'policy show'\nUsage: loom cache status [FOLDER]\n       loom cache warm <PATH|FOLDER> [--manifest] [--max-bytes <BYTES>]\n       loom cache free-space --max-bytes <BYTES> [FOLDER]\n       loom cache prune --max-bytes <BYTES> [FOLDER]\n       loom cache policy show"
                 .to_string(),
         ),
     }
@@ -852,7 +858,13 @@ fn run_cache_status(folder: Option<PathBuf>) -> Result<(), String> {
     let store = open_store_from_optional_folder(folder)?;
     let versions =
         tracked_versions_for_scope(&store, Path::new("")).map_err(|error| error.to_string())?;
-    let remote_available_objects = best_effort_remote_available_objects(&store, &versions);
+    let remote_metrics = remote_metrics_for_versions(&store, &versions);
+    let remote_available_objects = match &remote_metrics {
+        RemoteMetrics::Known {
+            available_objects, ..
+        } => available_objects.clone(),
+        RemoteMetrics::Unknown { .. } => BTreeSet::new(),
+    };
     let report = cache_status_for_scope(&store, Path::new(""), &remote_available_objects)
         .map_err(|error| error.to_string())?;
     println!("Folder: {}", store.folder_root().display());
@@ -873,10 +885,26 @@ fn run_cache_status(folder: Option<PathBuf>) -> Result<(), String> {
         report.evictable_files(),
         report.evictable_bytes()
     );
+    println!(
+        "  would avoid downloading: {} bytes already local",
+        report.hydrated_bytes()
+    );
+    match remote_metrics {
+        RemoteMetrics::Known {
+            pending_upload_files,
+            pending_upload_bytes,
+            ..
+        } => println!(
+            "  pending uploads: {} files, {} bytes",
+            pending_upload_files, pending_upload_bytes
+        ),
+        RemoteMetrics::Unknown { reason } => println!("  pending uploads: unknown ({reason})"),
+    }
+    println!("  cache hits/misses: not measured yet");
     Ok(())
 }
 
-fn run_cache_prune(args: &[String]) -> Result<(), String> {
+fn run_cache_free_space(args: &[String], command: &str) -> Result<(), String> {
     let parsed = parse_cache_prune_args(args)?;
     let store = open_store_from_optional_folder(parsed.folder)?;
     let versions =
@@ -898,7 +926,13 @@ fn run_cache_prune(args: &[String]) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
 
     println!("Folder: {}", store.folder_root().display());
-    println!("Cache limit: {} bytes", report.limit_bytes());
+    if command == "cache prune" {
+        println!("Cache limit: {} bytes", report.limit_bytes());
+        println!("Intent: free space by evicting only clean, unpinned files with remote proof");
+    } else {
+        println!("Free-space target: {} hydrated bytes", report.limit_bytes());
+        println!("Intent: free space by evicting only clean, unpinned files with remote proof");
+    }
     println!(
         "Hydrated bytes: {} -> {}",
         report.hydrated_bytes_before(),
@@ -915,6 +949,57 @@ fn run_cache_prune(args: &[String]) -> Result<(), String> {
         report.skipped_pinned_files(),
         report.skipped_dirty_files(),
         report.skipped_unsupported_files()
+    );
+    Ok(())
+}
+
+fn run_cache_warm(args: &[String]) -> Result<(), String> {
+    let parsed = parse_cache_warm_args(args)?;
+    let store = open_store_for_path_or_folder(&parsed.target)?;
+    let scope = relative_scope_path(&store, &absolute_path_from_path(&parsed.target)?)
+        .map_err(|error| error.to_string())?;
+    let selection = warm_versions_for_scope(&store, &scope, parsed.max_bytes, parsed.manifest_only)
+        .map_err(|error| error.to_string())?;
+    let avoided_download_bytes = selection
+        .versions()
+        .iter()
+        .filter_map(|version| {
+            let object_id = version.object_id()?;
+            store
+                .object_cache()
+                .exists(object_id)
+                .then(|| version.size_bytes().unwrap_or(0))
+        })
+        .sum::<u64>();
+    let fetched_objects = fetch_missing_objects(&store, selection.versions())?;
+    let report =
+        hydrate_versions(&store, selection.versions()).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Warmed: {}", path_to_store_string(&scope));
+    println!("Warm limit: {} bytes per file", parsed.max_bytes);
+    if parsed.manifest_only {
+        println!("Filter: manifest/config files only");
+    }
+    println!(
+        "Selected: {} files ({} manifest/config, {} source, {} other small)",
+        selection.selected_files(),
+        selection.selected_manifest_files(),
+        selection.selected_source_files(),
+        selection.selected_small_files()
+    );
+    println!(
+        "Skipped: {} large, {} outside manifest filter",
+        selection.skipped_large_files(),
+        selection.skipped_non_manifest_files()
+    );
+    println!("Fetched objects: {fetched_objects}");
+    println!("Avoided download bytes: {avoided_download_bytes}");
+    println!(
+        "Materialized: {} files, {} folders, {} already present",
+        report.materialized_files(),
+        report.materialized_directories(),
+        report.already_materialized_files()
     );
     Ok(())
 }
@@ -942,6 +1027,26 @@ fn run_cache_prefetch(args: &[String]) -> Result<(), String> {
         report.materialized_directories(),
         report.already_materialized_files()
     );
+    Ok(())
+}
+
+fn run_cache_policy_show() -> Result<(), String> {
+    println!("Cache policy presets:");
+    println!("  These are internal presets for Loom commands and diagnostics.");
+    println!("  Normal use stays intent-based: pin paths, warm paths, free space, check status.");
+    for preset in cache_policy_presets() {
+        println!(
+            "  {}: warm_max_bytes={}, prune_target={}, pins_required={} - {}",
+            preset.name(),
+            preset.warm_max_bytes(),
+            preset
+                .prune_target()
+                .map(|bytes| bytes.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            preset.pins_required(),
+            preset.intent()
+        );
+    }
     Ok(())
 }
 
@@ -1399,21 +1504,62 @@ fn remote_available_objects_for_versions(
     Ok(available)
 }
 
-fn best_effort_remote_available_objects(
-    store: &LocalStore,
-    versions: &[FileVersion],
-) -> BTreeSet<loom_core::ObjectId> {
-    let Ok(remote_config) = preferred_remote(store) else {
-        return BTreeSet::new();
+fn remote_metrics_for_versions(store: &LocalStore, versions: &[FileVersion]) -> RemoteMetrics {
+    let remote_config = match preferred_remote(store) {
+        Ok(remote_config) => remote_config,
+        Err(_) => {
+            return RemoteMetrics::Unknown {
+                reason: "no remote configured".to_string(),
+            }
+        }
     };
-    let Ok(remote) = remote_from_config(&remote_config) else {
-        return BTreeSet::new();
+    let remote = match remote_from_config(&remote_config) {
+        Ok(remote) => remote,
+        Err(error) => return RemoteMetrics::Unknown { reason: error },
     };
 
-    unique_file_object_ids(versions)
-        .into_iter()
-        .filter(|object_id| remote.has_object(object_id).unwrap_or(false))
-        .collect()
+    let mut known_remote_objects = BTreeSet::new();
+    let mut remote_checks = BTreeSet::new();
+    for object_id in unique_file_object_ids(versions) {
+        match remote.has_object(&object_id) {
+            Ok(true) => {
+                known_remote_objects.insert(object_id.clone());
+                remote_checks.insert(object_id);
+            }
+            Ok(false) => {
+                remote_checks.insert(object_id);
+            }
+            Err(error) => {
+                return RemoteMetrics::Unknown {
+                    reason: format!(
+                        "remote {} object check failed: {error}",
+                        remote_config.name()
+                    ),
+                }
+            }
+        }
+    }
+
+    let mut pending_upload_files = 0;
+    let mut pending_upload_bytes = 0;
+    for version in versions {
+        if version.kind() != &FileKind::File {
+            continue;
+        }
+        let Some(object_id) = version.object_id() else {
+            continue;
+        };
+        if remote_checks.contains(object_id) && !known_remote_objects.contains(object_id) {
+            pending_upload_files += 1;
+            pending_upload_bytes += version.size_bytes().unwrap_or(0);
+        }
+    }
+
+    RemoteMetrics::Known {
+        available_objects: known_remote_objects,
+        pending_upload_files,
+        pending_upload_bytes,
+    }
 }
 
 fn unique_file_object_ids(versions: &[FileVersion]) -> BTreeSet<loom_core::ObjectId> {
@@ -1548,9 +1694,28 @@ struct CachePruneArgs {
 }
 
 #[derive(Debug, Clone)]
+struct CacheWarmArgs {
+    target: PathBuf,
+    max_bytes: u64,
+    manifest_only: bool,
+}
+
+#[derive(Debug, Clone)]
 struct CachePrefetchArgs {
     folder: Option<PathBuf>,
     max_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+enum RemoteMetrics {
+    Known {
+        available_objects: BTreeSet<loom_core::ObjectId>,
+        pending_upload_files: usize,
+        pending_upload_bytes: u64,
+    },
+    Unknown {
+        reason: String,
+    },
 }
 
 fn parse_clone_args(args: &[String]) -> Result<CloneArgs, String> {
@@ -1731,6 +1896,44 @@ fn parse_cache_prune_args(args: &[String]) -> Result<CachePruneArgs, String> {
     })?;
 
     Ok(CachePruneArgs { folder, max_bytes })
+}
+
+fn parse_cache_warm_args(args: &[String]) -> Result<CacheWarmArgs, String> {
+    let mut target = None;
+    let mut max_bytes = DEFAULT_WARM_MAX_BYTES;
+    let mut manifest_only = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--max-bytes" {
+            index += 1;
+            max_bytes = parse_u64_flag(
+                "--max-bytes",
+                args.get(index)
+                    .ok_or_else(|| "--max-bytes requires a value".to_string())?,
+            )?;
+        } else if let Some(value) = arg.strip_prefix("--max-bytes=") {
+            max_bytes = parse_u64_flag("--max-bytes", value)?;
+        } else if arg == "--manifest" {
+            manifest_only = true;
+        } else if arg.starts_with('-') {
+            return Err(format!("cache warm unknown option '{arg}'"));
+        } else if target.replace(PathBuf::from(arg)).is_some() {
+            return Err("cache warm accepts one path or folder".to_string());
+        }
+        index += 1;
+    }
+
+    let target = target.ok_or_else(|| {
+        "cache warm requires a path or folder\nUsage: loom cache warm <PATH|FOLDER> [--manifest] [--max-bytes <BYTES>]".to_string()
+    })?;
+
+    Ok(CacheWarmArgs {
+        target,
+        max_bytes,
+        manifest_only,
+    })
 }
 
 fn parse_cache_prefetch_args(args: &[String]) -> Result<CachePrefetchArgs, String> {

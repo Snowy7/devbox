@@ -602,6 +602,9 @@ fn cache_status_prune_and_prefetch_keep_sparse_cache_bounded() {
     assert!(sparse_status_stdout.contains("remote-only: 4"));
     assert!(sparse_status_stdout.contains("remote-only bytes: 107"));
     assert!(sparse_status_stdout.contains("evictable: 0 files, 0 bytes"));
+    assert!(sparse_status_stdout.contains("would avoid downloading: 0 bytes already local"));
+    assert!(sparse_status_stdout.contains("pending uploads: 0 files, 0 bytes"));
+    assert!(sparse_status_stdout.contains("cache hits/misses: not measured yet"));
 
     let prefetch = run_loom([
         "cache",
@@ -656,6 +659,194 @@ fn cache_status_prune_and_prefetch_keep_sparse_cache_bounded() {
 }
 
 #[test]
+fn cache_warm_hydrates_useful_files_and_skips_large_generated_and_secret_blocked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(source.join("src")).expect("src creates");
+    std::fs::create_dir_all(source.join("config")).expect("config creates");
+    std::fs::create_dir_all(source.join("node_modules/pkg")).expect("generated creates");
+    std::fs::write(source.join("README.md"), "hello\n").expect("readme writes");
+    std::fs::write(source.join("package.json"), "{}\n").expect("package writes");
+    std::fs::write(source.join("src").join("main.rs"), "fn main() {}\n").expect("main writes");
+    std::fs::write(source.join("config").join("app.toml"), "debug=1\n").expect("config writes");
+    std::fs::write(source.join("big.bin"), "x".repeat(80)).expect("large writes");
+    std::fs::write(source.join("node_modules/pkg/index.js"), "generated\n")
+        .expect("generated writes");
+    let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+    std::fs::write(
+        source.join("secrets.env"),
+        format!("OPENAI_API_KEY={raw_secret}\n"),
+    )
+    .expect("secret writes");
+
+    let track = run_loom(["track", source.to_str().expect("UTF-8 path")]);
+    assert_success(&track);
+    assert!(stdout(&track).contains("secret-blocked"));
+    std::fs::remove_file(source.join("secrets.env")).expect("local secret removes before sync");
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+
+    let warm = run_loom([
+        "cache",
+        "warm",
+        target.to_str().expect("UTF-8 path"),
+        "--max-bytes",
+        "20",
+    ]);
+    assert_success(&warm);
+    let warm_stdout = stdout(&warm);
+    assert!(warm_stdout.contains("Warmed: ."));
+    assert!(warm_stdout.contains("Selected: 4 files (3 manifest/config, 1 source, 0 other small)"));
+    assert!(warm_stdout.contains("Skipped: 1 large, 0 outside manifest filter"));
+    assert!(warm_stdout.contains("Avoided download bytes: 0"));
+    assert!(target.join("README.md").exists());
+    assert!(target.join("package.json").exists());
+    assert!(target.join("src").join("main.rs").exists());
+    assert!(target.join("config").join("app.toml").exists());
+    assert!(!target.join("big.bin").exists());
+    assert!(!target.join("node_modules/pkg/index.js").exists());
+    assert!(!target.join("secrets.env").exists());
+
+    let repeat_warm = run_loom([
+        "cache",
+        "warm",
+        target.to_str().expect("UTF-8 path"),
+        "--max-bytes",
+        "20",
+    ]);
+    assert_success(&repeat_warm);
+    assert!(stdout(&repeat_warm).contains("Avoided download bytes: 30"));
+}
+
+#[test]
+fn cache_warm_manifest_filter_only_hydrates_manifests_and_config() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(source.join("src")).expect("src creates");
+    std::fs::create_dir_all(source.join("config")).expect("config creates");
+    std::fs::write(source.join("README.md"), "hello\n").expect("readme writes");
+    std::fs::write(source.join("src").join("main.rs"), "fn main() {}\n").expect("main writes");
+    std::fs::write(source.join("config").join("app.toml"), "debug=1\n").expect("config writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+
+    let warm = run_loom([
+        "cache",
+        "warm",
+        target.to_str().expect("UTF-8 path"),
+        "--manifest",
+        "--max-bytes",
+        "20",
+    ]);
+    assert_success(&warm);
+    let warm_stdout = stdout(&warm);
+    assert!(warm_stdout.contains("Filter: manifest/config files only"));
+    assert!(warm_stdout.contains("Selected: 2 files (2 manifest/config, 0 source, 0 other small)"));
+    assert!(warm_stdout.contains("Skipped: 0 large, 1 outside manifest filter"));
+    assert!(target.join("README.md").exists());
+    assert!(target.join("config").join("app.toml").exists());
+    assert!(!target.join("src").join("main.rs").exists());
+}
+
+#[test]
+fn cache_free_space_uses_safe_prune_behavior_with_pins_and_remote_proof() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("keep.txt"), "keep\n").expect("keep writes");
+    std::fs::write(source.join("drop.txt"), "drop\n").expect("drop writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+    assert_success(&run_loom(["hydrate", target.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "pin",
+        target.join("keep.txt").to_str().expect("UTF-8 path"),
+    ]));
+
+    let free_space = run_loom([
+        "cache",
+        "free-space",
+        "--max-bytes",
+        "0",
+        target.to_str().expect("UTF-8 path"),
+    ]);
+    assert_success(&free_space);
+    let free_space_stdout = stdout(&free_space);
+    assert!(free_space_stdout.contains("Free-space target: 0 hydrated bytes"));
+    assert!(free_space_stdout.contains("remote proof"));
+    assert!(free_space_stdout.contains("Evicted: 1 files, 1 objects"));
+    assert!(free_space_stdout.contains("Skipped: 1 pinned, 0 dirty, 0 unsupported"));
+    assert!(target.join("keep.txt").exists());
+    assert!(!target.join("drop.txt").exists());
+}
+
+#[test]
+fn cache_policy_show_exposes_internal_presets_without_mode_switching() {
+    let policy = run_loom(["cache", "policy", "show"]);
+
+    assert_success(&policy);
+    let policy_stdout = stdout(&policy);
+    assert!(policy_stdout.contains("These are internal presets"));
+    assert!(policy_stdout.contains("Normal use stays intent-based"));
+    for preset in [
+        "online-first",
+        "offline-pinned",
+        "low-disk",
+        "agent-sandbox",
+        "ci-ephemeral",
+    ] {
+        assert!(policy_stdout.contains(preset), "{preset} missing");
+    }
+    assert!(!policy_stdout.contains("cache mode"));
+}
+
+#[test]
 fn cache_prune_refuses_without_remote_object_proof() {
     let dir = tempfile::tempdir().expect("temp dir");
     let fixture = dir.path().join("fixture");
@@ -684,6 +875,8 @@ fn cache_prune_refuses_without_remote_object_proof() {
     let status_stdout = stdout(&status);
     assert!(status_stdout.contains("hydrated: 1"));
     assert!(status_stdout.contains("evictable: 0 files, 0 bytes"));
+    assert!(status_stdout.contains("pending uploads: unknown (no remote configured)"));
+    assert!(status_stdout.contains("cache hits/misses: not measured yet"));
 }
 
 #[test]
