@@ -943,7 +943,7 @@ fn run_cache_free_space(args: &[String], command: &str) -> Result<(), String> {
     let current_status = cache_status_for_scope(&store, Path::new(""), &no_remote_proof)
         .map_err(|error| error.to_string())?;
     let remote_available_objects = if current_status.hydrated_bytes() > parsed.max_bytes {
-        remote_available_objects_for_versions(&store, &versions, "cache prune")?
+        remote_available_objects_for_versions(&store, &versions, command)?
     } else {
         no_remote_proof
     };

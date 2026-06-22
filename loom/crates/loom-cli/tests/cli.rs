@@ -1442,6 +1442,33 @@ fn cache_prune_refuses_without_remote_object_proof() {
 }
 
 #[test]
+fn cache_free_space_refusal_uses_free_space_wording_without_remote() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "local only\n").expect("readme writes");
+
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let free_space = run_loom([
+        "cache",
+        "free-space",
+        "--max-bytes",
+        "0",
+        fixture.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(!free_space.status.success());
+    let stderr = stderr(&free_space);
+    assert!(stderr.contains("cache free-space refused because no Loom remote is configured"));
+    assert!(!stderr.contains("cache prune refused because no Loom remote is configured"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("README.md")).expect("readme reads"),
+        "local only\n"
+    );
+}
+
+#[test]
 fn cache_status_counts_materialized_duplicate_objects_once_per_present_file() {
     let dir = tempfile::tempdir().expect("temp dir");
     let source = dir.path().join("source");
