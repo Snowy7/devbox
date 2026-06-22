@@ -68,6 +68,8 @@ The command surface is under `loom workspace`:
 loom workspace open ./folder --session agent-1
 loom workspace read ./folder --session agent-1 README.md
 loom workspace write ./folder --session agent-1 README.md --text "changed in overlay"
+loom workspace exec ./folder --session agent-1 -- rg "changed" README.md
+loom workspace materialize-run ./folder --session agent-1 -- cargo test -p some-crate
 loom workspace diff ./folder --session agent-1
 loom workspace checkpoint ./folder --session agent-1 -m "agent checkpoint"
 loom workspace close ./folder --session agent-1
@@ -91,8 +93,41 @@ The agent virtual adapter returns explicit unsupported-operation errors for `loo
 dehydrate` and `loom workspace pin`. Those capabilities belong to later adapters that can safely
 coordinate per-session views with shared cache retention or materialized folder policy.
 
+### Workspace Execution
+
+`loom workspace exec` runs a small deterministic virtual command set against the session view
+without materializing source files into the shared folder. It is meant for agent inspect/edit loops
+and just-bash-style adapters that can route simple commands through Loom first:
+
+- `pwd`
+- `ls [PATH...]`
+- `cat <PATH> [PATH...]`
+- `stat <PATH> [PATH...]`
+- `rg <LITERAL> [PATH...]`
+- `write <PATH> <TEXT...>`
+
+Virtual command output is captured as stdout bytes, stderr bytes, and an exit status. Unsupported
+commands return exit status `127` with a message telling the caller to use the materialized sandbox
+fallback. The built-in `rg` is a literal line search, not full ripgrep compatibility; richer shell
+parsing, globbing, pipes, environment management, process trees, and PTY behavior are outside this
+PR.
+
+`loom workspace materialize-run` is the fallback for commands that need a real process. Loom creates
+an isolated sandbox under `.loom/workspaces/materialized/<session-id>/`, hydrates the session view
+there, runs the requested command with that sandbox as the working directory, scans the resulting
+filesystem, and captures changed or created regular files back into the session overlay. Capture
+uses the same secret and generated-folder policy as `loom workspace write`; a secret, symlink,
+unsupported file, path conflict, or deleted tracked file refuses capture and keeps the sandbox for
+inspection so dirty state is not silently lost. Successful runs remove the sandbox by default, or
+keep it with `--keep-sandbox`.
+
+Parallel sessions get separate overlays and separate materialized sandbox directories. A diff or
+checkpoint after materialized capture is the same session operation as a virtual write: `loom
+workspace diff` shows overlay changes, and `loom workspace checkpoint` coalesces those file versions
+into a `sandbox-merge` folder revision plus checkpoint.
+
 This is not OS filesystem mounting. The agent virtual adapter is a programmatic/CLI view over Loom
 metadata and object bytes. It does not intercept normal file opens, provide Finder/Explorer/FUSE
 integration, or make a shell see virtual files. Native Windows, macOS, and Linux filesystem adapters
-are later arc work. This PR also does not add just-bash execution, SDKs, compression, or full
-sparse/chunk transfer.
+are later arc work. This PR also does not add SDKs, compression, chunk transfer, full sparse clone
+transport, or a complete shell implementation.
