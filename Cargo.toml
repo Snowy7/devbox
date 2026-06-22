@@ -21,6 +21,7 @@ members = [
     "loom/crates/loom-pack",
     "loom/crates/loom-store",
     "loom/crates/loom-sync",
+    "loom/crates/loom-workspace",
     "loom/crates/loom-worktree",
 ]
 resolver = "2"

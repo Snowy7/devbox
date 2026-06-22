@@ -1075,6 +1075,7 @@ dependencies = [
  "loom-daemon",
  "loom-store",
  "loom-sync",
+ "loom-workspace",
  "loom-worktree",
  "tempfile",
 ]
@@ -1126,6 +1127,18 @@ dependencies = [
  "loom-core",
  "loom-pack",
  "loom-store",
+ "tempfile",
+]
+
+[[package]]
+name = "loom-workspace"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "loom-core",
+ "loom-store",
+ "loom-sync",
+ "loom-worktree",
  "tempfile",
 ]
 

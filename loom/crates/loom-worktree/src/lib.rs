@@ -666,6 +666,13 @@ pub enum DirectoryPolicyDecision {
     Ignore { reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileCapturePolicyDecision {
+    Capture,
+    Ignore { path: PathBuf, reason: String },
+    Block { path: PathBuf, reason: String },
+}
+
 #[derive(Debug)]
 pub enum CaptureError {
     RootNotFound {
@@ -1739,6 +1746,23 @@ fn path_is_in_scope(path: &Path, scope: &Path) -> bool {
     scope.as_os_str().is_empty() || path == scope || path.starts_with(scope)
 }
 
+fn ancestors(path: &Path) -> Vec<PathBuf> {
+    let mut ancestors = Vec::new();
+    let mut current = PathBuf::new();
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        current.push(component);
+        ancestors.push(current.clone());
+    }
+    ancestors
+}
+
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.as_os_str().is_empty()
         || right.as_os_str().is_empty()
@@ -1934,14 +1958,18 @@ fn capture_file(
     capture: &mut WorktreeCapture,
 ) -> CaptureResult<()> {
     let bytes = read_file_bytes_for_secret_check(path)?;
-    let findings = SecretDetector.scan_bytes(&bytes);
-    if let Some(finding) = findings.first() {
-        capture.summary.blocked_secret_files += 1;
-        capture.blocked.push(CaptureNotice::new(
-            relative_path.to_path_buf(),
-            finding.policy_reason(),
-        ));
-        return Ok(());
+    match evaluate_file_capture_policy(relative_path, &bytes) {
+        FileCapturePolicyDecision::Capture => {}
+        FileCapturePolicyDecision::Ignore { path, reason } => {
+            capture.summary.ignored_entries += 1;
+            capture.ignored.push(CaptureNotice::new(path, reason));
+            return Ok(());
+        }
+        FileCapturePolicyDecision::Block { path, reason } => {
+            capture.summary.blocked_secret_files += 1;
+            capture.blocked.push(CaptureNotice::new(path, reason));
+            return Ok(());
+        }
     }
 
     let object = store.write_object_bytes(&bytes)?;
@@ -1993,6 +2021,33 @@ pub fn evaluate_directory_policy(relative_path: &Path) -> DirectoryPolicyDecisio
         },
         None => DirectoryPolicyDecision::Include,
     }
+}
+
+pub fn evaluate_file_capture_policy(
+    relative_path: &Path,
+    bytes: &[u8],
+) -> FileCapturePolicyDecision {
+    for ancestor in ancestors(relative_path) {
+        match evaluate_directory_policy(&ancestor) {
+            DirectoryPolicyDecision::Include => {}
+            DirectoryPolicyDecision::Ignore { reason } => {
+                return FileCapturePolicyDecision::Ignore {
+                    path: ancestor,
+                    reason,
+                };
+            }
+        }
+    }
+
+    let findings = SecretDetector.scan_bytes(bytes);
+    if let Some(finding) = findings.first() {
+        return FileCapturePolicyDecision::Block {
+            path: relative_path.to_path_buf(),
+            reason: finding.policy_reason(),
+        };
+    }
+
+    FileCapturePolicyDecision::Capture
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2533,6 +2588,35 @@ mod tests {
         assert!(reason.contains("openai_api_key"));
         assert!(reason.contains("sk-<redacted>"));
         assert!(!reason.contains(&raw_secret));
+    }
+
+    #[test]
+    fn file_capture_policy_matches_generated_folder_and_secret_rules() {
+        match evaluate_file_capture_policy(Path::new("node_modules/pkg/index.js"), b"module\n") {
+            FileCapturePolicyDecision::Ignore { path, reason } => {
+                assert_eq!(path, Path::new("node_modules"));
+                assert!(reason.contains("generated Node"));
+            }
+            other => panic!("expected generated folder ignore, got {other:?}"),
+        }
+
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        match evaluate_file_capture_policy(
+            Path::new("secrets.env"),
+            format!("OPENAI_API_KEY={raw_secret}\n").as_bytes(),
+        ) {
+            FileCapturePolicyDecision::Block { path, reason } => {
+                assert_eq!(path, Path::new("secrets.env"));
+                assert!(reason.contains("openai_api_key"));
+                assert!(!reason.contains(&raw_secret));
+            }
+            other => panic!("expected secret block, got {other:?}"),
+        }
+
+        assert_eq!(
+            evaluate_file_capture_policy(Path::new("src/main.rs"), b"fn main() {}\n"),
+            FileCapturePolicyDecision::Capture
+        );
     }
 
     #[test]
