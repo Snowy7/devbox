@@ -222,6 +222,8 @@ pub struct CacheStatusReport {
     hydrated_files: usize,
     remote_only_files: usize,
     partial_files: usize,
+    dirty_files: usize,
+    unsupported_files: usize,
     total_files: usize,
     hydrated_bytes: u64,
     remote_only_bytes: u64,
@@ -242,6 +244,14 @@ impl CacheStatusReport {
 
     pub fn partial_files(&self) -> usize {
         self.partial_files
+    }
+
+    pub fn dirty_files(&self) -> usize {
+        self.dirty_files
+    }
+
+    pub fn unsupported_files(&self) -> usize {
+        self.unsupported_files
     }
 
     pub fn total_files(&self) -> usize {
@@ -1017,6 +1027,7 @@ pub fn cache_status_for_scope(
         report.total_files += 1;
         let size_bytes = version.size_bytes().unwrap_or(0);
         let state = materialization_state_for_version(store, &version, object_id)?;
+        let evictability = classify_evictability(store, &version, object_id)?;
         match state {
             HydrationState::Hydrated => {
                 report.hydrated_files += 1;
@@ -1026,7 +1037,14 @@ pub fn cache_status_for_scope(
                 report.remote_only_files += 1;
                 report.remote_only_bytes += size_bytes;
             }
-            HydrationState::Partial => report.partial_files += 1,
+            HydrationState::Partial => {
+                report.partial_files += 1;
+                match evictability {
+                    Evictability::Dirty => report.dirty_files += 1,
+                    Evictability::Unsupported => report.unsupported_files += 1,
+                    Evictability::Clean => {}
+                }
+            }
         }
 
         let pinned = pinned_scopes
@@ -1040,10 +1058,7 @@ pub fn cache_status_for_scope(
 
         if state == HydrationState::Hydrated
             && remote_available_objects.contains(object_id)
-            && matches!(
-                classify_evictability(store, &version, object_id)?,
-                Evictability::Clean
-            )
+            && matches!(evictability, Evictability::Clean)
         {
             report.evictable_files += 1;
             report.evictable_bytes += size_bytes;

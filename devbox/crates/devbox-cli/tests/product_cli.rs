@@ -129,6 +129,123 @@ fn product_login_share_clone_status_pause_resume_and_unlink_flow() {
 }
 
 #[test]
+fn product_sparse_folder_commands_are_intent_based_and_safe() {
+    let fixture = ProductCliFixture::new("sparse");
+    fixture.write_source("README.md", "hello\n");
+    fixture.write_source("src/main.rs", "fn main() {}\n");
+    fixture.write_source("config/app.toml", "debug=1\n");
+    fixture.write_source("big.bin", &"x".repeat(80));
+
+    assert_success(&fixture.devbox([
+        "login",
+        "--api",
+        &fixture.api.base_url(),
+        "--device-name",
+        "Desk",
+    ]));
+    assert_success(&fixture.devbox(["share", path_str(&fixture.source), "--no-background-sync"]));
+
+    let clone = fixture.devbox([
+        "clone",
+        "source",
+        path_str(&fixture.target),
+        "--sparse",
+        "--no-background-sync",
+    ]);
+    assert_success(&clone);
+    let clone_stdout = stdout(&clone);
+    assert!(clone_stdout.contains("Files: available on demand"));
+    assert_product_output_is_clean(&clone_stdout);
+    assert!(fixture.target.join(".loom").is_dir());
+    assert!(!fixture.target.join("README.md").exists());
+
+    let sparse_status = fixture.devbox(["status", path_str(&fixture.target)]);
+    assert_success(&sparse_status);
+    let sparse_status_stdout = stdout(&sparse_status);
+    assert!(sparse_status_stdout.contains("Hydrated: 0 files"));
+    assert!(sparse_status_stdout.contains("Cloud-only: 4 files"));
+    assert!(sparse_status_stdout.contains("Pending upload: 0 files"));
+    assert_product_output_is_clean(&sparse_status_stdout);
+
+    let hydrate = fixture.devbox(["hydrate", path_str(&fixture.target.join("README.md"))]);
+    assert_success(&hydrate);
+    let hydrate_stdout = stdout(&hydrate);
+    assert!(hydrate_stdout.contains("Hydrated: README.md"));
+    assert_product_output_is_clean(&hydrate_stdout);
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("README.md")).expect("readme hydrated"),
+        "hello\n"
+    );
+
+    let warm = fixture.devbox(["warm", path_str(&fixture.target), "--max-bytes", "20"]);
+    assert_success(&warm);
+    let warm_stdout = stdout(&warm);
+    assert!(warm_stdout.contains("Selected: 3 files"));
+    assert!(warm_stdout.contains("Already local: 6 bytes"));
+    assert_product_output_is_clean(&warm_stdout);
+    assert!(fixture.target.join("src/main.rs").exists());
+    assert!(fixture.target.join("config/app.toml").exists());
+    assert!(!fixture.target.join("big.bin").exists());
+
+    let keep = fixture.devbox(["keep", path_str(&fixture.target.join("README.md"))]);
+    assert_success(&keep);
+    let keep_stdout = stdout(&keep);
+    assert!(keep_stdout.contains("Kept for offline: README.md"));
+    assert!(keep_stdout.contains("Keep prevents cleanup"));
+    assert_product_output_is_clean(&keep_stdout);
+
+    fs::write(fixture.target.join("src/main.rs"), "dirty local change\n")
+        .expect("dirty source writes");
+    let free_space = fixture.devbox(["free-space", path_str(&fixture.target), "--max-bytes", "0"]);
+    assert_success(&free_space);
+    let free_space_stdout = stdout(&free_space);
+    assert!(free_space_stdout.contains("Removed: 1 files"));
+    assert!(free_space_stdout.contains("Skipped: 1 kept, 1 changed locally"));
+    assert_product_output_is_clean(&free_space_stdout);
+    assert!(fixture.target.join("README.md").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("src/main.rs")).expect("dirty source remains"),
+        "dirty local change\n"
+    );
+    assert!(!fixture.target.join("config/app.toml").exists());
+
+    let status = fixture.devbox(["status", path_str(&fixture.target)]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert!(status_stdout.contains("Hydrated: 1 files"));
+    assert!(status_stdout.contains("Cloud-only: 2 files"));
+    assert!(status_stdout.contains("Partial: 1 files"));
+    assert!(status_stdout.contains("Changed locally: 1 files"));
+    assert!(status_stdout.contains("Kept offline: 1 files"));
+    assert_product_output_is_clean(&status_stdout);
+}
+
+#[test]
+fn product_free_space_refuses_without_backed_up_copy() {
+    let fixture = ProductCliFixture::new("free-space-proof");
+    fixture.write_source("README.md", "local backed-up proof\n");
+
+    assert_success(&fixture.devbox([
+        "login",
+        "--api",
+        &fixture.api.base_url(),
+        "--device-name",
+        "Desk",
+    ]));
+    assert_success(&fixture.devbox(["share", path_str(&fixture.source), "--no-background-sync"]));
+    fs::remove_dir_all(fixture.api_root.join("objects")).expect("hosted objects removed");
+
+    let free_space = fixture.devbox(["free-space", path_str(&fixture.source), "--max-bytes", "0"]);
+
+    assert_failure(&free_space);
+    assert!(stderr(&free_space).contains("not safely backed up"));
+    assert_eq!(
+        fs::read_to_string(fixture.source.join("README.md")).expect("source remains"),
+        "local backed-up proof\n"
+    );
+}
+
+#[test]
 fn unauthenticated_share_and_clone_fail_without_touching_files() {
     let fixture = ProductCliFixture::new("unauthenticated");
     fixture.write_source("README.md", "safe\n");
@@ -246,6 +363,7 @@ fn another_account_cannot_clone_a_protected_shared_folder() {
 struct ProductCliFixture {
     _dir: tempfile::TempDir,
     api: devbox_api::LocalApiServer,
+    api_root: PathBuf,
     config: PathBuf,
     source: PathBuf,
     target: PathBuf,
@@ -254,12 +372,14 @@ struct ProductCliFixture {
 impl ProductCliFixture {
     fn new(name: &str) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
-        let api = devbox_api::spawn_local_test_server(dir.path().join("api")).expect("api starts");
+        let api_root = dir.path().join("api");
+        let api = devbox_api::spawn_local_test_server(&api_root).expect("api starts");
         let source = dir.path().join("source");
         let target = dir.path().join("target");
         fs::create_dir_all(&source).expect("source creates");
         Self {
             config: dir.path().join(format!("{name}-config")),
+            api_root,
             _dir: dir,
             api,
             source,

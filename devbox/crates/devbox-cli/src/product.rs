@@ -1,17 +1,20 @@
 use devbox_metadata::{MetadataAuthMode, MetadataServiceConfig};
 use devbox_remote::{DevboxHostedRemote, DevboxHostedRemoteConfig, DEVBOX_HOSTED_REMOTE_KIND};
-use loom_core::{RevisionBoundary, SharedFolderId};
+use loom_core::{FileKind, ObjectId, RevisionBoundary, SharedFolderId};
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
-use loom_store::{LocalStore, RemoteConfig, StoreError};
+use loom_store::{path_to_store_string, LocalStore, RemoteConfig, StoreError};
 use loom_sync::{
-    import_pack_from_remote, sync_store_to_remote, LoomRemote, SyncError, DEFAULT_CURSOR_ID,
-    DEFAULT_REMOTE_NAME,
+    hydrate_object_from_remote, import_pack_from_remote, import_pack_metadata_only_from_remote,
+    sync_store_to_remote, LoomRemote, SyncError, DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME,
 };
 use loom_worktree::{
-    evaluate_directory_policy, CaptureEngine, CaptureRequest, DirectoryPolicyDecision,
-    RestoreEngine, WorktreeCapture,
+    cache_status_for_scope, evaluate_directory_policy, hydrate_versions, prune_cache_to_limit,
+    relative_scope_path, tracked_versions_for_scope, warm_versions_for_scope, CaptureEngine,
+    CaptureRequest, DirectoryPolicyDecision, RestoreEngine, WorktreeCapture,
+    DEFAULT_WARM_MAX_BYTES,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -84,12 +87,36 @@ struct CloneArgs {
     name: Option<String>,
     target: Option<PathBuf>,
     start_background_sync: bool,
+    sparse: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ResumeArgs {
     target: Option<String>,
     start_background_sync: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SparsePathArgs {
+    target: PathBuf,
+    max_bytes: u64,
+    manifest_only: bool,
+}
+
+#[derive(Debug, Clone)]
+struct HydrateArgs {
+    target: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct KeepArgs {
+    target: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct FreeSpaceArgs {
+    target: PathBuf,
+    max_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -116,10 +143,14 @@ pub fn run_command(command: &str, args: &[String]) -> ExitCode {
         "pause" => result_to_exit(run_pause(args)),
         "resume" => result_to_exit(parse_resume_args(args).and_then(run_resume)),
         "unlink" => result_to_exit(run_unlink(args)),
+        "warm" => result_to_exit(parse_sparse_path_args("warm", args).and_then(run_warm)),
+        "hydrate" => result_to_exit(parse_hydrate_args(args).and_then(run_hydrate)),
+        "keep" => result_to_exit(parse_keep_args(args).and_then(run_keep)),
+        "free-space" => result_to_exit(parse_free_space_args(args).and_then(run_free_space)),
         "doctor" => result_to_exit(run_doctor(args)),
         "manage" => {
             println!("devbox manage: shared-folder management will move here after the MVP CLI.");
-            println!("For now, use devbox status, pause, resume, or unlink.");
+            println!("For now, use devbox status, warm, hydrate, keep, free-space, pause, resume, or unlink.");
             ExitCode::SUCCESS
         }
         _ => {
@@ -129,8 +160,8 @@ pub fn run_command(command: &str, args: &[String]) -> ExitCode {
     }
 }
 
-pub fn run_status() -> ExitCode {
-    match product_status() {
+pub fn run_status(args: &[String]) -> ExitCode {
+    match product_status(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("devbox: {error}");
@@ -160,13 +191,17 @@ pub fn print_product_command_help(command: &str) {
         "login" => "devbox login [--api <URL>] [--account <NAME>] [--device-name <NAME>]",
         "share" => "devbox share <FOLDER> [--no-background-sync]",
         "clone" => {
-            "devbox clone\n       devbox clone <SHARED_FOLDER> [TARGET] [--no-background-sync]"
+            "devbox clone\n       devbox clone <SHARED_FOLDER> [TARGET] [--sparse] [--no-background-sync]"
         }
         "manage" => "devbox manage <SHARED_FOLDER>",
         "doctor" => "devbox doctor",
         "pause" => "devbox pause [SHARED_FOLDER]",
         "resume" => "devbox resume [SHARED_FOLDER] [--no-background-sync]",
         "unlink" => "devbox unlink [SHARED_FOLDER]",
+        "warm" => "devbox warm <PATH|FOLDER> [--manifest] [--max-bytes <BYTES>]",
+        "hydrate" => "devbox hydrate <PATH|FOLDER>",
+        "keep" => "devbox keep <PATH|FOLDER>",
+        "free-space" => "devbox free-space <PATH|FOLDER> [--max-bytes <BYTES>]",
         _ => "devbox <COMMAND>",
     };
 
@@ -302,24 +337,33 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
         pack.manifest.display_name.clone(),
     )
     .map_err(product_store_error)?;
-    import_pack_from_remote(&store, &pack, &remote)
-        .map_err(|_| "could not prepare shared folder data on this machine".to_string())?;
-    let current = capture_worktree(&store, RevisionBoundary::Restore)?;
-    ensure_no_blocked_or_deferred(&current, "clone")?;
-    if !current.file_versions().is_empty() {
-        return Err("clone refused because the target already contains source files".to_string());
+    if args.sparse {
+        import_pack_metadata_only_from_remote(&store, &pack, &remote)
+            .map_err(|_| "could not prepare shared folder data on this machine".to_string())?;
+    } else {
+        import_pack_from_remote(&store, &pack, &remote)
+            .map_err(|_| "could not prepare shared folder data on this machine".to_string())?;
     }
     let revision = store
         .revision_by_id(&remote_revision_id)
         .map_err(product_store_error)?
         .ok_or_else(|| "shared folder data was incomplete".to_string())?;
-    RestoreEngine::new(&store)
-        .restore(&revision, &current)
-        .map_err(|error| error.to_string())?;
-    let restored = capture_worktree(&store, RevisionBoundary::Sync)?;
-    store
-        .coalesce_folder_revision(RevisionBoundary::Sync, restored.file_versions())
-        .map_err(product_store_error)?;
+    if !args.sparse {
+        let current = capture_worktree(&store, RevisionBoundary::Restore)?;
+        ensure_no_blocked_or_deferred(&current, "clone")?;
+        if !current.file_versions().is_empty() {
+            return Err(
+                "clone refused because the target already contains source files".to_string(),
+            );
+        }
+        RestoreEngine::new(&store)
+            .restore(&revision, &current)
+            .map_err(|error| error.to_string())?;
+        let restored = capture_worktree(&store, RevisionBoundary::Sync)?;
+        store
+            .coalesce_folder_revision(RevisionBoundary::Sync, restored.file_versions())
+            .map_err(product_store_error)?;
+    }
     store
         .upsert_remote(
             RemoteConfig::new(
@@ -336,6 +380,16 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
     println!("Cloned shared folder: {}", folder.display_name);
     println!("Folder: {}", store.folder_root().display());
     println!("Sync: ready");
+    if args.sparse {
+        println!("Files: available on demand");
+        println!(
+            "Next step: run devbox warm {} or devbox hydrate {}",
+            store.folder_root().display(),
+            store.folder_root().display()
+        );
+    } else {
+        println!("Files: downloaded");
+    }
     start_background_sync(&store, args.start_background_sync)?;
     Ok(())
 }
@@ -387,7 +441,144 @@ fn run_unlink(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn product_status() -> Result<(), String> {
+fn run_warm(args: SparsePathArgs) -> Result<(), String> {
+    let config = read_config()?;
+    let session = config.session()?;
+    let store = open_store_for_path_or_folder(&args.target)?;
+    let scope = scope_for_target(&store, &args.target)?;
+    let selection = warm_versions_for_scope(&store, &scope, args.max_bytes, args.manifest_only)
+        .map_err(product_capture_error)?;
+    let avoided_download_bytes = local_bytes_for_versions(&store, selection.versions());
+    let fetched_objects = fetch_missing_objects(&store, selection.versions(), &session)?;
+    let report = hydrate_versions(&store, selection.versions()).map_err(product_capture_error)?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Warmed: {}", display_scope(&scope));
+    println!("Warm limit: {} bytes per file", args.max_bytes);
+    if args.manifest_only {
+        println!("Filter: manifest and config files only");
+    }
+    println!(
+        "Selected: {} files ({} manifest/config, {} source, {} other small)",
+        selection.selected_files(),
+        selection.selected_manifest_files(),
+        selection.selected_source_files(),
+        selection.selected_small_files()
+    );
+    println!(
+        "Skipped: {} large, {} outside filter",
+        selection.skipped_large_files(),
+        selection.skipped_non_manifest_files()
+    );
+    println!("Downloaded files: {fetched_objects}");
+    println!("Already local: {avoided_download_bytes} bytes");
+    println!(
+        "Files made available: {} written, {} folders, {} already present",
+        report.materialized_files(),
+        report.materialized_directories(),
+        report.already_materialized_files()
+    );
+    Ok(())
+}
+
+fn run_hydrate(args: HydrateArgs) -> Result<(), String> {
+    let config = read_config()?;
+    let session = config.session()?;
+    let store = open_store_for_path_or_folder(&args.target)?;
+    let scope = scope_for_target(&store, &args.target)?;
+    let versions = tracked_versions_for_scope(&store, &scope).map_err(product_capture_error)?;
+    if versions.is_empty() {
+        return Err(format!(
+            "hydrate found no shared files under {}",
+            display_scope(&scope)
+        ));
+    }
+
+    let fetched_objects = fetch_missing_objects(&store, &versions, &session)?;
+    let report = hydrate_versions(&store, &versions).map_err(product_capture_error)?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Hydrated: {}", display_scope(&scope));
+    println!("Downloaded files: {fetched_objects}");
+    println!(
+        "Files made available: {} written, {} folders, {} already present",
+        report.materialized_files(),
+        report.materialized_directories(),
+        report.already_materialized_files()
+    );
+    Ok(())
+}
+
+fn run_keep(args: KeepArgs) -> Result<(), String> {
+    let store = open_store_for_path_or_folder(&args.target)?;
+    let scope = scope_for_target(&store, &args.target)?;
+    let revision = store
+        .latest_revision()
+        .map_err(product_store_error)?
+        .ok_or_else(|| "this folder has not synced yet".to_string())?;
+    let versions = tracked_versions_for_scope(&store, &scope).map_err(product_capture_error)?;
+    if versions.is_empty() {
+        return Err(format!(
+            "keep found no shared files under {}",
+            display_scope(&scope)
+        ));
+    }
+    store
+        .pin_revision(
+            revision.id(),
+            format!("materialization-pin path={}", path_to_store_string(&scope)),
+        )
+        .map_err(product_store_error)?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Kept for offline: {}", display_scope(&scope));
+    println!("Protected files: {}", file_version_count(&versions));
+    println!("Keep prevents cleanup; run devbox hydrate to download any missing files.");
+    Ok(())
+}
+
+fn run_free_space(args: FreeSpaceArgs) -> Result<(), String> {
+    let config = read_config()?;
+    let session = config.session()?;
+    let store = open_store_for_path_or_folder(&args.target)?;
+    let scope = scope_for_target(&store, &args.target)?;
+    let versions = tracked_versions_for_scope(&store, &scope).map_err(product_capture_error)?;
+    if versions.is_empty() {
+        return Err(format!(
+            "free-space found no shared files under {}",
+            display_scope(&scope)
+        ));
+    }
+    let backed_up_objects = backed_up_objects_for_versions(&store, &versions, &session)?;
+    let report = prune_cache_to_limit(&store, &scope, args.max_bytes, &backed_up_objects)
+        .map_err(product_capture_error)?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Freed space under: {}", display_scope(&scope));
+    println!("Local byte target: {}", report.limit_bytes());
+    println!("Safety: changed and kept files were left alone");
+    println!(
+        "Local bytes: {} -> {}",
+        report.hydrated_bytes_before(),
+        report.hydrated_bytes_after()
+    );
+    println!(
+        "Removed: {} files, {} cached file copies; already cloud-only: {} files",
+        report.evicted_files(),
+        report.evicted_objects(),
+        report.already_remote_files()
+    );
+    println!(
+        "Skipped: {} kept, {} changed locally, {} unsupported",
+        report.skipped_pinned_files(),
+        report.skipped_dirty_files(),
+        report.skipped_unsupported_files()
+    );
+    Ok(())
+}
+
+fn product_status(args: &[String]) -> Result<(), String> {
+    let selector = parse_status_selector(args)?;
     let config = read_config()?;
     let Some(session) = config.session_or_none() else {
         println!("Logged in: no");
@@ -405,14 +596,276 @@ fn product_status() -> Result<(), String> {
     }
 
     println!("Shared folders:");
-    for folder in &config.shared_folders {
-        let sync_state = managed_folder_sync_state(folder);
-        println!("- {}: {} ({})", folder.name, folder.local_path, sync_state);
-        if sync_state == "needs attention" || sync_state == "sync status unknown" {
-            println!("  Run devbox doctor for details.");
+    if let Some(selector) = selector {
+        let index = resolve_managed_folder(&config, Some(&selector))?;
+        print_managed_folder_status(&config.shared_folders[index], Some(&session))?;
+    } else {
+        for folder in &config.shared_folders {
+            print_managed_folder_status(folder, Some(&session))?;
         }
     }
     Ok(())
+}
+
+fn print_managed_folder_status(
+    folder: &ManagedFolder,
+    session: Option<&Session>,
+) -> Result<(), String> {
+    let sync_state = managed_folder_sync_state(folder);
+    println!("- {}: {} ({})", folder.name, folder.local_path, sync_state);
+    if sync_state == "needs attention" || sync_state == "sync status unknown" {
+        println!("  Run devbox doctor for details.");
+    }
+
+    let path = Path::new(&folder.local_path);
+    if !path.join(".loom").is_dir() {
+        return Ok(());
+    }
+
+    let store = match LocalStore::open(path) {
+        Ok(store) => store,
+        Err(error) => {
+            println!(
+                "  Folder details: unavailable ({})",
+                product_safe_reason_fragment(&product_store_error(error))
+            );
+            return Ok(());
+        }
+    };
+    let versions = match tracked_versions_for_scope(&store, Path::new("")) {
+        Ok(versions) => versions,
+        Err(error) => {
+            println!(
+                "  Folder details: unavailable ({})",
+                product_safe_reason_fragment(&product_capture_error(error))
+            );
+            return Ok(());
+        }
+    };
+    let upload = session
+        .map(|session| upload_status_for_versions(&store, &versions, session))
+        .unwrap_or_else(|| UploadStatus::Unknown {
+            reason: "not logged in".to_string(),
+        });
+    let backed_up_objects = match &upload {
+        UploadStatus::Known {
+            backed_up_objects, ..
+        } => backed_up_objects.clone(),
+        UploadStatus::Unknown { .. } => BTreeSet::new(),
+    };
+    let cache = match cache_status_for_scope(&store, Path::new(""), &backed_up_objects) {
+        Ok(cache) => cache,
+        Err(error) => {
+            println!(
+                "  Cache details: unavailable ({})",
+                product_safe_reason_fragment(&product_capture_error(error))
+            );
+            return Ok(());
+        }
+    };
+
+    println!(
+        "  Hydrated: {} files, {} bytes",
+        cache.hydrated_files(),
+        cache.hydrated_bytes()
+    );
+    println!(
+        "  Cloud-only: {} files, {} bytes",
+        cache.remote_only_files(),
+        cache.remote_only_bytes()
+    );
+    println!("  Partial: {} files", cache.partial_files());
+    println!("  Changed locally: {} files", cache.dirty_files());
+    println!(
+        "  Kept offline: {} files, {} bytes",
+        cache.pinned_files(),
+        cache.pinned_bytes()
+    );
+    println!(
+        "  Can free space: {} files, {} bytes",
+        cache.evictable_files(),
+        cache.evictable_bytes()
+    );
+    match upload {
+        UploadStatus::Known {
+            pending_files,
+            pending_bytes,
+            ..
+        } => println!(
+            "  Pending upload: {} files, {} bytes",
+            pending_files, pending_bytes
+        ),
+        UploadStatus::Unknown { reason } => println!("  Pending upload: unknown ({reason})"),
+    }
+    Ok(())
+}
+
+fn fetch_missing_objects(
+    store: &LocalStore,
+    versions: &[loom_core::FileVersion],
+    session: &Session,
+) -> Result<usize, String> {
+    let missing = versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter_map(|version| {
+            version
+                .object_id()
+                .filter(|object_id| !store.object_cache().exists(object_id))
+                .map(|object_id| (object_id.clone(), version.size_bytes()))
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(0);
+    }
+
+    let remote = hosted_remote_for_store(store, session)?;
+    let mut fetched_objects = 0;
+    for (object_id, size_bytes) in missing {
+        if hydrate_object_from_remote(store, &remote, &object_id, size_bytes)
+            .map_err(product_sync_error)?
+        {
+            fetched_objects += 1;
+        }
+    }
+    Ok(fetched_objects)
+}
+
+fn backed_up_objects_for_versions(
+    store: &LocalStore,
+    versions: &[loom_core::FileVersion],
+    session: &Session,
+) -> Result<BTreeSet<ObjectId>, String> {
+    let remote = hosted_remote_for_store(store, session)?;
+    let mut backed_up = BTreeSet::new();
+    for object_id in unique_file_object_ids(versions) {
+        match remote.has_object(&object_id) {
+            Ok(true) => {
+                backed_up.insert(object_id);
+            }
+            Ok(false) => {
+                return Err("free-space refused because some files are not safely backed up yet; run devbox resume for this folder and try again".to_string());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "free-space refused because some files are not safely backed up yet; run devbox resume for this folder and try again ({})",
+                    product_safe_reason_fragment(&product_sync_error(error))
+                ));
+            }
+        }
+    }
+    Ok(backed_up)
+}
+
+fn upload_status_for_versions(
+    store: &LocalStore,
+    versions: &[loom_core::FileVersion],
+    session: &Session,
+) -> UploadStatus {
+    let remote = match hosted_remote_for_store(store, session) {
+        Ok(remote) => remote,
+        Err(error) => return UploadStatus::Unknown { reason: error },
+    };
+    let mut backed_up_objects = BTreeSet::new();
+    let mut checked_objects = BTreeSet::new();
+    for object_id in unique_file_object_ids(versions) {
+        match remote.has_object(&object_id) {
+            Ok(true) => {
+                backed_up_objects.insert(object_id.clone());
+                checked_objects.insert(object_id);
+            }
+            Ok(false) => {
+                checked_objects.insert(object_id);
+            }
+            Err(error) => {
+                return UploadStatus::Unknown {
+                    reason: product_sync_error(error),
+                }
+            }
+        }
+    }
+
+    let mut pending_files = 0;
+    let mut pending_bytes = 0;
+    for version in versions {
+        if version.kind() != &FileKind::File {
+            continue;
+        }
+        let Some(object_id) = version.object_id() else {
+            continue;
+        };
+        if checked_objects.contains(object_id) && !backed_up_objects.contains(object_id) {
+            pending_files += 1;
+            pending_bytes += version.size_bytes().unwrap_or(0);
+        }
+    }
+
+    UploadStatus::Known {
+        backed_up_objects,
+        pending_files,
+        pending_bytes,
+    }
+}
+
+fn hosted_remote_for_store(
+    store: &LocalStore,
+    session: &Session,
+) -> Result<DevboxHostedRemote, String> {
+    let config = DevboxHostedRemoteConfig::new(
+        &session.api_url,
+        store.shared_folder().id().clone(),
+        &session.session_token,
+        &session.device_id,
+    )
+    .map_err(product_sync_error)?;
+    Ok(DevboxHostedRemote::new(config))
+}
+
+fn unique_file_object_ids(versions: &[loom_core::FileVersion]) -> BTreeSet<ObjectId> {
+    versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .filter_map(|version| version.object_id().cloned())
+        .collect()
+}
+
+fn local_bytes_for_versions(store: &LocalStore, versions: &[loom_core::FileVersion]) -> u64 {
+    versions
+        .iter()
+        .filter_map(|version| {
+            let object_id = version.object_id()?;
+            store
+                .object_cache()
+                .exists(object_id)
+                .then(|| version.size_bytes().unwrap_or(0))
+        })
+        .sum()
+}
+
+fn file_version_count(versions: &[loom_core::FileVersion]) -> usize {
+    versions
+        .iter()
+        .filter(|version| version.kind() == &FileKind::File)
+        .count()
+}
+
+fn scope_for_target(store: &LocalStore, target: &Path) -> Result<PathBuf, String> {
+    relative_scope_path(store, &absolute_path_from_path(target)?).map_err(product_capture_error)
+}
+
+fn display_scope(scope: &Path) -> String {
+    path_to_store_string(scope)
+}
+
+enum UploadStatus {
+    Known {
+        backed_up_objects: BTreeSet<ObjectId>,
+        pending_files: usize,
+        pending_bytes: u64,
+    },
+    Unknown {
+        reason: String,
+    },
 }
 
 fn sync_once(store: &LocalStore, session: &Session) -> Result<WorktreeCapture, String> {
@@ -705,6 +1158,45 @@ fn resolve_managed_folder(config: &ProductConfig, selector: Option<&str>) -> Res
     }
 }
 
+fn open_store_for_path_or_folder(path: &Path) -> Result<LocalStore, String> {
+    let absolute = absolute_path_from_path(path)?;
+    let mut current = if absolute.exists() && absolute.is_dir() {
+        absolute.clone()
+    } else {
+        absolute
+            .parent()
+            .ok_or_else(|| format!("path has no parent: {}", absolute.display()))?
+            .to_path_buf()
+    };
+
+    while !current.exists() {
+        if !current.pop() {
+            return Err(format!(
+                "could not find an existing ancestor for {}",
+                absolute.display()
+            ));
+        }
+    }
+
+    let mut current = fs::canonicalize(&current).map_err(|error| error.to_string())?;
+    loop {
+        if current
+            .join(".loom")
+            .join("metadata")
+            .join("shared_folder.tsv")
+            .is_file()
+        {
+            return LocalStore::open(&current).map_err(product_store_error);
+        }
+        if !current.pop() {
+            return Err(format!(
+                "{} is not inside a Devbox shared folder",
+                absolute.display()
+            ));
+        }
+    }
+}
+
 fn validate_clone_target_before_mutation(target: &Path) -> Result<(), String> {
     if !target.exists() {
         return Ok(());
@@ -725,6 +1217,16 @@ fn validate_clone_target_before_mutation(target: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn absolute_path_from_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(std::env::current_dir()
+        .map_err(|error| error.to_string())?
+        .join(path))
 }
 
 fn first_clone_source_entry(root: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
@@ -879,9 +1381,11 @@ fn parse_share_args(args: &[String]) -> Result<ShareArgs, String> {
 fn parse_clone_args(args: &[String]) -> Result<CloneArgs, String> {
     let mut positionals = Vec::new();
     let mut start_background_sync = true;
+    let mut sparse = false;
     for arg in args {
         match arg.as_str() {
             "--no-background-sync" => start_background_sync = false,
+            "--sparse" => sparse = true,
             value if value.starts_with('-') => {
                 return Err(format!("clone unknown option '{value}'"))
             }
@@ -893,19 +1397,121 @@ fn parse_clone_args(args: &[String]) -> Result<CloneArgs, String> {
             name: None,
             target: None,
             start_background_sync,
+            sparse,
         }),
         [name] => Ok(CloneArgs {
             name: Some(name.clone()),
             target: None,
             start_background_sync,
+            sparse,
         }),
         [name, target] => Ok(CloneArgs {
             name: Some(name.clone()),
             target: Some(PathBuf::from(target)),
             start_background_sync,
+            sparse,
         }),
         _ => Err("clone accepts at most a shared folder name and target folder".to_string()),
     }
+}
+
+fn parse_sparse_path_args(command: &str, args: &[String]) -> Result<SparsePathArgs, String> {
+    let mut target = None;
+    let mut max_bytes = DEFAULT_WARM_MAX_BYTES;
+    let mut manifest_only = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--max-bytes" => {
+                index += 1;
+                max_bytes = parse_u64(&required_value(args, index, "--max-bytes")?, "--max-bytes")?;
+            }
+            value if value.starts_with("--max-bytes=") => {
+                let value = value
+                    .split_once('=')
+                    .expect("--max-bytes= has a delimiter")
+                    .1;
+                max_bytes = parse_u64(value, "--max-bytes")?;
+            }
+            "--manifest" => manifest_only = true,
+            value if value.starts_with('-') => {
+                return Err(format!("{command} unknown option '{value}'"));
+            }
+            value => {
+                if target.replace(PathBuf::from(value)).is_some() {
+                    return Err(format!("{command} accepts one path or folder"));
+                }
+            }
+        }
+        index += 1;
+    }
+
+    Ok(SparsePathArgs {
+        target: target.ok_or_else(|| {
+            format!("{command} requires a path or folder\nUsage: devbox {command} <PATH|FOLDER>")
+        })?,
+        max_bytes,
+        manifest_only,
+    })
+}
+
+fn parse_hydrate_args(args: &[String]) -> Result<HydrateArgs, String> {
+    match args {
+        [target] => Ok(HydrateArgs {
+            target: PathBuf::from(target),
+        }),
+        [] => Err(
+            "hydrate requires a path or folder\nUsage: devbox hydrate <PATH|FOLDER>".to_string(),
+        ),
+        _ => Err("hydrate accepts exactly one path or folder".to_string()),
+    }
+}
+
+fn parse_keep_args(args: &[String]) -> Result<KeepArgs, String> {
+    match args {
+        [target] => Ok(KeepArgs {
+            target: PathBuf::from(target),
+        }),
+        [] => Err("keep requires a path or folder\nUsage: devbox keep <PATH|FOLDER>".to_string()),
+        _ => Err("keep accepts exactly one path or folder".to_string()),
+    }
+}
+
+fn parse_free_space_args(args: &[String]) -> Result<FreeSpaceArgs, String> {
+    let mut target = None;
+    let mut max_bytes = 0;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--max-bytes" => {
+                index += 1;
+                max_bytes = parse_u64(&required_value(args, index, "--max-bytes")?, "--max-bytes")?;
+            }
+            value if value.starts_with("--max-bytes=") => {
+                let value = value
+                    .split_once('=')
+                    .expect("--max-bytes= has a delimiter")
+                    .1;
+                max_bytes = parse_u64(value, "--max-bytes")?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("free-space unknown option '{value}'"));
+            }
+            value => {
+                if target.replace(PathBuf::from(value)).is_some() {
+                    return Err("free-space accepts one path or folder".to_string());
+                }
+            }
+        }
+        index += 1;
+    }
+
+    Ok(FreeSpaceArgs {
+        target: target.ok_or_else(|| {
+            "free-space requires a path or folder\nUsage: devbox free-space <PATH|FOLDER> [--max-bytes <BYTES>]".to_string()
+        })?,
+        max_bytes,
+    })
 }
 
 fn parse_resume_args(args: &[String]) -> Result<ResumeArgs, String> {
@@ -928,6 +1534,14 @@ fn parse_resume_args(args: &[String]) -> Result<ResumeArgs, String> {
         target,
         start_background_sync,
     })
+}
+
+fn parse_status_selector(args: &[String]) -> Result<Option<String>, String> {
+    match args {
+        [] => Ok(None),
+        [selector] => Ok(Some(selector.clone())),
+        _ => Err("status accepts at most one shared folder".to_string()),
+    }
 }
 
 fn parse_optional_selector(args: &[String], command: &str) -> Result<Option<String>, String> {
@@ -1101,6 +1715,10 @@ fn product_store_error(error: StoreError) -> String {
             "Devbox could not update this local folder; check the folder and try again".to_string()
         }
     }
+}
+
+fn product_capture_error(error: loom_worktree::CaptureError) -> String {
+    product_safe_reason_fragment(&error.to_string())
 }
 
 fn product_daemon_error(error: loom_daemon::DaemonError) -> String {

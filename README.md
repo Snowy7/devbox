@@ -136,6 +136,11 @@ devbox login
 devbox share <folder>
 devbox clone
 devbox clone <name> [target]
+devbox clone <name> [target] --sparse
+devbox warm <path>
+devbox hydrate <path>
+devbox keep <path>
+devbox free-space <path>
 devbox status
 devbox doctor
 devbox pause|resume|unlink [name]
@@ -196,9 +201,12 @@ loom doctor ./sparse-target
 
 `devbox share <folder>` registers the shared folder, configures the hidden Loom sync endpoint, syncs
 the folder, and starts live sync. `devbox clone` lists folders available to this account; `devbox
-clone <name> [target]` materializes a shared folder on this machine and starts live sync. Tokens,
-pack names, cursors, remotes, and `devbox://` URLs are not printed in normal product output. Debug
-and engine-level operations remain under `loom`.
+clone <name> [target]` materializes a shared folder on this machine and starts live sync.
+`devbox clone --sparse` links the folder first and lets `devbox warm`, `devbox hydrate`,
+`devbox keep`, and `devbox free-space` control what stays local. Tokens, pack names, cursors,
+remotes, and `devbox://` URLs are not printed in normal product output. Debug and engine-level
+operations remain under `loom`. See [docs/devbox/sparse-folders.md](docs/devbox/sparse-folders.md)
+for the hydrate versus keep distinction and current CLI-only limitations.
 
 The current CLI can create/list/show/restore local snapshots and scan pending local changes:
 
