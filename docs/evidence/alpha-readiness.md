@@ -43,11 +43,13 @@ Useful targeted checks for this PR:
 ```text
 cargo test -p loom-daemon
 cargo test -p loom-cli --test cli
-cargo test -p devbox-cli --test product_cli
+cargo test -p devbox-cli --test product_cli -- --test-threads=1
 cargo test -p devbox-api
 ```
 
 The Loom CLI test suite also covers `loom cache warm` behavior and manifest-only warmup.
+The product CLI alpha test uses local API servers and is documented as serial because the default
+parallel runner is still flaky on that test target.
 
 Operator-only hosted deployment checks can additionally run the `devbox-api` Railway/container path
 with Postgres and server-side R2 configured. That is not required for the local alpha smoke.
