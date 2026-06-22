@@ -1184,6 +1184,10 @@ fn print_remote_check_report(config: &RemoteConfig, report: &RemoteCheckReport) 
     );
     println!("  cursor known locally: {}", report.cursor_known_locally);
     println!("  cursor pack present: {}", report.cursor_pack_present);
+    println!(
+        "  cursor pack matches cursor: {}",
+        report.cursor_pack_matches_cursor
+    );
     println!("  checked objects: {}", report.checked_objects);
     println!("  missing objects: {}", report.missing_objects.len());
     for object_id in report.missing_objects.iter().take(20) {
@@ -1192,8 +1196,13 @@ fn print_remote_check_report(config: &RemoteConfig, report: &RemoteCheckReport) 
     if !report.cursor_pack_present {
         println!("  ERROR missing-remote-pack: remote cursor pack is not readable");
     }
+    if !report.cursor_pack_matches_cursor {
+        println!(
+            "  ERROR remote-cursor-pack-mismatch: remote cursor does not match decoded pack manifest"
+        );
+    }
     if !report.cursor_known_locally {
-        println!("  WARN remote-cursor-unknown-locally: remote cursor is not in local history");
+        println!("  ERROR remote-cursor-unknown-locally: remote cursor is not in local history");
     }
 }
 

@@ -100,6 +100,68 @@ fn remote_check_detects_missing_remote_object_bytes() {
 }
 
 #[test]
+fn remote_check_rejects_unknown_remote_cursor_even_when_pack_and_objects_exist() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let foreign = dir.path().join("foreign");
+    let remote = dir.path().join("remote");
+    let foreign_remote = dir.path().join("foreign-remote");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::create_dir_all(&foreign).expect("foreign creates");
+    std::fs::write(source.join("README.md"), "same bytes\n").expect("source readme writes");
+    std::fs::write(foreign.join("README.md"), "same bytes\n").expect("foreign readme writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+
+    assert_success(&run_loom(["track", foreign.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        foreign_remote.to_str().expect("UTF-8 path"),
+        foreign.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", foreign.to_str().expect("UTF-8 path")]));
+
+    let foreign_cursor =
+        std::fs::read_to_string(foreign_remote.join("cursors").join("shared-folder.txt"))
+            .expect("foreign cursor reads")
+            .trim()
+            .to_string();
+    std::fs::copy(
+        foreign_remote
+            .join("packs")
+            .join(format!("{foreign_cursor}.loompack")),
+        remote
+            .join("packs")
+            .join(format!("{foreign_cursor}.loompack")),
+    )
+    .expect("foreign pack copies");
+    std::fs::write(
+        remote.join("cursors").join("shared-folder.txt"),
+        format!("{foreign_cursor}\n"),
+    )
+    .expect("remote cursor rewrites");
+
+    let check = run_loom(["remote", "check", source.to_str().expect("UTF-8 path")]);
+
+    assert!(!check.status.success());
+    let check_stdout = stdout(&check);
+    assert!(check_stdout.contains("cursor known locally: false"));
+    assert!(check_stdout.contains("missing objects: 0"));
+    assert!(check_stdout.contains("ERROR remote-cursor-unknown-locally"));
+    assert!(stderr(&check).contains("remote check found"));
+}
+
+#[test]
 fn doctor_reports_healthy_after_normal_sync_and_sparse_clone() {
     let dir = tempfile::tempdir().expect("temp dir");
     let source = dir.path().join("source");

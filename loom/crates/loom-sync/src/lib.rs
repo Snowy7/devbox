@@ -60,13 +60,17 @@ pub struct RemoteCheckReport {
     pub remote_cursor: Option<FolderRevisionId>,
     pub cursor_known_locally: bool,
     pub cursor_pack_present: bool,
+    pub cursor_pack_matches_cursor: bool,
     pub checked_objects: usize,
     pub missing_objects: Vec<ObjectId>,
 }
 
 impl RemoteCheckReport {
     pub fn has_errors(&self) -> bool {
-        !self.cursor_pack_present || !self.missing_objects.is_empty()
+        !self.cursor_known_locally
+            || !self.cursor_pack_present
+            || !self.cursor_pack_matches_cursor
+            || !self.missing_objects.is_empty()
     }
 }
 
@@ -444,16 +448,30 @@ pub fn check_remote_availability(
         Some(revision_id) => store.revision_by_id(revision_id)?.is_some(),
         None => true,
     };
-    let cursor_pack_present = match &remote_cursor {
-        Some(revision_id) => remote.get_pack(revision_id).is_ok(),
-        None => true,
+    let (cursor_pack_present, cursor_pack_matches_cursor, mut object_ids) = match &remote_cursor {
+        Some(revision_id) => match remote.get_pack(revision_id) {
+            Ok(pack) => {
+                let matches_cursor = &pack.manifest.latest_revision_id == revision_id;
+                let object_ids = pack
+                    .manifest
+                    .objects
+                    .into_iter()
+                    .map(|object| object.object_id)
+                    .collect::<Vec<_>>();
+                (true, matches_cursor, object_ids)
+            }
+            Err(_) => (false, true, Vec::new()),
+        },
+        None => {
+            let object_ids = store
+                .file_versions()?
+                .into_iter()
+                .filter(|version| version.kind() == &FileKind::File)
+                .filter_map(|version| version.object_id().cloned())
+                .collect::<Vec<_>>();
+            (true, true, object_ids)
+        }
     };
-    let mut object_ids = store
-        .file_versions()?
-        .into_iter()
-        .filter(|version| version.kind() == &FileKind::File)
-        .filter_map(|version| version.object_id().cloned())
-        .collect::<Vec<_>>();
     object_ids.sort();
     object_ids.dedup();
 
@@ -468,6 +486,7 @@ pub fn check_remote_availability(
         remote_cursor,
         cursor_known_locally,
         cursor_pack_present,
+        cursor_pack_matches_cursor,
         checked_objects: object_ids.len(),
         missing_objects,
     })
