@@ -76,6 +76,19 @@ Loom owns the trust primitive; Devbox may wrap it in product language.
 These commands should stay deterministic and conservative. They can tell a user what is corrupt,
 missing, remote-only, or unsafe, but they should not perform risky automatic repair.
 
+Sparse folders should stay intent-based instead of asking users to choose cache modes:
+
+- `loom pin <PATH>` means keep this path available locally.
+- `loom cache warm <PATH>` means hydrate the useful source, manifest, config, and small files here.
+- `loom cache free-space --max-bytes <BYTES> [FOLDER]` means safely remove clean, unpinned local
+  bytes that have remote proof.
+- `loom cache status [FOLDER]` means explain what is local, remote-only, pinned, evictable, or still
+  pending upload.
+
+Internal presets such as online-first, offline-pinned, low-disk, agent-sandbox, and ci-ephemeral may
+exist as implementation data, but Devbox should remain opinionated by default. A normal user should
+not have to pick a cache mode before a folder feels continuous.
+
 ## Git
 
 Git is supported because developers use Git.
