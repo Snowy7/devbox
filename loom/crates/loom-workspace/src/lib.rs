@@ -719,6 +719,7 @@ impl<'a> AgentWorkspaceSession<'a> {
             });
         }
 
+        let host_before = scan_host_folder_for_guard(self.store.folder_root())?;
         let output = match Command::new(&request.command[0])
             .args(&request.command[1..])
             .current_dir(&cwd)
@@ -735,6 +736,14 @@ impl<'a> AgentWorkspaceSession<'a> {
                 });
             }
         };
+        let host_after = scan_host_folder_for_guard(self.store.folder_root())?;
+        let host_mutations = host_folder_mutations(&host_before, &host_after);
+        if !host_mutations.is_empty() {
+            return Err(WorkspaceError::HostFolderMutated {
+                sandbox_path,
+                paths: host_mutations,
+            });
+        }
         let capture = self.capture_sandbox_changes(&sandbox_path)?;
         report.apply_capture(capture);
 
@@ -772,10 +781,14 @@ impl<'a> AgentWorkspaceSession<'a> {
     }
 
     fn materialized_root(&self) -> PathBuf {
-        self.store
-            .store_root()
-            .join(WORKSPACES_DIR)
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"loom-materialized-sandbox-root-v1\n");
+        hasher.update(self.store.folder_root().to_string_lossy().as_bytes());
+        let shared_folder_key = format!("shared-folder-b3-{}", hasher.finalize().to_hex().as_str());
+        std::env::temp_dir()
+            .join("loom-workspaces")
             .join(MATERIALIZED_DIR)
+            .join(shared_folder_key)
             .join(self.session.id().as_str())
     }
 
@@ -1639,6 +1652,10 @@ pub enum WorkspaceError {
         sandbox_path: PathBuf,
         paths: Vec<PathBuf>,
     },
+    HostFolderMutated {
+        sandbox_path: PathBuf,
+        paths: Vec<PathBuf>,
+    },
     UnsupportedOperation {
         operation: &'static str,
         adapter: &'static str,
@@ -1731,6 +1748,20 @@ impl fmt::Display for WorkspaceError {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::HostFolderMutated {
+                sandbox_path,
+                paths,
+            } => write!(
+                f,
+                "materialized sandbox command mutated the real shared folder outside capture: {}; sandbox kept at {} for inspection",
+                paths
+                    .iter()
+                    .take(8)
+                    .map(|path| path_to_store_string(path))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                sandbox_path.display()
+            ),
             Self::UnsupportedOperation { operation, adapter } => {
                 write!(f, "{operation} is not supported by {adapter}")
             }
@@ -1781,6 +1812,7 @@ impl std::error::Error for WorkspaceError {
             | Self::EmptyCommand
             | Self::SandboxCaptureBlocked { .. }
             | Self::SandboxDeletedTrackedFiles { .. }
+            | Self::HostFolderMutated { .. }
             | Self::UnsupportedOperation { .. }
             | Self::EmptyMessage(_)
             | Self::StaleBaseRevision { .. }
@@ -1835,6 +1867,21 @@ struct SandboxCapturePlan {
     changed_files: Vec<SandboxCapturedFile>,
     unchanged_files: usize,
     ignored_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostEntryFingerprint {
+    kind: HostEntryKind,
+    size_bytes: Option<u64>,
+    fingerprint: Option<String>,
 }
 
 fn versions_for_revision(
@@ -2101,6 +2148,104 @@ fn validate_sandbox_capture_targets(
         }
     }
     Ok(())
+}
+
+fn scan_host_folder_for_guard(
+    root: &Path,
+) -> WorkspaceResult<BTreeMap<PathBuf, HostEntryFingerprint>> {
+    let mut entries = BTreeMap::new();
+    scan_host_guard_dir(root, root, &mut entries)?;
+    Ok(entries)
+}
+
+fn scan_host_guard_dir(
+    root: &Path,
+    dir: &Path,
+    entries: &mut BTreeMap<PathBuf, HostEntryFingerprint>,
+) -> WorkspaceResult<()> {
+    let mut children = fs::read_dir(dir)
+        .map_err(|source| WorkspaceError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| WorkspaceError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+    children.sort_by_key(|entry| entry.file_name());
+
+    for child in children {
+        let path = child.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|source| WorkspaceError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let relative_path = relative_sandbox_path(root, &path)?;
+        if metadata.is_dir() {
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::Directory,
+                    size_bytes: None,
+                    fingerprint: None,
+                },
+            );
+            scan_host_guard_dir(root, &path, entries)?;
+        } else if metadata.is_file() {
+            let bytes = fs::read(&path).map_err(|source| WorkspaceError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::File,
+                    size_bytes: Some(metadata.len()),
+                    fingerprint: Some(blake3::hash(&bytes).to_hex().to_string()),
+                },
+            );
+        } else if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path).map_err(|source| WorkspaceError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::Symlink,
+                    size_bytes: None,
+                    fingerprint: Some(target.to_string_lossy().into_owned()),
+                },
+            );
+        } else {
+            entries.insert(
+                relative_path,
+                HostEntryFingerprint {
+                    kind: HostEntryKind::Other,
+                    size_bytes: Some(metadata.len()),
+                    fingerprint: None,
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn host_folder_mutations(
+    before: &BTreeMap<PathBuf, HostEntryFingerprint>,
+    after: &BTreeMap<PathBuf, HostEntryFingerprint>,
+) -> Vec<PathBuf> {
+    let paths = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    paths
+        .into_iter()
+        .filter(|path| before.get(path) != after.get(path))
+        .collect()
 }
 
 fn file_kind_label(kind: &FileKind) -> &'static str {
@@ -2982,6 +3127,43 @@ mod tests {
     }
 
     #[test]
+    fn materialized_run_refuses_shared_folder_escape_without_overlay_capture() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id =
+            Some(WorkspaceSessionId::new("agent-materialized-escape").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        let leaked = fixture.store.folder_root().join("leaked.env");
+        let object_count_before = fixture.object_file_count();
+
+        let error = session
+            .run_materialized_command(
+                WorkspaceCommandRequest::new(escape_shared_folder_command(&leaked, &raw_secret)),
+                WorkspaceMaterializedRunOptions::cleanup(),
+            )
+            .expect_err("host folder mutation is refused");
+
+        match error {
+            WorkspaceError::HostFolderMutated {
+                sandbox_path,
+                paths,
+            } => {
+                assert!(sandbox_path.exists());
+                assert_eq!(store_paths(&paths), vec!["leaked.env"]);
+                remove_dir_all(&sandbox_path).expect("test cleans kept sandbox");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        assert!(leaked.exists());
+        assert_eq!(session.overlay_file_count(), 0);
+        assert!(!session.diff_overlay().expect("diff").has_changes());
+        assert_eq!(fixture.object_file_count(), object_count_before);
+        assert!(!fixture.object_cache_contains(raw_secret.as_bytes()));
+    }
+
+    #[test]
     fn workspace_write_blocks_secrets_before_object_cache_write() {
         let fixture = LocalFixture::new();
         let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
@@ -3286,6 +3468,31 @@ mod tests {
             "sh".to_string(),
             "-c".to_string(),
             format!("printf 'OPENAI_API_KEY={raw_secret}\\n' > secrets.env"),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn escape_shared_folder_command(path: &Path, raw_secret: &str) -> Vec<String> {
+        vec![
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            format!(
+                "Set-Content -LiteralPath '{}' -Value 'OPENAI_API_KEY={raw_secret}'",
+                path.to_string_lossy().replace('\'', "''")
+            ),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn escape_shared_folder_command(path: &Path, raw_secret: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf 'OPENAI_API_KEY={raw_secret}\\n' > '{}'",
+                path.to_string_lossy().replace('\'', "'\\''")
+            ),
         ]
     }
 

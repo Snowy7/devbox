@@ -113,13 +113,13 @@ parsing, globbing, pipes, environment management, process trees, and PTY behavio
 PR.
 
 `loom workspace materialize-run` is the fallback for commands that need a real process. Loom creates
-an isolated sandbox under `.loom/workspaces/materialized/<session-id>/`, hydrates the session view
-there, runs the requested command with that sandbox as the working directory, scans the resulting
+an isolated working directory under the operating system temp directory, hydrates the session view
+there, runs the requested command with that directory as the working directory, scans the resulting
 filesystem, and captures changed or created regular files back into the session overlay. Capture
 uses the same secret and generated-folder policy as `loom workspace write`; a secret, symlink,
-unsupported file, path conflict, or deleted tracked file refuses capture and keeps the sandbox for
-inspection so dirty state is not silently lost. Successful runs remove the sandbox by default, or
-keep it with `--keep-sandbox`.
+unsupported file, path conflict, deleted tracked file, or mutation of the real shared folder refuses
+capture and keeps the sandbox for inspection so dirty state is not silently lost. Successful runs
+remove the sandbox by default, or keep it with `--keep-sandbox`.
 
 Parallel sessions get separate overlays and separate materialized sandbox directories. A diff or
 checkpoint after materialized capture is the same session operation as a virtual write: `loom
@@ -130,4 +130,6 @@ This is not OS filesystem mounting. The agent virtual adapter is a programmatic/
 metadata and object bytes. It does not intercept normal file opens, provide Finder/Explorer/FUSE
 integration, or make a shell see virtual files. Native Windows, macOS, and Linux filesystem adapters
 are later arc work. This PR also does not add SDKs, compression, chunk transfer, full sparse clone
-transport, or a complete shell implementation.
+transport, or a complete shell implementation. The materialized fallback is not an OS-level security
+sandbox: it moves the working directory out of the shared folder and detects shared-folder mutations
+before capture, but it should not be treated as a containment boundary for hostile commands.
