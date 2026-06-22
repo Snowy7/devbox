@@ -116,6 +116,7 @@ pub fn run_command(command: &str, args: &[String]) -> ExitCode {
         "pause" => result_to_exit(run_pause(args)),
         "resume" => result_to_exit(parse_resume_args(args).and_then(run_resume)),
         "unlink" => result_to_exit(run_unlink(args)),
+        "doctor" => result_to_exit(run_doctor(args)),
         "manage" => {
             println!("devbox manage: shared-folder management will move here after the MVP CLI.");
             println!("For now, use devbox status, pause, resume, or unlink.");
@@ -162,6 +163,7 @@ pub fn print_product_command_help(command: &str) {
             "devbox clone\n       devbox clone <SHARED_FOLDER> [TARGET] [--no-background-sync]"
         }
         "manage" => "devbox manage <SHARED_FOLDER>",
+        "doctor" => "devbox doctor",
         "pause" => "devbox pause [SHARED_FOLDER]",
         "resume" => "devbox resume [SHARED_FOLDER] [--no-background-sync]",
         "unlink" => "devbox unlink [SHARED_FOLDER]",
@@ -173,6 +175,38 @@ pub fn print_product_command_help(command: &str) {
     println!("Usage: {usage}");
     println!();
     println!("Devbox keeps folders continuous across machines.");
+}
+
+fn run_doctor(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("doctor does not accept arguments\nUsage: devbox doctor".to_string());
+    }
+
+    let config = read_config()?;
+    let Some(session) = config.session_or_none() else {
+        println!("Logged in: no");
+        println!("Next step: run devbox login to connect this machine.");
+        return Ok(());
+    };
+
+    println!("Logged in: yes");
+    println!("Account: {}", session.account_id);
+    println!("Machine: {} ({})", session.device_name, session.device_id);
+    println!("Session: stored locally");
+
+    if config.shared_folders.is_empty() {
+        println!("Shared folders: none yet");
+        println!("Next step: run devbox share <folder> or devbox clone.");
+        return Ok(());
+    }
+
+    println!("Shared folders:");
+    for folder in &config.shared_folders {
+        println!("- {}: {}", folder.name, folder.local_path);
+        println!("  State: {}", managed_folder_sync_state(folder));
+        print_folder_diagnostics(folder);
+    }
+    Ok(())
 }
 
 fn run_login(args: LoginArgs) -> Result<(), String> {
@@ -374,6 +408,9 @@ fn product_status() -> Result<(), String> {
     for folder in &config.shared_folders {
         let sync_state = managed_folder_sync_state(folder);
         println!("- {}: {} ({})", folder.name, folder.local_path, sync_state);
+        if sync_state == "needs attention" || sync_state == "sync status unknown" {
+            println!("  Run devbox doctor for details.");
+        }
     }
     Ok(())
 }
@@ -485,6 +522,37 @@ fn managed_folder_sync_state(folder: &ManagedFolder) -> String {
         },
         Err(_) => "sync status unknown".to_string(),
     }
+}
+
+fn print_folder_diagnostics(folder: &ManagedFolder) {
+    let path = Path::new(&folder.local_path);
+    if !path.exists() {
+        println!("  Folder check: missing on this machine");
+        return;
+    }
+    if !path.join(".loom").is_dir() {
+        println!("  Folder check: not linked here");
+        return;
+    }
+
+    match loom_daemon::read_status(path) {
+        Ok(status) => {
+            println!("  Live sync: {}", status.state);
+            if let Some(error) = status.last_error.as_deref() {
+                println!("  Last issue: {}", product_safe_reason_fragment(error));
+            }
+        }
+        Err(error) => {
+            println!(
+                "  Live sync: status unavailable ({})",
+                product_safe_reason_fragment(&error.to_string())
+            );
+        }
+    }
+    println!("  Loom diagnostics:");
+    println!("    loom doctor {}", path.display());
+    println!("    loom cache status {}", path.display());
+    println!("    loom remote check {}", path.display());
 }
 
 fn ensure_shared_folder(

@@ -18,6 +18,8 @@ a compatibility surface because developers use it today, but Git is not the foun
 trying to build.
 
 Start with [Loom And Devbox](devbox/loom-and-devbox.md) before reading older architecture slices.
+For current alpha proof, read [Alpha Readiness Evidence](evidence/alpha-readiness.md) and run
+`scripts/mvp-two-device-smoke`.
 
 For the intended full-scale repository and language split, read
 [Full-Scale Project Shape](architecture/full-scale-project-shape.md).

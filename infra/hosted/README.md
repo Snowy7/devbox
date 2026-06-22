@@ -13,6 +13,25 @@ devbox clone <name>
 
 `devbox-metadata` is still kept for legacy alpha metadata/object-access smoke paths.
 
+## Local Alpha Path
+
+Local alpha testing does not require Postgres or R2. Run `devbox-api` with in-memory metadata and
+the local file pack store, then use the product CLI:
+
+```bash
+DEVBOX_API_METADATA_MODE=memory devbox-api --root .devbox-api --bind 127.0.0.1:8787
+devbox login --api http://127.0.0.1:8787 --account local-dev --device-name "Desktop"
+devbox share ./source --no-background-sync
+
+DEVBOX_CONFIG_DIR=.devbox-laptop \
+  devbox login --api http://127.0.0.1:8787 --account local-dev --device-name "Laptop"
+DEVBOX_CONFIG_DIR=.devbox-laptop \
+  devbox clone source ./target --no-background-sync
+```
+
+The canonical local proof remains `scripts/mvp-two-device-smoke`, which automates this flow and
+adds Loom sparse/cache, secret-block, conflict refusal, and object hash validation evidence.
+
 ## Product API On Railway
 
 `devbox-api` stores sessions, devices, shared-folder registry, memberships, and cursors in

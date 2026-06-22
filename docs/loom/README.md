@@ -20,6 +20,17 @@ into the worktree. Use intent commands for day-to-day sparse folders:
 - free local space safely: `loom cache free-space --max-bytes <bytes> [folder]`
 - check hydration and health: `loom cache status [folder]`, `loom doctor [folder]`
 
+Short local try path:
+
+```text
+loom track ./source
+loom remote add local ./remote ./source
+loom sync ./source
+loom clone ./remote ./sparse-target --sparse
+loom cache warm ./sparse-target
+loom doctor ./sparse-target
+```
+
 `loom hydrate <path-or-folder>` still explicitly fetches and materializes a path or subtree. `loom
 evict <path-or-folder>` still removes clean local materialized bytes while keeping history. Pins
 protect paths from eviction and appear in cache status.
