@@ -92,6 +92,8 @@ non_empty_id!(PinId, "pin id");
 non_empty_id!(CursorId, "cursor id");
 non_empty_id!(SharedFolderId, "shared folder id");
 non_empty_id!(MachineId, "machine id");
+non_empty_id!(WorkspaceId, "workspace id");
+non_empty_id!(WorkspaceSessionId, "workspace session id");
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjectId(String);
@@ -621,6 +623,81 @@ impl SharedFolder {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceKind {
+    AgentVirtual,
+    MaterializedSandbox,
+    OsFilesystemMount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSessionState {
+    Open,
+    Closed,
+    Discarded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSession {
+    id: WorkspaceSessionId,
+    workspace_id: WorkspaceId,
+    shared_folder_id: SharedFolderId,
+    base_revision_id: FolderRevisionId,
+    kind: WorkspaceKind,
+    state: WorkspaceSessionState,
+    created_at: String,
+}
+
+impl WorkspaceSession {
+    pub fn new(
+        id: WorkspaceSessionId,
+        workspace_id: WorkspaceId,
+        shared_folder_id: SharedFolderId,
+        base_revision_id: FolderRevisionId,
+        kind: WorkspaceKind,
+        state: WorkspaceSessionState,
+        created_at: impl Into<String>,
+    ) -> Result<Self, LoomError> {
+        Ok(Self {
+            id,
+            workspace_id,
+            shared_folder_id,
+            base_revision_id,
+            kind,
+            state,
+            created_at: non_empty_message("workspace session created_at", created_at.into())?,
+        })
+    }
+
+    pub fn id(&self) -> &WorkspaceSessionId {
+        &self.id
+    }
+
+    pub fn workspace_id(&self) -> &WorkspaceId {
+        &self.workspace_id
+    }
+
+    pub fn shared_folder_id(&self) -> &SharedFolderId {
+        &self.shared_folder_id
+    }
+
+    pub fn base_revision_id(&self) -> &FolderRevisionId {
+        &self.base_revision_id
+    }
+
+    pub fn kind(&self) -> WorkspaceKind {
+        self.kind
+    }
+
+    pub fn state(&self) -> WorkspaceSessionState {
+        self.state
+    }
+
+    pub fn created_at(&self) -> &str {
+        &self.created_at
+    }
+}
+
 fn non_empty_message(kind: &'static str, value: String) -> Result<String, LoomError> {
     if value.trim().is_empty() {
         return Err(LoomError::EmptyMessage { kind });
@@ -868,5 +945,42 @@ mod tests {
             &FolderScope::Subtree(PathBuf::from("client/app"))
         );
         assert!(FolderScope::subtree("../escape").is_err());
+    }
+
+    #[test]
+    fn workspace_sessions_name_virtual_views_over_folder_revisions() {
+        let session = WorkspaceSession::new(
+            WorkspaceSessionId::new("agent-session-1").expect("session id"),
+            WorkspaceId::new("workspace-devbox").expect("workspace id"),
+            SharedFolderId::new("folder-devbox").expect("folder id"),
+            FolderRevisionId::new("revision-1").expect("revision id"),
+            WorkspaceKind::AgentVirtual,
+            WorkspaceSessionState::Open,
+            "2026-06-22T12:00:00Z",
+        )
+        .expect("workspace session creates");
+
+        assert_eq!(session.id().as_str(), "agent-session-1");
+        assert_eq!(session.workspace_id().as_str(), "workspace-devbox");
+        assert_eq!(session.shared_folder_id().as_str(), "folder-devbox");
+        assert_eq!(session.base_revision_id().as_str(), "revision-1");
+        assert_eq!(session.kind(), WorkspaceKind::AgentVirtual);
+        assert_eq!(session.state(), WorkspaceSessionState::Open);
+    }
+
+    #[test]
+    fn workspace_ids_reject_empty_values() {
+        assert_eq!(
+            WorkspaceId::new(""),
+            Err(LoomError::EmptyId {
+                kind: "workspace id"
+            })
+        );
+        assert_eq!(
+            WorkspaceSessionId::new(" "),
+            Err(LoomError::EmptyId {
+                kind: "workspace session id"
+            })
+        );
     }
 }

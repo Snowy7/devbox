@@ -23,6 +23,7 @@ fn help_lists_the_mvp_commands() {
         "evict",
         "pin",
         "cache",
+        "workspace",
     ] {
         assert!(stdout.contains(command), "{command} missing from help");
     }
@@ -217,6 +218,19 @@ fn command_help_prints_usage() {
     let stdout = stdout(&output);
     assert!(stdout.contains("Usage: loom checkpoint [FOLDER] -m <MESSAGE>"));
     assert!(stdout.contains("Status: implemented for the local offline engine"));
+}
+
+#[test]
+fn workspace_help_lists_agent_session_commands() {
+    let output = run_loom(["workspace", "--help"]);
+
+    assert_success(&output);
+    let stdout = stdout(&output);
+    assert!(stdout.contains("loom workspace open"));
+    assert!(stdout.contains("loom workspace read"));
+    assert!(stdout.contains("loom workspace write"));
+    assert!(stdout.contains("loom workspace checkpoint"));
+    assert!(stdout.contains("agent virtual sessions"));
 }
 
 #[test]
@@ -561,6 +575,162 @@ fn sparse_clone_hydrate_evict_pin_and_cache_status_control_materialization() {
             .expect("eager main reads"),
         "fn main() {}\n"
     );
+}
+
+#[test]
+fn workspace_agent_sessions_read_write_diff_checkpoint_and_isolate_overlays() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("README.md"), "hello workspace\n").expect("readme writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+    assert!(!target.join("README.md").exists());
+
+    let open_a = run_loom([
+        "workspace",
+        "open",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-a",
+    ]);
+    assert_success(&open_a);
+    assert!(stdout(&open_a).contains("Adapter: agent virtual"));
+    assert_success(&run_loom([
+        "workspace",
+        "open",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-b",
+    ]));
+
+    let read_a = run_loom([
+        "workspace",
+        "read",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-a",
+        "README.md",
+    ]);
+    assert_success(&read_a);
+    assert_eq!(stdout(&read_a), "hello workspace\n");
+    assert!(!target.join("README.md").exists());
+
+    assert_success(&run_loom([
+        "workspace",
+        "write",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-a",
+        "README.md",
+        "--text",
+        "agent A",
+    ]));
+    let read_a_overlay = run_loom([
+        "workspace",
+        "read",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-a",
+        "README.md",
+    ]);
+    assert_success(&read_a_overlay);
+    assert_eq!(stdout(&read_a_overlay), "agent A");
+
+    let read_b_base = run_loom([
+        "workspace",
+        "read",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-b",
+        "README.md",
+    ]);
+    assert_success(&read_b_base);
+    assert_eq!(stdout(&read_b_base), "hello workspace\n");
+
+    assert_success(&run_loom([
+        "workspace",
+        "write",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-b",
+        "README.md",
+        "--text",
+        "agent B",
+    ]));
+
+    let diff_a = run_loom([
+        "workspace",
+        "diff",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-a",
+    ]);
+    assert_success(&diff_a);
+    let diff_a_stdout = stdout(&diff_a);
+    assert!(diff_a_stdout.contains("Changes: 0 created, 1 modified"));
+    assert!(diff_a_stdout.contains("README.md"));
+
+    let checkpoint_a = run_loom([
+        "workspace",
+        "checkpoint",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-a",
+        "-m",
+        "agent A checkpoint",
+    ]);
+    assert_success(&checkpoint_a);
+    let checkpoint_stdout = stdout(&checkpoint_a);
+    assert!(checkpoint_stdout.contains("Boundary: sandbox-merge"));
+    assert!(checkpoint_stdout.contains("Overlay files: 1"));
+
+    assert_success(&run_loom([
+        "workspace",
+        "close",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-a",
+    ]));
+
+    let read_b_overlay = run_loom([
+        "workspace",
+        "read",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-b",
+        "README.md",
+    ]);
+    assert_success(&read_b_overlay);
+    assert_eq!(stdout(&read_b_overlay), "agent B");
+    assert_success(&run_loom([
+        "workspace",
+        "discard",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-b",
+    ]));
+
+    let history = run_loom(["history", target.to_str().expect("UTF-8 path")]);
+    assert_success(&history);
+    assert!(stdout(&history).contains("agent A checkpoint"));
+    assert!(!target.join("README.md").exists());
 }
 
 #[test]

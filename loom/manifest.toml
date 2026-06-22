@@ -19,6 +19,11 @@ path = "crates/loom-worktree"
 owns = ["shared-folder scanning", "materialization", "restore safety"]
 
 [[crate]]
+name = "loom-workspace"
+path = "crates/loom-workspace"
+owns = ["workspace adapter boundary", "agent virtual sessions", "session overlays"]
+
+[[crate]]
 name = "loom-pack"
 path = "crates/loom-pack"
 owns = ["pack format", "import", "export"]

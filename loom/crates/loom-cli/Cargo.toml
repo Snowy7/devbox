@@ -15,6 +15,7 @@ loom-core = { path = "../loom-core" }
 loom-daemon = { path = "../loom-daemon" }
 loom-store = { path = "../loom-store" }
 loom-sync = { path = "../loom-sync" }
+loom-workspace = { path = "../loom-workspace" }
 loom-worktree = { path = "../loom-worktree" }
 devbox-remote = { path = "../../../devbox/crates/devbox-remote" }
 

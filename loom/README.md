@@ -13,6 +13,7 @@ Loom owns:
 - checkpoints and pins
 - cursors
 - shared-folder worktree capture and restore
+- workspace adapters and virtual agent sessions
 - pack format and remote sync semantics
 - Git compatibility analysis
 

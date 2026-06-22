@@ -56,5 +56,43 @@ measured yet. `loom cache policy show` is diagnostic only: policy presets such a
 offline-pinned, low-disk, agent-sandbox, and ci-ephemeral are internal command presets, not normal
 user modes.
 
-This is explicit local materialization only. It does not add OS virtual filesystem support,
-background smart prefetch, compression, or full sparse/chunk transfer.
+## Workspace Adapters
+
+Workspace adapters expose a folder revision as a session view. PR 1 adds the agent virtual adapter:
+it reads from Loom metadata and object/cache state, keeps writes in a per-session overlay, and only
+turns overlay writes into Loom file versions and a folder revision when the session checkpoints.
+
+The command surface is under `loom workspace`:
+
+```text
+loom workspace open ./folder --session agent-1
+loom workspace read ./folder --session agent-1 README.md
+loom workspace write ./folder --session agent-1 README.md --text "changed in overlay"
+loom workspace diff ./folder --session agent-1
+loom workspace checkpoint ./folder --session agent-1 -m "agent checkpoint"
+loom workspace close ./folder --session agent-1
+```
+
+Agent virtual sessions do not require full local materialization. Reading a base file first checks
+the overlay, then the local object cache, and then lazily hydrates the object from the configured
+Loom remote if the object is remote-only. The read returns bytes to the session without writing the
+source file into the shared folder. `loom workspace hydrate` has the same virtual meaning: fetch
+object bytes into Loom's cache for that session view, not into the visible folder tree.
+
+Overlay writes are isolated by session under `.loom/workspaces/sessions/<session-id>`. Two sessions
+opened on the same folder revision can write the same path without seeing each other's overlay.
+`loom workspace diff` compares only the session overlay with the session's base folder revision.
+`loom workspace checkpoint` coalesces the overlay into normal Loom file versions and a
+`sandbox-merge` folder revision, then creates a checkpoint label. If another session has already
+advanced the folder revision, checkpointing a stale session is refused instead of silently reverting
+newer folder state.
+
+The agent virtual adapter returns explicit unsupported-operation errors for `loom workspace
+dehydrate` and `loom workspace pin`. Those capabilities belong to later adapters that can safely
+coordinate per-session views with shared cache retention or materialized folder policy.
+
+This is not OS filesystem mounting. The agent virtual adapter is a programmatic/CLI view over Loom
+metadata and object bytes. It does not intercept normal file opens, provide Finder/Explorer/FUSE
+integration, or make a shell see virtual files. Native Windows, macOS, and Linux filesystem adapters
+are later arc work. This PR also does not add just-bash execution, SDKs, compression, or full
+sparse/chunk transfer.
