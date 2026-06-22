@@ -29,6 +29,7 @@ use loom_worktree::{
 };
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -1219,7 +1220,10 @@ fn run_workspace_read(args: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?
     };
 
-    print!("{}", String::from_utf8_lossy(&bytes));
+    std::io::stdout()
+        .lock()
+        .write_all(&bytes)
+        .map_err(|error| format!("could not write workspace bytes to stdout: {error}"))?;
     Ok(())
 }
 

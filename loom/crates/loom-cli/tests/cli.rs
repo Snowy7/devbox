@@ -734,6 +734,53 @@ fn workspace_agent_sessions_read_write_diff_checkpoint_and_isolate_overlays() {
 }
 
 #[test]
+fn workspace_read_writes_binary_bytes_without_utf8_loss() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source");
+    let remote = dir.path().join("remote");
+    let target = dir.path().join("target");
+    let binary = vec![0x00, 0xff, 0x80, b'L', b'o', b'o', b'm', 0x00];
+    std::fs::create_dir_all(&source).expect("source creates");
+    std::fs::write(source.join("blob.bin"), &binary).expect("binary writes");
+
+    assert_success(&run_loom(["track", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "remote",
+        "add",
+        "local",
+        remote.to_str().expect("UTF-8 path"),
+        source.to_str().expect("UTF-8 path"),
+    ]));
+    assert_success(&run_loom(["sync", source.to_str().expect("UTF-8 path")]));
+    assert_success(&run_loom([
+        "clone",
+        remote.to_str().expect("UTF-8 path"),
+        target.to_str().expect("UTF-8 path"),
+        "--sparse",
+    ]));
+    assert_success(&run_loom([
+        "workspace",
+        "open",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-binary",
+    ]));
+
+    let read = run_loom([
+        "workspace",
+        "read",
+        target.to_str().expect("UTF-8 path"),
+        "--session",
+        "agent-binary",
+        "blob.bin",
+    ]);
+
+    assert_success(&read);
+    assert_eq!(read.stdout, binary);
+    assert!(!target.join("blob.bin").exists());
+}
+
+#[test]
 fn cache_status_prune_and_prefetch_keep_sparse_cache_bounded() {
     let dir = tempfile::tempdir().expect("temp dir");
     let source = dir.path().join("source");

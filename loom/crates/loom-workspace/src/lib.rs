@@ -12,6 +12,7 @@ use loom_core::{
 };
 use loom_store::{path_to_store_string, CoalescedRevision, LocalStore, StoreError};
 use loom_sync::{hydrate_object_from_remote, LoomRemote, SyncError};
+use loom_worktree::{evaluate_file_capture_policy, FileCapturePolicyDecision};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -674,6 +675,14 @@ impl<'a> AgentWorkspaceSession<'a> {
         Ok(())
     }
 
+    fn validate_overlay_capture_policy(&self) -> WorkspaceResult<()> {
+        for overlay in self.overlay.values() {
+            let bytes = self.read_overlay_file(overlay)?;
+            enforce_capture_policy(&overlay.path, &bytes)?;
+        }
+        Ok(())
+    }
+
     fn remove_session_dir(
         &self,
         state: WorkspaceSessionState,
@@ -746,6 +755,7 @@ impl<'a> WorkspaceView for AgentWorkspaceSession<'a> {
     fn write_file(&mut self, path: &Path, bytes: &[u8]) -> WorkspaceResult<()> {
         let path = normalize_relative_path(path, false)?;
         validate_overlay_write_target(&self.base_versions, &self.overlay, &path)?;
+        enforce_capture_policy(&path, bytes)?;
         let object = self.store.write_object_bytes(bytes)?;
         self.overlay.insert(
             path.clone(),
@@ -804,6 +814,7 @@ impl<'a> WorkspaceView for AgentWorkspaceSession<'a> {
         if message.trim().is_empty() {
             return Err(WorkspaceError::EmptyMessage("workspace checkpoint message"));
         }
+        self.validate_overlay_capture_policy()?;
         self.ensure_latest_is_base()?;
         let overlay_files = self.overlay.len();
         let versions = self.versions_with_overlay()?;
@@ -880,6 +891,14 @@ pub enum WorkspaceError {
         path: PathBuf,
         reason: String,
     },
+    PolicyIgnored {
+        path: PathBuf,
+        reason: String,
+    },
+    PolicyBlocked {
+        path: PathBuf,
+        reason: String,
+    },
     UnsupportedOperation {
         operation: &'static str,
         adapter: &'static str,
@@ -940,6 +959,12 @@ impl fmt::Display for WorkspaceError {
             Self::PathConflict { path, reason } => {
                 write!(f, "workspace path {} conflicts with the session view: {reason}", path.display())
             }
+            Self::PolicyIgnored { path, reason } => {
+                write!(f, "workspace write ignored for {}: {reason}", path.display())
+            }
+            Self::PolicyBlocked { path, reason } => {
+                write!(f, "workspace write blocked for {}: {reason}", path.display())
+            }
             Self::UnsupportedOperation { operation, adapter } => {
                 write!(f, "{operation} is not supported by {adapter}")
             }
@@ -984,6 +1009,8 @@ impl std::error::Error for WorkspaceError {
             | Self::NotAFile(_)
             | Self::ObjectUnavailable { .. }
             | Self::PathConflict { .. }
+            | Self::PolicyIgnored { .. }
+            | Self::PolicyBlocked { .. }
             | Self::UnsupportedOperation { .. }
             | Self::EmptyMessage(_)
             | Self::StaleBaseRevision { .. }
@@ -1046,6 +1073,18 @@ fn versions_for_revision(
         versions.insert(version.path().to_path_buf(), version.clone());
     }
     Ok(versions)
+}
+
+fn enforce_capture_policy(path: &Path, bytes: &[u8]) -> WorkspaceResult<()> {
+    match evaluate_file_capture_policy(path, bytes) {
+        FileCapturePolicyDecision::Capture => Ok(()),
+        FileCapturePolicyDecision::Ignore { path, reason } => {
+            Err(WorkspaceError::PolicyIgnored { path, reason })
+        }
+        FileCapturePolicyDecision::Block { path, reason } => {
+            Err(WorkspaceError::PolicyBlocked { path, reason })
+        }
+    }
 }
 
 fn validate_overlay_write_target(
@@ -1156,11 +1195,12 @@ fn generated_session_id(shared_folder_id: &str) -> WorkspaceSessionId {
 }
 
 fn validate_session_id(value: &str) -> WorkspaceResult<()> {
-    if value.trim().is_empty()
-        || value.contains('/')
-        || value.contains('\\')
-        || value.contains("..")
-    {
+    let mut components = Path::new(value).components();
+    let valid = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(component)), None) if component == std::ffi::OsStr::new(value)
+    );
+    if value.trim().is_empty() || !valid {
         return Err(WorkspaceError::InvalidSessionId(value.to_string()));
     }
     Ok(())
@@ -1640,6 +1680,104 @@ mod tests {
     }
 
     #[test]
+    fn workspace_write_blocks_secrets_before_object_cache_write() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id = Some(WorkspaceSessionId::new("agent-secret").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        let bytes = format!("OPENAI_API_KEY={raw_secret}\n");
+        let object_count_before = fixture.object_file_count();
+
+        let error = session
+            .write_file(Path::new("secrets.env"), bytes.as_bytes())
+            .expect_err("secret write is blocked");
+
+        assert!(matches!(error, WorkspaceError::PolicyBlocked { .. }));
+        assert_eq!(session.overlay_file_count(), 0);
+        assert_eq!(fixture.object_file_count(), object_count_before);
+        assert!(!fixture.object_cache_contains(raw_secret.as_bytes()));
+    }
+
+    #[test]
+    fn workspace_write_ignores_generated_folder_paths_before_object_cache_write() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id = Some(WorkspaceSessionId::new("agent-generated").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+        let object_count_before = fixture.object_file_count();
+
+        let error = session
+            .write_file(
+                Path::new("node_modules/pkg/index.js"),
+                b"module.exports = true;\n",
+            )
+            .expect_err("generated folder path is ignored");
+
+        assert!(matches!(
+            error,
+            WorkspaceError::PolicyIgnored { path, .. } if path == Path::new("node_modules")
+        ));
+        assert_eq!(session.overlay_file_count(), 0);
+        assert_eq!(fixture.object_file_count(), object_count_before);
+    }
+
+    #[test]
+    fn checkpoint_revalidates_existing_overlay_policy() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut request = WorkspaceSessionRequest::new();
+        request.session_id = Some(WorkspaceSessionId::new("agent-legacy").expect("session id"));
+        let mut session = adapter.create_session(request).expect("session creates");
+        let raw_secret = ["sk-", "abcdefghijklmnopqrstuvwxyzABCDEFGH123456"].concat();
+        let bytes = format!("OPENAI_API_KEY={raw_secret}\n");
+        let object = fixture
+            .store
+            .write_object_bytes(bytes.as_bytes())
+            .expect("legacy overlay object writes");
+        session.overlay.insert(
+            PathBuf::from("secrets.env"),
+            OverlayFile {
+                path: PathBuf::from("secrets.env"),
+                object_id: object.id().clone(),
+                size_bytes: object.size_bytes(),
+            },
+        );
+
+        let error = session
+            .checkpoint_overlay("legacy overlay")
+            .expect_err("checkpoint revalidates policy");
+
+        assert!(matches!(error, WorkspaceError::PolicyBlocked { .. }));
+    }
+
+    #[test]
+    fn session_ids_must_be_single_safe_path_components() {
+        let fixture = LocalFixture::new();
+        let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
+        let mut good_request = WorkspaceSessionRequest::new();
+        good_request.session_id = Some(WorkspaceSessionId::new("agent-safe").expect("session id"));
+        let good_session = adapter
+            .create_session(good_request)
+            .expect("safe session creates");
+
+        for value in [".", "..", "nested/session", "nested\\session", "a/."] {
+            let mut request = WorkspaceSessionRequest::new();
+            request.session_id = Some(WorkspaceSessionId::new(value).expect("session id"));
+            let result = adapter.create_session(request);
+            assert!(matches!(result, Err(WorkspaceError::InvalidSessionId(_))));
+        }
+
+        assert!(adapter
+            .open_session(good_session.session().id())
+            .expect("safe sibling session still opens")
+            .discard()
+            .is_ok());
+    }
+
+    #[test]
     fn checkpoint_refuses_stale_base_revision() {
         let fixture = LocalFixture::new();
         let adapter = AgentWorkspaceAdapter::new(fixture.store.clone());
@@ -1703,6 +1841,31 @@ mod tests {
                 .expect("revision creates");
 
             Self { _dir: dir, store }
+        }
+
+        fn object_file_count(&self) -> usize {
+            count_files(&self.store.store_root().join("objects"))
+        }
+
+        fn object_cache_contains(&self, needle: &[u8]) -> bool {
+            let objects = self.store.store_root().join("objects");
+            let mut stack = vec![objects];
+            while let Some(path) = stack.pop() {
+                for entry in fs::read_dir(path).expect("directory reads") {
+                    let entry = entry.expect("entry reads");
+                    let entry_path = entry.path();
+                    if entry_path.is_dir() {
+                        stack.push(entry_path);
+                    } else {
+                        let bytes = fs::read(&entry_path).expect("object bytes read");
+                        if bytes.windows(needle.len()).any(|window| window == needle) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            false
         }
     }
 
@@ -1774,6 +1937,25 @@ mod tests {
             .iter()
             .map(|path| path_to_store_string(path))
             .collect()
+    }
+
+    fn count_files(path: &Path) -> usize {
+        let mut count = 0;
+        let mut stack = vec![path.to_path_buf()];
+
+        while let Some(path) = stack.pop() {
+            for entry in fs::read_dir(path).expect("directory reads") {
+                let entry = entry.expect("directory entry reads");
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    stack.push(entry_path);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+
+        count
     }
 
     #[test]
