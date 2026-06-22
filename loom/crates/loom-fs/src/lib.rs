@@ -275,12 +275,16 @@ impl FsMountRecord {
 
     fn active_for(&self, adapter_kind: FsAdapterKind, mount_path: &Path) -> bool {
         self.adapter_kind == adapter_kind
-            && self.mount_path == mount_path
+            && self.has_mount_path_identity(mount_path)
             && self.state == FsMountState::Mounted
     }
 
     fn same_mount_path(&self, mount_path: &Path) -> bool {
-        self.mount_path == mount_path && self.state == FsMountState::Mounted
+        self.has_mount_path_identity(mount_path) && self.state == FsMountState::Mounted
+    }
+
+    fn has_mount_path_identity(&self, mount_path: &Path) -> bool {
+        mount_path_identity_key(&self.mount_path) == mount_path_identity_key(mount_path)
     }
 }
 
@@ -644,8 +648,10 @@ impl FilesystemAdapter for LocalDevFilesystemAdapter {
         }
 
         let now = current_timestamp();
+        let mount_key = mount_path_identity_key(&mount_path);
         let replacement = records.iter().position(|record| {
-            record.adapter_kind == self.kind() && record.mount_path == mount_path
+            record.adapter_kind == self.kind()
+                && mount_path_identity_key(record.mount_path()) == mount_key
         });
         let record = match replacement {
             Some(index) => {
@@ -996,7 +1002,7 @@ fn records_for_status(
         .into_iter()
         .filter(|record| record.adapter_kind == adapter_kind)
         .filter(|record| match mount_path.as_deref() {
-            Some(path) => record.mount_path == path,
+            Some(path) => record.has_mount_path_identity(path),
             None => true,
         })
         .collect::<Vec<_>>();
@@ -1144,10 +1150,19 @@ fn normalize_components(path: &Path) -> PathBuf {
     normalized
 }
 
+fn mount_path_identity_key(path: &Path) -> String {
+    let normalized = normalize_components(path);
+    if cfg!(windows) {
+        windows_path_key(&normalized)
+    } else {
+        normalized.to_string_lossy().into_owned()
+    }
+}
+
 fn same_or_child_path(candidate: &Path, parent: &Path) -> bool {
     if cfg!(windows) {
-        let candidate = windows_path_key(candidate);
-        let parent = windows_path_key(parent);
+        let candidate = mount_path_identity_key(candidate);
+        let parent = mount_path_identity_key(parent);
         candidate == parent || candidate.starts_with(&format!("{parent}\\"))
     } else {
         candidate == parent || candidate.starts_with(parent)
@@ -1342,6 +1357,53 @@ mod tests {
         assert!(!first.already_mounted());
         assert!(second.already_mounted());
         assert_eq!(first.record().mount_id(), second.record().mount_id());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_mount_identity_is_case_insensitive_for_status_and_unmount() {
+        let fixture = TestFolder::new();
+        fixture.write("README.md", "hello\n");
+        fixture.capture_latest();
+        let mount_path = fixture.dir.path().join("Mount-View");
+        let uppercase_path = PathBuf::from(mount_path.to_string_lossy().to_ascii_uppercase());
+        let lowercase_path = PathBuf::from(mount_path.to_string_lossy().to_ascii_lowercase());
+        let adapter = LocalDevFilesystemAdapter::new();
+
+        let first = adapter
+            .mount(&fixture.store, FsMountRequest::new(&uppercase_path))
+            .expect("first case variant records mount");
+        let second = adapter
+            .mount(&fixture.store, FsMountRequest::new(&lowercase_path))
+            .expect("second case variant reuses active mount");
+
+        assert!(!first.already_mounted());
+        assert!(second.already_mounted());
+        assert_eq!(first.record().mount_id(), second.record().mount_id());
+
+        let all_status = adapter
+            .status(&fixture.store, FsStatusRequest::all())
+            .expect("status reads all records");
+        assert_eq!(all_status.records().len(), 1);
+        assert_eq!(all_status.records()[0].state(), FsMountState::Mounted);
+
+        let filtered_status = adapter
+            .status(
+                &fixture.store,
+                FsStatusRequest::for_mount_path(&lowercase_path),
+            )
+            .expect("status lower-case path finds record");
+        assert_eq!(filtered_status.records().len(), 1);
+
+        let first_unmount = adapter
+            .unmount(&fixture.store, FsUnmountRequest::new(&lowercase_path))
+            .expect("unmount lower-case path finds active record");
+        let second_unmount = adapter
+            .unmount(&fixture.store, FsUnmountRequest::new(&uppercase_path))
+            .expect("unmount upper-case path sees record already inactive");
+
+        assert!(first_unmount.changed());
+        assert!(!second_unmount.changed());
     }
 
     #[test]

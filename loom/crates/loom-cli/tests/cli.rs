@@ -1254,6 +1254,89 @@ fn fs_local_dev_mount_status_and_idempotent_unmount_are_truthful() {
     assert!(stdout(&second_unmount).contains("Unmount: already unmounted"));
 }
 
+#[cfg(windows)]
+#[test]
+fn fs_windows_local_dev_mount_identity_is_case_insensitive() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("fixture");
+    let mount_path = dir.path().join("Mount-View");
+    let uppercase_path = mount_path.to_string_lossy().to_ascii_uppercase();
+    let lowercase_path = mount_path.to_string_lossy().to_ascii_lowercase();
+    std::fs::create_dir_all(&fixture).expect("fixture creates");
+    std::fs::write(fixture.join("README.md"), "hello fs\n").expect("readme writes");
+    assert_success(&run_loom(["track", fixture.to_str().expect("UTF-8 path")]));
+
+    let first_mount = run_loom([
+        "fs",
+        "mount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &uppercase_path,
+    ]);
+    assert_success(&first_mount);
+    assert!(stdout(&first_mount).contains("Mount: recorded"));
+
+    let second_mount = run_loom([
+        "fs",
+        "mount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &lowercase_path,
+    ]);
+    assert_success(&second_mount);
+    assert!(stdout(&second_mount).contains("Mount: already recorded"));
+
+    let status = run_loom([
+        "fs",
+        "status",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+    ]);
+    assert_success(&status);
+    assert_eq!(stdout(&status).matches("state=mounted").count(), 1);
+
+    let filtered_status = run_loom([
+        "fs",
+        "status",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &lowercase_path,
+    ]);
+    assert_success(&filtered_status);
+    assert_eq!(stdout(&filtered_status).matches("state=mounted").count(), 1);
+
+    let first_unmount = run_loom([
+        "fs",
+        "unmount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &lowercase_path,
+    ]);
+    assert_success(&first_unmount);
+    assert!(stdout(&first_unmount).contains("Unmount: recorded"));
+
+    let second_unmount = run_loom([
+        "fs",
+        "unmount",
+        fixture.to_str().expect("UTF-8 path"),
+        "--adapter",
+        "local-dev",
+        "--mount",
+        &uppercase_path,
+    ]);
+    assert_success(&second_unmount);
+    assert!(stdout(&second_unmount).contains("Unmount: already unmounted"));
+}
+
 #[test]
 fn fs_native_mount_fails_closed_without_recording_success() {
     let dir = tempfile::tempdir().expect("temp dir");
