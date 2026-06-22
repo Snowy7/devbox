@@ -63,6 +63,19 @@ Users should be able to inspect and restore automatic folder revisions even when
 created. Retention can prune noisy automatic history, but checkpoints and pins should survive longer
 by default.
 
+## Trust And Inspection
+
+Loom owns the trust primitive; Devbox may wrap it in product language.
+
+- `loom doctor [FOLDER]` is the broad report-only health check for a shared folder.
+- `loom fsck [FOLDER]` verifies local metadata references, object hashes, and cache-entry consistency.
+- `loom object verify [FOLDER]` focuses on local object/cache integrity.
+- `loom remote check [FOLDER]` proves the configured remote cursor and referenced object bytes are
+  available.
+
+These commands should stay deterministic and conservative. They can tell a user what is corrupt,
+missing, remote-only, or unsafe, but they should not perform risky automatic repair.
+
 ## Git
 
 Git is supported because developers use Git.
@@ -114,3 +127,8 @@ The old alpha compatibility crates live under `devbox/crates/` too, so the exist
 sync, metadata, and desktop smoke paths remain available while Loom becomes the place where
 folder-state decisions move over time. Old alpha docs and commands that still say `project` or
 `snapshot` are compatibility surfaces, not the model for new work.
+
+Future FUSE, File Provider, Cloud Files, or similar integrations belong outside the core as adapters.
+They should present Loom hydration state to the OS and call Loom primitives for hydrate, evict, and
+cache inspection. Likewise, local filesystem storage, Devbox hosted storage, and later S3/R2/MinIO or
+self-hosted storage are backend choices behind Loom's remote boundary, not separate product models.

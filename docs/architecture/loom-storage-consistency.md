@@ -53,6 +53,13 @@ future sparse filesystem or remote protocol.
 
 - Object ids are BLAKE3 content hashes. Local object import recomputes the hash and rejects mismatched
   bytes.
+- `loom fsck [FOLDER]` verifies local metadata references, revision/file-version links, checkpoint
+  and pin targets, cache-entry hydration state, and local object-byte hashes.
+- `loom object verify [FOLDER]` is the narrow object/cache integrity view over the same verifier.
+- `loom remote check [FOLDER]` reads the configured remote cursor, checks that the cursor pack is
+  readable, and proves every locally referenced object is available through the remote backend.
+- `loom doctor [FOLDER]` combines local verification, worktree policy surfacing, and remote
+  availability when a remote is configured. It is report-only and does not attempt automatic repair.
 - Hosted object upload also recomputes the object hash at the API boundary. A request whose path
   object id does not match the body is rejected and the object is not persisted.
 - Pack decoding validates row shape, object payload availability, and object payload size. The current
@@ -70,10 +77,15 @@ future sparse filesystem or remote protocol.
 
 - Sparse clone is metadata-only, not an OS virtual filesystem. Missing files do not hydrate
   transparently on open.
+- Future FUSE, File Provider, Cloud Files, or similar support is an adapter over Loom folder
+  revisions, file versions, object bytes, cache entries, and hydration state. It must not become the
+  source of truth for folder history.
 - Chunk vocabulary exists for future sparse transfer, but this implementation moves whole object bytes.
 - Remote-only metadata is not enough to work offline. A path must be hydrated while online before
   offline use. Pin it after hydration only when the local bytes should be protected from later
   eviction.
+- Repair remains intentionally conservative. The current inspection commands report corruption and
+  missing availability; they do not rewrite metadata, discard objects, or advance cursors.
 - Pinning protects local eviction; it is not a remote legal-hold or team retention policy.
 - Conflict refusal does not resolve conflicts. Users still need a manual recovery path after divergent
   folder state.
@@ -81,6 +93,21 @@ future sparse filesystem or remote protocol.
   product share-token UX.
 - The local-fs remote and local `devbox-api` smoke path do not prove live R2, Postgres, multiregion
   durability, compression, signed packs, or automatic object repair.
+
+## Adapter And Backend Boundary
+
+Loom remains folder/revision-first:
+
+- Core state is local metadata, object bytes, cache entries, file versions, folder revisions,
+  checkpoints, pins, and cursors.
+- A mount layer may present remote-only files as placeholders later, but it is an adapter that calls
+  Loom hydrate/evict/cache primitives.
+- Backend implementations are pluggable behind the remote trait. The current boundaries are
+  `local-fs` and Devbox hosted storage. S3, R2, MinIO, or self-hosted object/metadata services are
+  backend choices, not changes to the Loom storage model.
+- Cache metadata is separate from mounted paths. A cache entry records local byte availability for an
+  object; a future virtual filesystem must keep that metadata consistent instead of inventing a
+  second availability source.
 
 ## Evidence Path
 

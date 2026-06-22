@@ -6,12 +6,12 @@ use loom_core::{FileKind, FileVersion, RevisionBoundary};
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
 use loom_store::{
     path_to_store_string, revision_boundary_to_store, CoalescedRevision, LocalStore, RemoteConfig,
-    ResolvedRevisionTarget,
+    ResolvedRevisionTarget, StoreVerificationReport, VerificationLevel,
 };
 use loom_sync::{
-    hydrate_object_from_remote, import_pack_from_remote, import_pack_metadata_only_from_remote,
-    sync_store_to_remote, LocalFilesystemRemote, LoomRemote, DEFAULT_REMOTE_NAME,
-    LOCAL_FILESYSTEM_REMOTE_KIND,
+    check_remote_availability, hydrate_object_from_remote, import_pack_from_remote,
+    import_pack_metadata_only_from_remote, sync_store_to_remote, LocalFilesystemRemote, LoomRemote,
+    RemoteCheckReport, DEFAULT_REMOTE_NAME, LOCAL_FILESYSTEM_REMOTE_KIND,
 };
 use loom_worktree::{
     cache_status_for_scope, diff_revision_to_capture, evaluate_directory_policy, evict_versions,
@@ -36,6 +36,27 @@ struct CommandSpec {
 }
 
 const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "doctor",
+        usage: "loom doctor [FOLDER]",
+        summary: "Inspect local and remote Loom health",
+        implemented: true,
+        planned_behavior: "run report-only metadata, object, cache, policy, and remote checks",
+    },
+    CommandSpec {
+        name: "fsck",
+        usage: "loom fsck [FOLDER]",
+        summary: "Verify local Loom metadata and object integrity",
+        implemented: true,
+        planned_behavior: "report invalid local metadata references, object bytes, and cache state",
+    },
+    CommandSpec {
+        name: "object",
+        usage: "loom object verify [FOLDER]",
+        summary: "Verify local Loom object bytes",
+        implemented: true,
+        planned_behavior: "hash local object bytes and compare them to content object ids",
+    },
     CommandSpec {
         name: "track",
         usage: "loom track <FOLDER>",
@@ -81,10 +102,10 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "remote",
-        usage: "loom remote add <NAME> <LOCAL_PATH|DEVBOX_API_URL> [FOLDER]",
+        usage: "loom remote add <NAME> <LOCAL_PATH|DEVBOX_API_URL> [FOLDER]\n       loom remote check [FOLDER]",
         summary: "Configure a Loom remote endpoint",
         implemented: true,
-        planned_behavior: "remember a named Loom folder-state endpoint",
+        planned_behavior: "remember and inspect a named Loom folder-state endpoint",
     },
     CommandSpec {
         name: "sync",
@@ -167,6 +188,9 @@ fn run(args: Vec<String>) -> ExitCode {
 
 fn run_command(command: &CommandSpec, args: &[String]) -> ExitCode {
     match command.name {
+        "doctor" => result_to_exit(run_doctor(args)),
+        "fsck" => result_to_exit(run_fsck(args)),
+        "object" => result_to_exit(run_object(args)),
         "track" => result_to_exit(run_track(args)),
         "status" => result_to_exit(run_status(args)),
         "history" => result_to_exit(run_history(args)),
@@ -185,6 +209,102 @@ fn run_command(command: &CommandSpec, args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+fn run_doctor(args: &[String]) -> Result<(), String> {
+    let store = open_existing_store(args)?;
+    let local_report = store
+        .verify_integrity()
+        .map_err(|error| error.to_string())?;
+    let mut failed = local_report.has_errors();
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Doctor:");
+    print_store_verification_report(&local_report);
+
+    let capture = capture_worktree(&store, RevisionBoundary::LoomCommand)?;
+    println!(
+        "Worktree policy: {} ignored, {} secret-blocked, {} deferred",
+        capture.summary().ignored_entries(),
+        capture.summary().blocked_secret_files(),
+        capture.summary().deferred_entries()
+    );
+    if !capture.blocked().is_empty() || !capture.deferred().is_empty() {
+        failed = true;
+        print_notices("Blocked", capture.blocked());
+        print_notices("Deferred", capture.deferred());
+    }
+
+    match preferred_remote_for_check(&store) {
+        Ok(remote_config) => {
+            let remote = remote_from_config(&remote_config)?;
+            let remote_report = check_remote_availability(&store, remote.as_ref())
+                .map_err(|error| error.to_string())?;
+            print_remote_check_report(&remote_config, &remote_report);
+            failed |= remote_report.has_errors();
+        }
+        Err(_) => {
+            println!("Remote: not configured");
+            println!("Remote check: skipped");
+        }
+    }
+
+    if failed {
+        println!("Status: failed");
+        return Err("doctor found Loom integrity problems".to_string());
+    }
+    if local_report.warning_count() > 0 {
+        println!("Status: warnings");
+    } else {
+        println!("Status: healthy");
+    }
+    Ok(())
+}
+
+fn run_fsck(args: &[String]) -> Result<(), String> {
+    let store = open_existing_store(args)?;
+    let report = store
+        .verify_integrity()
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("FSCK:");
+    print_store_verification_report(&report);
+    if report.has_errors() {
+        return Err("fsck found Loom integrity problems".to_string());
+    }
+    Ok(())
+}
+
+fn run_object(args: &[String]) -> Result<(), String> {
+    match args {
+        [subcommand] if subcommand == "verify" => run_object_verify(None),
+        [subcommand, folder] if subcommand == "verify" => {
+            run_object_verify(Some(PathBuf::from(folder)))
+        }
+        _ => {
+            Err("object command requires 'verify'\nUsage: loom object verify [FOLDER]".to_string())
+        }
+    }
+}
+
+fn run_object_verify(folder: Option<PathBuf>) -> Result<(), String> {
+    let store = open_store_from_optional_folder(folder)?;
+    let report = store
+        .verify_integrity()
+        .map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    println!("Object verification:");
+    println!(
+        "  checked local objects: {}",
+        report.checked_local_objects()
+    );
+    print_store_issues(&report);
+    if report.has_errors() {
+        return Err("object verification found Loom integrity problems".to_string());
+    }
+    Ok(())
 }
 
 fn run_track(args: &[String]) -> Result<(), String> {
@@ -375,8 +495,10 @@ fn run_remote(args: &[String]) -> Result<(), String> {
         [subcommand, name, location, folder] if subcommand == "add" => {
             run_remote_add(name, location, Some(PathBuf::from(folder)))
         }
+        [subcommand] if subcommand == "check" => run_remote_check(None),
+        [subcommand, folder] if subcommand == "check" => run_remote_check(Some(PathBuf::from(folder))),
         _ => Err(
-            "remote command requires 'add <NAME> <LOCAL_PATH> [FOLDER]'\nUsage: loom remote add <NAME> <LOCAL_PATH> [FOLDER]"
+            "remote command requires 'add <NAME> <LOCAL_PATH> [FOLDER]' or 'check [FOLDER]'\nUsage: loom remote add <NAME> <LOCAL_PATH> [FOLDER]\n       loom remote check [FOLDER]"
                 .to_string(),
         ),
     }
@@ -418,6 +540,21 @@ fn run_remote_add(name: &str, location: &str, folder: Option<PathBuf>) -> Result
     println!("Remote: {name}");
     println!("Kind: {kind}");
     println!("Location: {display_location}");
+    Ok(())
+}
+
+fn run_remote_check(folder: Option<PathBuf>) -> Result<(), String> {
+    let store = open_store_from_optional_folder(folder)?;
+    let remote_config = preferred_remote_for_check(&store)?;
+    let remote = remote_from_config(&remote_config)?;
+    let report =
+        check_remote_availability(&store, remote.as_ref()).map_err(|error| error.to_string())?;
+
+    println!("Folder: {}", store.folder_root().display());
+    print_remote_check_report(&remote_config, &report);
+    if report.has_errors() {
+        return Err("remote check found Loom availability problems".to_string());
+    }
     Ok(())
 }
 
@@ -1010,6 +1147,65 @@ fn print_notices(label: &str, notices: &[loom_worktree::CaptureNotice]) {
     }
 }
 
+fn print_store_verification_report(report: &StoreVerificationReport) {
+    println!("  file versions: {}", report.checked_file_versions());
+    println!("  folder revisions: {}", report.checked_revisions());
+    println!("  cache entries: {}", report.checked_cache_entries());
+    println!("  local objects: {}", report.checked_local_objects());
+    println!(
+        "  issues: {} errors, {} warnings",
+        report.error_count(),
+        report.warning_count()
+    );
+    print_store_issues(report);
+}
+
+fn print_store_issues(report: &StoreVerificationReport) {
+    for issue in report.issues() {
+        let level = match issue.level() {
+            VerificationLevel::Error => "ERROR",
+            VerificationLevel::Warning => "WARN",
+        };
+        println!("  {level} {}: {}", issue.code(), issue.message());
+    }
+}
+
+fn print_remote_check_report(config: &RemoteConfig, report: &RemoteCheckReport) {
+    println!("Remote: {}", config.name());
+    println!("  kind: {}", config.kind());
+    println!("  location: {}", config.location());
+    println!(
+        "  cursor: {}",
+        report
+            .remote_cursor
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!("  cursor known locally: {}", report.cursor_known_locally);
+    println!("  cursor pack present: {}", report.cursor_pack_present);
+    println!(
+        "  cursor pack matches cursor: {}",
+        report.cursor_pack_matches_cursor
+    );
+    println!("  checked objects: {}", report.checked_objects);
+    println!("  missing objects: {}", report.missing_objects.len());
+    for object_id in report.missing_objects.iter().take(20) {
+        println!("  ERROR missing-remote-object: object {object_id} is not available remotely");
+    }
+    if !report.cursor_pack_present {
+        println!("  ERROR missing-remote-pack: remote cursor pack is not readable");
+    }
+    if !report.cursor_pack_matches_cursor {
+        println!(
+            "  ERROR remote-cursor-pack-mismatch: remote cursor does not match decoded pack manifest"
+        );
+    }
+    if !report.cursor_known_locally {
+        println!("  ERROR remote-cursor-unknown-locally: remote cursor is not in local history");
+    }
+}
+
 fn required_folder_arg(command: &str, args: &[String]) -> Result<PathBuf, String> {
     match args {
         [folder] => Ok(PathBuf::from(folder)),
@@ -1134,6 +1330,14 @@ fn preferred_remote(store: &LocalStore) -> Result<RemoteConfig, String> {
             "no Loom remote configured; sparse hydration needs a remote with object bytes"
                 .to_string()
         })
+}
+
+fn preferred_remote_for_check(store: &LocalStore) -> Result<RemoteConfig, String> {
+    store
+        .remote(DEFAULT_REMOTE_NAME)
+        .map_err(|error| error.to_string())?
+        .or_else(|| store.remotes().ok().and_then(|mut remotes| remotes.pop()))
+        .ok_or_else(|| "no Loom remote configured; run 'loom remote add' first".to_string())
 }
 
 fn fetch_missing_objects(store: &LocalStore, versions: &[FileVersion]) -> Result<usize, String> {
@@ -1689,6 +1893,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "doctor",
+                "fsck",
+                "object",
                 "track",
                 "status",
                 "history",
