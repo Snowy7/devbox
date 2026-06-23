@@ -272,24 +272,27 @@ fn local_dev_direct_login_refuses_non_loopback_api_by_default() {
     let dir = tempfile::tempdir().expect("temp dir");
     let config = dir.path().join("config");
 
-    let login = run_devbox_with_env(
-        [("DEVBOX_CONFIG_DIR", path_str(&config))],
-        [
-            "login",
-            "--local-dev-direct",
-            "--api",
-            "https://api.devbox.example",
-            "--account",
-            "alice",
-            "--device-name",
-            "Desk",
-        ],
-    );
+    for api in ["https://api.devbox.example", "https://127.evil.example"] {
+        let login = run_devbox_with_env(
+            [("DEVBOX_CONFIG_DIR", path_str(&config))],
+            [
+                "login",
+                "--local-dev-direct",
+                "--api",
+                api,
+                "--account",
+                "alice",
+                "--device-name",
+                "Desk",
+            ],
+        );
 
-    assert_failure(&login);
-    let stderr = stderr(&login);
-    assert!(stderr.contains("--local-dev-direct is local-dev only"));
-    assert!(stderr.contains("loopback --api URL"));
+        assert_failure(&login);
+        let stderr = stderr(&login);
+        assert!(stderr.contains("--local-dev-direct is local-dev only"));
+        assert!(stderr.contains("loopback --api URL"));
+        assert!(!stderr.contains("could not reach Devbox"));
+    }
 }
 
 #[test]

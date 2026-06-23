@@ -17,6 +17,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -1988,7 +1989,9 @@ fn is_loopback_api_url(api: &str) -> bool {
     }
     .to_ascii_lowercase();
 
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    host.parse::<IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or_else(|_| host == "localhost" || host == "localhost.")
 }
 
 fn env_flag_enabled(name: &str) -> bool {
