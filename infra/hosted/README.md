@@ -6,7 +6,7 @@ Current container entrypoints:
 
 - `bindhub-api.Dockerfile`: Rust product API.
 - `web.Dockerfile`: TanStack Start dashboard server. Runtime env is read from container env.
-- `site.Dockerfile`: Astro static site/docs server. No secrets required today.
+- `site.Dockerfile`: Astro static site/docs server. Public dashboard links are read from runtime env.
 
 Railway services must use explicit service config files. Do not put a root `railway.toml` back in
 the repo unless the repo goes back to one Railway service; Railway will auto-apply a root config to
@@ -135,7 +135,8 @@ Railway setup:
 
 1. Create a Railway service for the dashboard.
 2. Set the Railway config file path to `/infra/hosted/railway-web.toml`.
-3. Set the WorkOS and hosted API env vars on this dashboard service.
+3. Set the WorkOS and hosted API env vars on this dashboard service. `BINDHUB_HOSTED_API_URL` and
+   `BINDHUB_HOSTED_API_SERVICE_TOKEN` are server-only runtime values.
 
 ## Site Container
 
@@ -155,7 +156,8 @@ Railway setup:
 
 1. Create a Railway service for the public site/docs.
 2. Set the Railway config file path to `/infra/hosted/railway-site.toml`.
-3. Set `PUBLIC_BINDHUB_DASHBOARD_URL` when the dashboard lives on a separate domain.
+3. Set `PUBLIC_BINDHUB_DASHBOARD_URL` when the dashboard lives on a separate domain. The site
+   server applies this value at runtime while serving HTML.
 
 ## Legacy Metadata API
 

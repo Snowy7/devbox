@@ -2,8 +2,14 @@
 import SiteShell from "../components/SiteShell.astro"
 import HeroOrbit from "../components/HeroOrbit.astro"
 
-const dashboardBaseUrl = (import.meta.env.PUBLIC_BINDHUB_DASHBOARD_URL ?? "").replace(/\/$/, "")
-const dashboardUrl = dashboardBaseUrl || "/"
+const dashboardBaseUrl = (
+  import.meta.env.PUBLIC_BINDHUB_DASHBOARD_URL ??
+  (import.meta.env.DEV ? "http://localhost:3000" : "__BINDHUB_DASHBOARD_URL__")
+).replace(/\/$/, "")
+const dashboardUrl =
+  dashboardBaseUrl === "__BINDHUB_DASHBOARD_URL__"
+    ? "__BINDHUB_DASHBOARD_URL__"
+    : dashboardBaseUrl || "/"
 ---
 
 <SiteShell

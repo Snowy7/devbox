@@ -12,9 +12,19 @@ const { title, description, canonicalPath = Astro.url.pathname } = Astro.props
 const pageTitle = title === "Bindhub" ? "Bindhub" : `${title} | Bindhub`
 const canonicalUrl = new URL(canonicalPath, Astro.url.origin)
 const ogImageUrl = new URL("/bindhub-folder-continuity.png", Astro.url.origin)
-const dashboardBaseUrl = (import.meta.env.PUBLIC_BINDHUB_DASHBOARD_URL ?? "").replace(/\/$/, "")
-const dashboardUrl = dashboardBaseUrl || "/"
-const dashboardSignInUrl = dashboardBaseUrl ? `${dashboardBaseUrl}/auth/sign-in` : "/auth/sign-in"
+const dashboardBaseUrl = (
+  import.meta.env.PUBLIC_BINDHUB_DASHBOARD_URL ??
+  (import.meta.env.DEV ? "http://localhost:3000" : "__BINDHUB_DASHBOARD_URL__")
+).replace(/\/$/, "")
+const usesRuntimeDashboardUrl = dashboardBaseUrl === "__BINDHUB_DASHBOARD_URL__"
+const dashboardUrl = usesRuntimeDashboardUrl
+  ? "__BINDHUB_DASHBOARD_URL__"
+  : dashboardBaseUrl || "/"
+const dashboardSignInUrl = usesRuntimeDashboardUrl
+  ? "__BINDHUB_DASHBOARD_SIGN_IN_URL__"
+  : dashboardBaseUrl
+    ? `${dashboardBaseUrl}/auth/sign-in`
+    : "/auth/sign-in"
 ---
 
 <!doctype html>

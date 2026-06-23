@@ -203,7 +203,9 @@ docker run --rm -p 3001:3001 --env-file bindhub/.env.local -e PORT=3001 bindhub-
 ```
 
 The dashboard image does not bake secrets into the image. `WORKOS_*`, `BINDHUB_*`, and `PORT` are
-read from the container environment at runtime. The site image currently requires no secrets.
+read from the container environment at runtime. `BINDHUB_HOSTED_API_URL` and
+`BINDHUB_HOSTED_API_SERVICE_TOKEN` are server-only dashboard values; browser bundles must not
+contain them.
 
 Dashboard hosted env:
 
@@ -238,8 +240,10 @@ Site hosted env:
 PUBLIC_BINDHUB_DASHBOARD_URL=https://app-staging.bindhub.com
 ```
 
-This is public and build-time only. It drives the static site's dashboard/sign-in
-links when the landing/docs site and dashboard are separate services.
+This is public. In the Docker/hosted path, the site server applies it at runtime when serving HTML,
+so Railway service variables work even though Astro generated the static files during image build.
+It drives the static site's dashboard/sign-in links when the landing/docs site and dashboard are
+separate services.
 
 Before calling the deployment alpha-ready:
 

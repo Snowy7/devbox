@@ -1,6 +1,6 @@
 import http from "node:http"
 import { createReadStream } from "node:fs"
-import { stat } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(__dirname, "dist")
 const port = Number(process.env.PORT || process.env.BINDHUB_SITE_PORT || 3002)
 const host = process.env.HOST || "0.0.0.0"
+const dashboardBaseUrl = (process.env.PUBLIC_BINDHUB_DASHBOARD_URL || "").replace(/\/+$/, "")
 
 const contentTypes = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -51,9 +52,34 @@ const server = http.createServer(async (req, res) => {
       return
     }
 
+    const contentType =
+      contentTypes.get(path.extname(file.filePath)) || "application/octet-stream"
+
+    if (contentType.startsWith("text/html")) {
+      let html = await readFile(file.filePath, "utf8")
+      html = html.replaceAll(
+        "__BINDHUB_DASHBOARD_URL__",
+        dashboardBaseUrl || "/"
+      )
+      html = html.replaceAll(
+        "__BINDHUB_DASHBOARD_SIGN_IN_URL__",
+        dashboardBaseUrl ? `${dashboardBaseUrl}/auth/sign-in` : "/auth/sign-in"
+      )
+      res.writeHead(200, {
+        "content-length": Buffer.byteLength(html).toString(),
+        "content-type": contentType,
+      })
+      if (req.method === "HEAD") {
+        res.end()
+        return
+      }
+      res.end(html)
+      return
+    }
+
     res.writeHead(200, {
       "content-length": String(file.size),
-      "content-type": contentTypes.get(path.extname(file.filePath)) || "application/octet-stream",
+      "content-type": contentType,
     })
     if (req.method === "HEAD") {
       res.end()
