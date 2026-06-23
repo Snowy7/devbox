@@ -35,10 +35,7 @@ export const Route = createFileRoute("/auth/cli")({
             )
           }
 
-          return Response.redirect(
-            `${authRoutes.signIn}?returnPathname=${encodeURIComponent(returnPathname)}`,
-            307
-          )
+          return Response.redirect(signInRedirectUrl(request, returnPathname), 307)
         }
 
         await approveCliDeviceLogin(code, auth)
@@ -51,6 +48,12 @@ export const Route = createFileRoute("/auth/cli")({
     },
   },
 })
+
+function signInRedirectUrl(request: Request, returnPathname: string): string {
+  const target = new URL(authRoutes.signIn, request.url)
+  target.searchParams.set("returnPathname", returnPathname)
+  return target.href
+}
 
 function safeUserCode(value: string | null): string | undefined {
   const code = value?.trim().toUpperCase()
