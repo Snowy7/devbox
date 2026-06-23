@@ -41,6 +41,7 @@ pnpm-debug.log*
 
 # Rust
 target/
+target-pr1-check/
 
 # Python
 __pycache__/
