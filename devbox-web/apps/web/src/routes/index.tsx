@@ -1,5 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router"
 import { Button } from "@workspace/ui/components/button"
+import { ArrowRight } from "lucide-react"
+
+import { authRoutes } from "@/lib/auth"
 
 export const Route = createFileRoute("/")({ component: App })
 
@@ -19,8 +22,15 @@ function App() {
           </p>
         </div>
         <div className="flex gap-3">
-          <Button>Open dashboard</Button>
-          <Button variant="outline">Sign in</Button>
+          <Button asChild>
+            <a href="/dashboard">
+              Open dashboard
+              <ArrowRight />
+            </a>
+          </Button>
+          <Button asChild variant="outline">
+            <a href={authRoutes.signIn}>Sign in</a>
+          </Button>
         </div>
       </div>
     </div>
