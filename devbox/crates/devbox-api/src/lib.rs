@@ -61,6 +61,29 @@ pub struct DevSessionResponse {
     pub device_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliDeviceFlowResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliDeviceFlowPollResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedWorkOsSession {
     pub user_id: String,
@@ -68,6 +91,13 @@ pub struct VerifiedWorkOsSession {
     pub organization_id: Option<String>,
     pub device_id: String,
     pub device_display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedWorkOsBrowserAccount {
+    pub user_id: String,
+    pub session_id: String,
+    pub organization_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +219,7 @@ pub struct LocalDevboxApi {
     root: Arc<PathBuf>,
     metadata: Arc<dyn ApiMetadataStore>,
     pack_storage: Arc<dyn PackStorage>,
+    local_dev_sessions_enabled: bool,
 }
 
 trait ApiMetadataStore: fmt::Debug + Send + Sync {
@@ -198,6 +229,21 @@ trait ApiMetadataStore: fmt::Debug + Send + Sync {
     fn device(&self, device_id: &str) -> ApiResult<Option<DeviceRecord>>;
     fn upsert_device(&self, device: DeviceRecord) -> ApiResult<()>;
     fn devices_for_account(&self, account_id: &str) -> ApiResult<Vec<DeviceRecord>>;
+    fn insert_cli_device_flow(&self, flow: CliDeviceFlowRecord) -> ApiResult<()>;
+    fn cli_device_flow_by_device_code(
+        &self,
+        device_code: &str,
+    ) -> ApiResult<Option<CliDeviceFlowRecord>>;
+    fn cli_device_flow_by_user_code(
+        &self,
+        user_code: &str,
+    ) -> ApiResult<Option<CliDeviceFlowRecord>>;
+    fn approve_cli_device_flow(
+        &self,
+        user_code: &str,
+        session: DevSessionResponse,
+        approved_at: String,
+    ) -> ApiResult<()>;
     fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>>;
     fn insert_folder(&self, folder: FolderRecord) -> ApiResult<()>;
     fn membership(&self, account_id: &str, folder_id: &str) -> ApiResult<Option<MembershipRecord>>;
@@ -451,6 +497,20 @@ struct DeviceRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct CliDeviceFlowRecord {
+    device_code: String,
+    user_code: String,
+    device_id: String,
+    device_display_name: String,
+    created_at: String,
+    expires_at_unix: i64,
+    approved_at: Option<String>,
+    account_id: Option<String>,
+    session_id: Option<String>,
+    session_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FolderRecord {
     folder_id: String,
     owner_account_id: String,
@@ -474,6 +534,7 @@ struct MemoryMetadataStore {
 struct MemoryMetadataState {
     sessions: Vec<SessionRecord>,
     devices: Vec<DeviceRecord>,
+    cli_device_flows: Vec<CliDeviceFlowRecord>,
     folders: Vec<FolderRecord>,
     memberships: Vec<MembershipRecord>,
     cursors: BTreeMap<String, String>,
@@ -556,6 +617,62 @@ impl ApiMetadataStore for MemoryMetadataStore {
                 .then_with(|| left.device_id.cmp(&right.device_id))
         });
         Ok(devices)
+    }
+
+    fn insert_cli_device_flow(&self, flow: CliDeviceFlowRecord) -> ApiResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        state
+            .cli_device_flows
+            .retain(|existing| existing.device_code != flow.device_code);
+        state.cli_device_flows.push(flow);
+        Ok(())
+    }
+
+    fn cli_device_flow_by_device_code(
+        &self,
+        device_code: &str,
+    ) -> ApiResult<Option<CliDeviceFlowRecord>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .cli_device_flows
+            .iter()
+            .find(|flow| flow.device_code == device_code)
+            .cloned())
+    }
+
+    fn cli_device_flow_by_user_code(
+        &self,
+        user_code: &str,
+    ) -> ApiResult<Option<CliDeviceFlowRecord>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .cli_device_flows
+            .iter()
+            .find(|flow| flow.user_code == user_code)
+            .cloned())
+    }
+
+    fn approve_cli_device_flow(
+        &self,
+        user_code: &str,
+        session: DevSessionResponse,
+        approved_at: String,
+    ) -> ApiResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        let flow = state
+            .cli_device_flows
+            .iter_mut()
+            .find(|flow| flow.user_code == user_code)
+            .ok_or_else(|| ApiError::NotFound("machine login flow not found".to_string()))?;
+        flow.approved_at = Some(approved_at);
+        flow.account_id = Some(session.account_id);
+        flow.session_id = Some(session.session_id);
+        flow.session_token = Some(session.session_token);
+        Ok(())
     }
 
     fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>> {
@@ -714,6 +831,18 @@ impl PostgresMetadataStore {
                     display_name TEXT NOT NULL,
                     registered_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS api_cli_device_flows (
+                    device_code TEXT PRIMARY KEY,
+                    user_code TEXT NOT NULL UNIQUE,
+                    device_id TEXT NOT NULL,
+                    device_display_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at_unix BIGINT NOT NULL,
+                    approved_at TEXT,
+                    account_id TEXT,
+                    session_id TEXT,
+                    session_token TEXT
+                );
                 CREATE TABLE IF NOT EXISTS api_shared_folders (
                     folder_id TEXT PRIMARY KEY,
                     owner_account_id TEXT NOT NULL,
@@ -846,6 +975,141 @@ impl ApiMetadataStore for PostgresMetadataStore {
             .into_iter()
             .map(device_from_row)
             .collect())
+    }
+
+    fn insert_cli_device_flow(&self, flow: CliDeviceFlowRecord) -> ApiResult<()> {
+        self.client()?
+            .execute(
+                "
+                INSERT INTO api_cli_device_flows(
+                    device_code,
+                    user_code,
+                    device_id,
+                    device_display_name,
+                    created_at,
+                    expires_at_unix,
+                    approved_at,
+                    account_id,
+                    session_id,
+                    session_token
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (device_code) DO UPDATE
+                SET user_code = EXCLUDED.user_code,
+                    device_id = EXCLUDED.device_id,
+                    device_display_name = EXCLUDED.device_display_name,
+                    created_at = EXCLUDED.created_at,
+                    expires_at_unix = EXCLUDED.expires_at_unix,
+                    approved_at = EXCLUDED.approved_at,
+                    account_id = EXCLUDED.account_id,
+                    session_id = EXCLUDED.session_id,
+                    session_token = EXCLUDED.session_token
+                ",
+                &[
+                    &flow.device_code,
+                    &flow.user_code,
+                    &flow.device_id,
+                    &flow.device_display_name,
+                    &flow.created_at,
+                    &flow.expires_at_unix,
+                    &flow.approved_at,
+                    &flow.account_id,
+                    &flow.session_id,
+                    &flow.session_token,
+                ],
+            )
+            .map_err(postgres_error)?;
+        Ok(())
+    }
+
+    fn cli_device_flow_by_device_code(
+        &self,
+        device_code: &str,
+    ) -> ApiResult<Option<CliDeviceFlowRecord>> {
+        Ok(self
+            .client()?
+            .query_opt(
+                "
+                SELECT
+                    device_code,
+                    user_code,
+                    device_id,
+                    device_display_name,
+                    created_at,
+                    expires_at_unix,
+                    approved_at,
+                    account_id,
+                    session_id,
+                    session_token
+                FROM api_cli_device_flows
+                WHERE device_code = $1
+                ",
+                &[&device_code],
+            )
+            .map_err(postgres_error)?
+            .map(cli_device_flow_from_row))
+    }
+
+    fn cli_device_flow_by_user_code(
+        &self,
+        user_code: &str,
+    ) -> ApiResult<Option<CliDeviceFlowRecord>> {
+        Ok(self
+            .client()?
+            .query_opt(
+                "
+                SELECT
+                    device_code,
+                    user_code,
+                    device_id,
+                    device_display_name,
+                    created_at,
+                    expires_at_unix,
+                    approved_at,
+                    account_id,
+                    session_id,
+                    session_token
+                FROM api_cli_device_flows
+                WHERE user_code = $1
+                ",
+                &[&user_code],
+            )
+            .map_err(postgres_error)?
+            .map(cli_device_flow_from_row))
+    }
+
+    fn approve_cli_device_flow(
+        &self,
+        user_code: &str,
+        session: DevSessionResponse,
+        approved_at: String,
+    ) -> ApiResult<()> {
+        let updated = self
+            .client()?
+            .execute(
+                "
+                UPDATE api_cli_device_flows
+                SET approved_at = $2,
+                    account_id = $3,
+                    session_id = $4,
+                    session_token = $5
+                WHERE user_code = $1
+                ",
+                &[
+                    &user_code,
+                    &approved_at,
+                    &session.account_id,
+                    &session.session_id,
+                    &session.session_token,
+                ],
+            )
+            .map_err(postgres_error)?;
+        if updated == 0 {
+            return Err(ApiError::NotFound(
+                "machine login flow not found".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>> {
@@ -1035,6 +1299,21 @@ fn device_from_row(row: Row) -> DeviceRecord {
     }
 }
 
+fn cli_device_flow_from_row(row: Row) -> CliDeviceFlowRecord {
+    CliDeviceFlowRecord {
+        device_code: row.get("device_code"),
+        user_code: row.get("user_code"),
+        device_id: row.get("device_id"),
+        device_display_name: row.get("device_display_name"),
+        created_at: row.get("created_at"),
+        expires_at_unix: row.get("expires_at_unix"),
+        approved_at: row.get("approved_at"),
+        account_id: row.get("account_id"),
+        session_id: row.get("session_id"),
+        session_token: row.get("session_token"),
+    }
+}
+
 fn folder_from_row(row: Row) -> FolderRecord {
     FolderRecord {
         folder_id: row.get("folder_id"),
@@ -1057,6 +1336,19 @@ struct DevSessionRequest {
     account_hint: Option<String>,
     device_id: Option<String>,
     device_display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDeviceFlowRequest {
+    device_id: String,
+    device_display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDeviceFlowApproveRequest {
+    user_id: String,
+    session_id: String,
+    organization_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1116,7 +1408,7 @@ impl LocalDevboxApi {
         let root = root.as_ref().to_path_buf();
         let metadata = Arc::new(MemoryMetadataStore::default());
         let pack_storage = Arc::new(LocalFilePackStorage::open(&root)?);
-        Self::open_with_stores(root, metadata, pack_storage)
+        Self::open_with_stores(root, metadata, pack_storage, false)
     }
 
     pub fn open_from_env(root: impl AsRef<Path>) -> ApiResult<Self> {
@@ -1142,13 +1434,19 @@ impl LocalDevboxApi {
         } else {
             Arc::new(LocalFilePackStorage::open(&root)?)
         };
-        Self::open_with_stores(root, metadata, pack_storage)
+        Self::open_with_stores(
+            root,
+            metadata,
+            pack_storage,
+            env_flag_enabled("DEVBOX_API_ENABLE_LOCAL_DEV_SESSION"),
+        )
     }
 
     fn open_with_stores(
         root: impl AsRef<Path>,
         metadata: Arc<dyn ApiMetadataStore>,
         pack_storage: Arc<dyn PackStorage>,
+        local_dev_sessions_enabled: bool,
     ) -> ApiResult<Self> {
         let root = root.as_ref().to_path_buf();
         create_dir_all(&root)?;
@@ -1156,7 +1454,13 @@ impl LocalDevboxApi {
             root: Arc::new(root),
             metadata,
             pack_storage,
+            local_dev_sessions_enabled,
         })
+    }
+
+    fn with_local_dev_sessions(mut self) -> Self {
+        self.local_dev_sessions_enabled = true;
+        self
     }
 
     #[cfg(test)]
@@ -1165,7 +1469,7 @@ impl LocalDevboxApi {
         pack_storage: Arc<dyn PackStorage>,
     ) -> ApiResult<Self> {
         let metadata = Arc::new(MemoryMetadataStore::default());
-        Self::open_with_stores(root, metadata, pack_storage)
+        Self::open_with_stores(root, metadata, pack_storage, false)
     }
 
     pub fn root(&self) -> &Path {
@@ -1221,6 +1525,130 @@ impl LocalDevboxApi {
             session_token,
             device_id,
         })
+    }
+
+    pub fn create_cli_device_flow(
+        &self,
+        device_id: &str,
+        device_display_name: &str,
+    ) -> ApiResult<CliDeviceFlowResponse> {
+        let device_id = safe_prefixed_id("device", device_id, "device id")?;
+        let device_display_name = validate_non_empty(device_display_name, "device display name")?;
+        let issued_at = now_unix_seconds();
+        let expires_in = 600;
+        let entropy = digest_hex(&format!(
+            "{}:{}:{}:{}",
+            device_id,
+            device_display_name,
+            timestamp(),
+            now_unix_nanos()
+        ));
+        let device_code = format!("cli-device-{}", &entropy[..32]);
+        let user_code = format!(
+            "{}-{}",
+            entropy[..4].to_ascii_uppercase(),
+            entropy[4..8].to_ascii_uppercase()
+        );
+        let verification_uri = cli_auth_verification_uri();
+        let verification_uri_complete = format!(
+            "{}?code={}",
+            verification_uri.trim_end_matches('/'),
+            user_code
+        );
+
+        self.metadata.insert_cli_device_flow(CliDeviceFlowRecord {
+            device_code: device_code.clone(),
+            user_code: user_code.clone(),
+            device_id,
+            device_display_name,
+            created_at: timestamp(),
+            expires_at_unix: issued_at + expires_in,
+            approved_at: None,
+            account_id: None,
+            session_id: None,
+            session_token: None,
+        })?;
+
+        Ok(CliDeviceFlowResponse {
+            device_code,
+            user_code,
+            verification_uri,
+            verification_uri_complete,
+            expires_in: expires_in as u64,
+            interval: 2,
+        })
+    }
+
+    pub fn poll_cli_device_flow(&self, device_code: &str) -> ApiResult<CliDeviceFlowPollResponse> {
+        let device_code = validate_id(device_code, "device code")?;
+        let flow = self
+            .metadata
+            .cli_device_flow_by_device_code(&device_code)?
+            .ok_or_else(|| ApiError::NotFound("machine login flow not found".to_string()))?;
+        if flow.expires_at_unix <= now_unix_seconds() {
+            return Err(ApiError::BadRequest(
+                "machine login flow expired; run devbox login again".to_string(),
+            ));
+        }
+        if let (Some(account_id), Some(session_id), Some(session_token)) =
+            (flow.account_id, flow.session_id, flow.session_token)
+        {
+            return Ok(CliDeviceFlowPollResponse {
+                status: "approved".to_string(),
+                account_id: Some(account_id),
+                session_id: Some(session_id),
+                session_token: Some(session_token),
+                device_id: Some(flow.device_id),
+            });
+        }
+
+        Ok(CliDeviceFlowPollResponse {
+            status: "pending".to_string(),
+            account_id: None,
+            session_id: None,
+            session_token: None,
+            device_id: None,
+        })
+    }
+
+    pub fn approve_cli_device_flow(
+        &self,
+        user_code: &str,
+        verified: VerifiedWorkOsBrowserAccount,
+    ) -> ApiResult<DevSessionResponse> {
+        let user_code = validate_id(user_code, "user code")?;
+        let flow = self
+            .metadata
+            .cli_device_flow_by_user_code(&user_code)?
+            .ok_or_else(|| ApiError::NotFound("machine login flow not found".to_string()))?;
+        if flow.expires_at_unix <= now_unix_seconds() {
+            return Err(ApiError::BadRequest(
+                "machine login flow expired; run devbox login again".to_string(),
+            ));
+        }
+        if let (Some(account_id), Some(session_id), Some(session_token)) = (
+            flow.account_id.clone(),
+            flow.session_id.clone(),
+            flow.session_token.clone(),
+        ) {
+            return Ok(DevSessionResponse {
+                account_id,
+                session_id,
+                session_token,
+                device_id: flow.device_id,
+            });
+        }
+
+        let session = self.associate_verified_workos_session(VerifiedWorkOsSession {
+            user_id: verified.user_id,
+            session_id: verified.session_id,
+            organization_id: verified.organization_id,
+            device_id: flow.device_id,
+            device_display_name: flow.device_display_name,
+        })?;
+        self.metadata
+            .approve_cli_device_flow(&user_code, session.clone(), timestamp())?;
+        Ok(session)
     }
 
     pub fn authenticate(&self, session_token: &str, device_id: &str) -> ApiResult<AuthContext> {
@@ -1575,7 +2003,7 @@ impl Drop for LocalApiServer {
 }
 
 pub fn spawn_local_test_server(root: impl AsRef<Path>) -> ApiResult<LocalApiServer> {
-    let api = LocalDevboxApi::open(root)?;
+    let api = LocalDevboxApi::open(root)?.with_local_dev_sessions();
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|source| ApiError::Io {
         path: PathBuf::from("<tcp-listener>"),
         source,
@@ -1666,11 +2094,37 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
             }),
         ),
         ("POST", ["v1", "auth", "dev-session"]) => {
+            if !api.local_dev_sessions_enabled {
+                return Err(ApiError::Unauthorized);
+            }
             let body: DevSessionRequest = json_body(&request.body)?;
             let response = api.create_dev_session(
                 body.account_hint.as_deref(),
                 body.device_id.as_deref(),
                 body.device_display_name.as_deref(),
+            )?;
+            json_response(200, &response)
+        }
+        ("POST", ["v1", "auth", "cli-device-flow"]) => {
+            let body: CliDeviceFlowRequest = json_body(&request.body)?;
+            let response =
+                api.create_cli_device_flow(&body.device_id, &body.device_display_name)?;
+            json_response(200, &response)
+        }
+        ("GET", ["v1", "auth", "cli-device-flow", device_code]) => {
+            let response = api.poll_cli_device_flow(device_code)?;
+            json_response(200, &response)
+        }
+        ("POST", ["v1", "auth", "cli-device-flow", user_code, "approve"]) => {
+            require_service_token(&request)?;
+            let body: CliDeviceFlowApproveRequest = json_body(&request.body)?;
+            let response = api.approve_cli_device_flow(
+                user_code,
+                VerifiedWorkOsBrowserAccount {
+                    user_id: body.user_id,
+                    session_id: body.session_id,
+                    organization_id: body.organization_id,
+                },
             )?;
             json_response(200, &response)
         }
@@ -2062,6 +2516,10 @@ fn optional_env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    optional_env_value(name).is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 fn metadata_database_url() -> ApiResult<String> {
     optional_env_value("DEVBOX_API_DATABASE_URL")
         .or_else(|| optional_env_value("DATABASE_URL"))
@@ -2087,6 +2545,27 @@ fn sync_error(error: SyncError) -> ApiError {
 
 fn digest_hex(value: &str) -> String {
     blake3::hash(value.as_bytes()).to_hex().to_string()
+}
+
+fn cli_auth_verification_uri() -> String {
+    optional_env_value("DEVBOX_CLI_AUTH_VERIFICATION_URL")
+        .unwrap_or_else(|| "http://localhost:3000/auth/cli".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn now_unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn timestamp() -> String {
@@ -2542,6 +3021,165 @@ mod tests {
 
         assert!(devices_text.starts_with("HTTP/1.1 200 OK"));
         assert!(devices_text.contains("Browser session"));
+
+        match old_service_token {
+            Some(value) => std::env::set_var("DEVBOX_API_SERVICE_TOKEN", value),
+            None => std::env::remove_var("DEVBOX_API_SERVICE_TOKEN"),
+        }
+    }
+
+    #[test]
+    fn dev_session_route_rejects_by_default_without_local_dev_gate() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open(dir.path()).expect("api opens");
+
+        let error = route_request(
+            &api,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/auth/dev-session".to_string(),
+                headers: BTreeMap::new(),
+                body: br#"{
+                    "account_hint": "alice",
+                    "device_id": "device-cli",
+                    "device_display_name": "Desk"
+                }"#
+                .to_vec(),
+            },
+        )
+        .expect_err("production/default API rejects direct dev session minting");
+
+        assert!(matches!(error, ApiError::Unauthorized));
+    }
+
+    #[test]
+    fn cli_device_flow_requires_verified_browser_approval_before_poll_returns_session() {
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let old_service_token = std::env::var("DEVBOX_API_SERVICE_TOKEN").ok();
+        std::env::set_var("DEVBOX_API_SERVICE_TOKEN", "service-secret");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open(dir.path()).expect("api opens");
+
+        let start_response = route_request(
+            &api,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/auth/cli-device-flow".to_string(),
+                headers: BTreeMap::new(),
+                body: br#"{
+                    "device_id": "device-cli",
+                    "device_display_name": "Desk"
+                }"#
+                .to_vec(),
+            },
+        )
+        .expect("device flow starts");
+        let start_text = String::from_utf8(start_response).expect("response is utf8");
+        let start_body = start_text
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("response has body");
+        let flow: CliDeviceFlowResponse =
+            serde_json::from_str(start_body).expect("flow response parses");
+
+        let pending_response = route_request(
+            &api,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: format!("/v1/auth/cli-device-flow/{}", flow.device_code),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+        )
+        .expect("pending poll succeeds");
+        let pending_text = String::from_utf8(pending_response).expect("response is utf8");
+        assert!(pending_text.contains("\"status\":\"pending\""));
+        assert!(!pending_text.contains("session_token"));
+
+        let missing_service_token = route_request(
+            &api,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: format!("/v1/auth/cli-device-flow/{}/approve", flow.user_code),
+                headers: BTreeMap::new(),
+                body: br#"{
+                    "user_id": "user_123",
+                    "session_id": "workos_session_123",
+                    "organization_id": "org_123"
+                }"#
+                .to_vec(),
+            },
+        )
+        .expect_err("service token is required");
+        assert!(matches!(missing_service_token, ApiError::Unauthorized));
+
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "x-devbox-api-service-token".to_string(),
+            "service-secret".to_string(),
+        );
+        let approval_response = route_request(
+            &api,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: format!("/v1/auth/cli-device-flow/{}/approve", flow.user_code),
+                headers,
+                body: br#"{
+                    "user_id": "user_123",
+                    "session_id": "workos_session_123",
+                    "organization_id": "org_123"
+                }"#
+                .to_vec(),
+            },
+        )
+        .expect("browser approval succeeds");
+        let approval_text = String::from_utf8(approval_response).expect("response is utf8");
+        let approval_body = approval_text
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("response has body");
+        let approved_session: DevSessionResponse =
+            serde_json::from_str(approval_body).expect("session response parses");
+
+        assert_eq!(approved_session.device_id, "device-cli");
+        assert!(approved_session
+            .session_token
+            .starts_with("devbox-workos-session-"));
+        assert_ne!(approved_session.session_token, "workos-access-token");
+
+        let approved_poll = route_request(
+            &api,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: format!("/v1/auth/cli-device-flow/{}", flow.device_code),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+        )
+        .expect("approved poll succeeds");
+        let approved_poll_text = String::from_utf8(approved_poll).expect("response is utf8");
+        assert!(approved_poll_text.contains("\"status\":\"approved\""));
+        assert!(approved_poll_text.contains(&approved_session.session_token));
+
+        let mut devbox_headers = BTreeMap::new();
+        devbox_headers.insert(
+            "authorization".to_string(),
+            format!("Bearer {}", approved_session.session_token),
+        );
+        devbox_headers.insert("x-devbox-device-id".to_string(), approved_session.device_id);
+        let devices_response = route_request(
+            &api,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/devices".to_string(),
+                headers: devbox_headers,
+                body: Vec::new(),
+            },
+        )
+        .expect("CLI Devbox session can list devices");
+        let devices_text = String::from_utf8(devices_response).expect("response is utf8");
+        assert!(devices_text.starts_with("HTTP/1.1 200 OK"));
+        assert!(devices_text.contains("Desk"));
 
         match old_service_token {
             Some(value) => std::env::set_var("DEVBOX_API_SERVICE_TOKEN", value),

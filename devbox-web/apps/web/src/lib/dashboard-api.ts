@@ -69,6 +69,12 @@ type DevboxApiSession = {
   deviceId: string
 }
 
+type CliDeviceFlowApproval = {
+  accountId: string
+  sessionId: string
+  deviceId: string
+}
+
 export async function loadDashboardData(
   auth: UserInfo
 ): Promise<DashboardData> {
@@ -95,6 +101,81 @@ export async function loadDashboardData(
   }
 
   return fixtureDashboardData(identity, source)
+}
+
+export async function approveCliDeviceLogin(
+  userCode: string,
+  auth: UserInfo
+): Promise<CliDeviceFlowApproval> {
+  return approveCliDeviceLoginWithVerifiedIdentity(userCode, {
+    userId: auth.user.id,
+    sessionId: auth.sessionId,
+    organizationId: auth.organizationId ?? null,
+  })
+}
+
+export async function approveLocalDevCliDeviceLogin(
+  userCode: string
+): Promise<CliDeviceFlowApproval> {
+  if (process.env.DEVBOX_LOCAL_DEV_CLI_AUTH !== "1") {
+    throw new Error("local-dev CLI auth is not enabled")
+  }
+
+  const localIdentity =
+    process.env.DEVBOX_LOCAL_DEV_AUTH_EMAIL?.trim() || "local-dev@example.test"
+
+  return approveCliDeviceLoginWithVerifiedIdentity(userCode, {
+    userId: `local-dev-${localIdentity}`,
+    sessionId: `local-dev-cli-${userCode.toLowerCase()}`,
+    organizationId: null,
+  })
+}
+
+async function approveCliDeviceLoginWithVerifiedIdentity(
+  userCode: string,
+  identity: {
+    userId: string
+    sessionId: string
+    organizationId: string | null
+  }
+): Promise<CliDeviceFlowApproval> {
+  const baseUrl = readCliAuthApiBaseUrl(process.env)
+  const serviceToken = requiredEnv("DEVBOX_HOSTED_API_SERVICE_TOKEN")
+  const response = await fetch(
+    `${baseUrl}/v1/auth/cli-device-flow/${encodeURIComponent(userCode)}/approve`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "x-devbox-api-service-token": serviceToken,
+      },
+      body: JSON.stringify({
+        user_id: identity.userId,
+        session_id: identity.sessionId,
+        organization_id: identity.organizationId,
+      }),
+    }
+  )
+
+  if (!response.ok) {
+    throw new Error(`Devbox CLI auth approval failed: ${response.status}`)
+  }
+
+  const session = (await response.json()) as DevboxSessionWire
+
+  return {
+    accountId: session.account_id,
+    sessionId: session.session_id,
+    deviceId: session.device_id,
+  }
+}
+
+function readCliAuthApiBaseUrl(env: NodeJS.ProcessEnv): string {
+  return requireUrl(
+    env.DEVBOX_HOSTED_API_URL?.trim() || env.DEVBOX_LOCAL_API_URL?.trim(),
+    "DEVBOX_HOSTED_API_URL or DEVBOX_LOCAL_API_URL"
+  )
 }
 
 export function readDashboardDataSource(

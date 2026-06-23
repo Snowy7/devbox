@@ -38,6 +38,7 @@ fn product_login_share_clone_status_pause_resume_and_unlink_flow() {
 
     let login = fixture.devbox([
         "login",
+        "--local-dev-direct",
         "--api",
         &fixture.api.base_url(),
         "--device-name",
@@ -138,6 +139,7 @@ fn product_sparse_folder_commands_are_intent_based_and_safe() {
 
     assert_success(&fixture.devbox([
         "login",
+        "--local-dev-direct",
         "--api",
         &fixture.api.base_url(),
         "--device-name",
@@ -227,6 +229,7 @@ fn product_free_space_refuses_without_backed_up_copy() {
 
     assert_success(&fixture.devbox([
         "login",
+        "--local-dev-direct",
         "--api",
         &fixture.api.base_url(),
         "--device-name",
@@ -265,6 +268,34 @@ fn unauthenticated_share_and_clone_fail_without_touching_files() {
 }
 
 #[test]
+fn local_dev_direct_login_refuses_non_loopback_api_by_default() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = dir.path().join("config");
+
+    for api in ["https://api.devbox.example", "https://127.evil.example"] {
+        let login = run_devbox_with_env(
+            [("DEVBOX_CONFIG_DIR", path_str(&config))],
+            [
+                "login",
+                "--local-dev-direct",
+                "--api",
+                api,
+                "--account",
+                "alice",
+                "--device-name",
+                "Desk",
+            ],
+        );
+
+        assert_failure(&login);
+        let stderr = stderr(&login);
+        assert!(stderr.contains("--local-dev-direct is local-dev only"));
+        assert!(stderr.contains("loopback --api URL"));
+        assert!(!stderr.contains("could not reach Devbox"));
+    }
+}
+
+#[test]
 fn secret_blocking_still_applies_through_product_share() {
     let fixture = ProductCliFixture::new("secret");
     let raw_secret = "sk-abcdefghijklmnopqrstuvwxyzABCDEFGH123456";
@@ -273,6 +304,7 @@ fn secret_blocking_still_applies_through_product_share() {
 
     assert_success(&fixture.devbox([
         "login",
+        "--local-dev-direct",
         "--api",
         &fixture.api.base_url(),
         "--device-name",
@@ -296,6 +328,7 @@ fn invalid_session_resume_asks_user_to_login_without_internal_terms() {
 
     assert_success(&fixture.devbox([
         "login",
+        "--local-dev-direct",
         "--api",
         &fixture.api.base_url(),
         "--device-name",
@@ -326,6 +359,7 @@ fn another_account_cannot_clone_a_protected_shared_folder() {
         [("DEVBOX_CONFIG_DIR", path_str(&alice_config))],
         [
             "login",
+            "--local-dev-direct",
             "--api",
             &api.base_url(),
             "--account",
@@ -342,6 +376,7 @@ fn another_account_cannot_clone_a_protected_shared_folder() {
         [("DEVBOX_CONFIG_DIR", path_str(&bob_config))],
         [
             "login",
+            "--local-dev-direct",
             "--api",
             &api.base_url(),
             "--account",

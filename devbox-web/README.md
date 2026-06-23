@@ -46,11 +46,37 @@ The app owns these auth routes:
 - `/auth/sign-in`
 - `/auth/sign-up`
 - `/auth/callback`
+- `/auth/cli`
 - `/auth/sign-out`
 
 Configure the WorkOS sign-in endpoint as
 `http://localhost:3000/auth/sign-in` and the redirect URI as
 `http://localhost:3000/auth/callback`.
+
+## CLI browser login
+
+`devbox login` starts a short-lived machine login flow with `devbox-api`, opens
+`/auth/cli?code=...`, and polls until the browser route approves the machine.
+The browser route must verify the WorkOS/AuthKit session first, then it calls
+`devbox-api` with `DEVBOX_HOSTED_API_SERVICE_TOKEN`. The browser never receives
+or displays the Devbox session token; the CLI stores it locally after polling.
+
+Local deterministic smoke mode is explicit:
+
+```sh
+DEVBOX_LOCAL_API_URL=http://127.0.0.1:3001
+DEVBOX_HOSTED_API_SERVICE_TOKEN=local-dev-service-token
+DEVBOX_LOCAL_DEV_CLI_AUTH=1
+DEVBOX_LOCAL_DEV_AUTH_EMAIL=local-dev@example.test
+```
+
+This bypass is only for CI/local-dev when live WorkOS is unavailable. Production
+must leave `DEVBOX_LOCAL_DEV_CLI_AUTH` unset and use AuthKit.
+
+The older direct local session helper is also gated: `devbox-api` must run with
+`DEVBOX_API_ENABLE_LOCAL_DEV_SESSION=1`, and `devbox login --local-dev-direct`
+refuses non-loopback API URLs unless
+`DEVBOX_ALLOW_NON_LOOPBACK_LOCAL_DEV_LOGIN=1` is set for local development.
 
 ## Dashboard data
 

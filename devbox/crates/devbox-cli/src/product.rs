@@ -17,13 +17,17 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 use ureq::Error as UreqError;
 
 const CONFIG_DIR_ENV: &str = "DEVBOX_CONFIG_DIR";
 const API_URL_ENV: &str = "DEVBOX_API_URL";
+const WEB_URL_ENV: &str = "DEVBOX_WEB_URL";
 const LOCAL_DEV_API_URL: &str = "http://127.0.0.1:8787";
+const LOCAL_DEV_WEB_URL: &str = "http://localhost:3000";
 const CONFIG_FILE: &str = "config.json";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,6 +58,24 @@ struct DevSessionResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct CliDeviceFlowResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri_complete: String,
+    expires_in: u64,
+    interval: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDeviceFlowPollResponse {
+    status: String,
+    account_id: Option<String>,
+    session_id: Option<String>,
+    session_token: Option<String>,
+    device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SharedFolderResponse {
     id: String,
     role: String,
@@ -74,6 +96,9 @@ struct LoginArgs {
     api_url: String,
     account_hint: String,
     device_name: String,
+    web_url: String,
+    open_browser: bool,
+    local_dev_direct: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +213,9 @@ pub fn run_loom_daemon_entrypoint(args: &[String]) -> ExitCode {
 
 pub fn print_product_command_help(command: &str) {
     let usage = match command {
-        "login" => "devbox login [--api <URL>] [--account <NAME>] [--device-name <NAME>]",
+        "login" => {
+            "devbox login [--api <URL>] [--web <URL>] [--device-name <NAME>] [--no-browser]\n       devbox login --local-dev-direct [--api <URL>] [--account <NAME>] [--device-name <NAME>]"
+        }
         "share" => "devbox share <FOLDER> [--no-background-sync]",
         "clone" => {
             "devbox clone\n       devbox clone <SHARED_FOLDER> [TARGET] [--sparse] [--no-background-sync]"
@@ -246,15 +273,11 @@ fn run_doctor(args: &[String]) -> Result<(), String> {
 
 fn run_login(args: LoginArgs) -> Result<(), String> {
     let mut config = read_config()?;
-    let request = serde_json::json!({
-        "account_hint": args.account_hint,
-        "device_id": stable_device_id(&args.device_name),
-        "device_display_name": args.device_name,
-    });
-    let response: DevSessionResponse = send_json(
-        ureq::post(&api_url(&args.api_url, "/v1/auth/dev-session")?),
-        request,
-    )?;
+    let response = if args.local_dev_direct {
+        local_dev_login(&args)?
+    } else {
+        browser_login(&args)?
+    };
 
     config.api_url = Some(args.api_url);
     config.account_id = Some(response.account_id.clone());
@@ -275,6 +298,84 @@ fn run_login(args: LoginArgs) -> Result<(), String> {
     println!("Session: stored locally");
     println!("Token: not printed");
     Ok(())
+}
+
+fn local_dev_login(args: &LoginArgs) -> Result<DevSessionResponse, String> {
+    ensure_local_dev_direct_api_allowed(&args.api_url)?;
+    let request = serde_json::json!({
+        "account_hint": args.account_hint,
+        "device_id": stable_device_id(&args.device_name),
+        "device_display_name": args.device_name,
+    });
+    send_json(
+        ureq::post(&api_url(&args.api_url, "/v1/auth/dev-session")?),
+        request,
+    )
+}
+
+fn browser_login(args: &LoginArgs) -> Result<DevSessionResponse, String> {
+    let request = serde_json::json!({
+        "device_id": stable_device_id(&args.device_name),
+        "device_display_name": args.device_name,
+    });
+    let flow: CliDeviceFlowResponse = send_json(
+        ureq::post(&api_url(&args.api_url, "/v1/auth/cli-device-flow")?),
+        request,
+    )?;
+    let verification_url = cli_verification_url(&args.web_url, &flow.user_code)
+        .unwrap_or_else(|| flow.verification_uri_complete.clone());
+
+    println!("Open this link to connect this machine:");
+    println!("{verification_url}");
+    println!("User code: {}", flow.user_code);
+    println!("Waiting for browser sign-in...");
+
+    if args.open_browser {
+        if open_browser_url(&verification_url).is_err() {
+            println!("Browser: could not open automatically");
+        }
+    }
+
+    poll_cli_device_flow(args, &flow)
+}
+
+fn poll_cli_device_flow(
+    args: &LoginArgs,
+    flow: &CliDeviceFlowResponse,
+) -> Result<DevSessionResponse, String> {
+    let deadline = Instant::now() + Duration::from_secs(flow.expires_in);
+    let interval = Duration::from_secs(flow.interval.max(1));
+    while Instant::now() < deadline {
+        let response: CliDeviceFlowPollResponse = call_json(ureq::get(&api_url(
+            &args.api_url,
+            &format!(
+                "/v1/auth/cli-device-flow/{}",
+                api_path_segment(&flow.device_code)?
+            ),
+        )?))?;
+        match response.status.as_str() {
+            "pending" => std::thread::sleep(interval),
+            "approved" => {
+                return Ok(DevSessionResponse {
+                    account_id: response
+                        .account_id
+                        .ok_or_else(|| "browser login response was incomplete".to_string())?,
+                    session_id: response
+                        .session_id
+                        .ok_or_else(|| "browser login response was incomplete".to_string())?,
+                    session_token: response
+                        .session_token
+                        .ok_or_else(|| "browser login response was incomplete".to_string())?,
+                    device_id: response
+                        .device_id
+                        .ok_or_else(|| "browser login response was incomplete".to_string())?,
+                });
+            }
+            _ => return Err("browser login response was invalid".to_string()),
+        }
+    }
+
+    Err("browser login timed out; run devbox login again".to_string())
 }
 
 fn run_share(args: ShareArgs) -> Result<(), String> {
@@ -1325,9 +1426,12 @@ impl ProductConfig {
 
 fn parse_login_args(args: &[String]) -> Result<LoginArgs, String> {
     let mut api_url = Some(default_api_url());
-    let mut account_hint =
-        std::env::var("DEVBOX_ACCOUNT").unwrap_or_else(|_| "local-dev".to_string());
+    let mut web_url = default_web_url();
+    let mut account_hint = "local-dev".to_string();
+    let mut account_hint_explicit = false;
     let mut device_name = default_device_name();
+    let mut open_browser = true;
+    let mut local_dev_direct = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -1335,24 +1439,43 @@ fn parse_login_args(args: &[String]) -> Result<LoginArgs, String> {
                 index += 1;
                 api_url = Some(required_value(args, index, "--api")?);
             }
+            "--web" => {
+                index += 1;
+                web_url = required_value(args, index, "--web")?;
+            }
             "--account" => {
                 index += 1;
                 account_hint = required_value(args, index, "--account")?;
+                account_hint_explicit = true;
             }
             "--device-name" => {
                 index += 1;
                 device_name = required_value(args, index, "--device-name")?;
             }
+            "--no-browser" => open_browser = false,
+            "--local-dev-direct" => local_dev_direct = true,
             value => return Err(format!("login unknown option '{value}'")),
         }
         index += 1;
     }
     let api_url = api_url.expect("default API URL is always present");
     validate_api_url(&api_url)?;
+    validate_web_url(&web_url)?;
+    if local_dev_direct && !account_hint_explicit {
+        account_hint = std::env::var("DEVBOX_ACCOUNT").unwrap_or(account_hint);
+    }
+    if !local_dev_direct && account_hint_explicit {
+        return Err(
+            "login derives account identity from browser authentication; use --local-dev-direct for local-dev account hints".to_string(),
+        );
+    }
     Ok(LoginArgs {
         api_url,
         account_hint,
         device_name,
+        web_url,
+        open_browser,
+        local_dev_direct,
     })
 }
 
@@ -1830,6 +1953,54 @@ fn validate_api_url(api: &str) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+fn validate_web_url(web: &str) -> Result<(), String> {
+    let trimmed = web.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Ok(())
+    } else {
+        Err("--web requires an http(s) URL".to_string())
+    }
+}
+
+fn ensure_local_dev_direct_api_allowed(api: &str) -> Result<(), String> {
+    if is_loopback_api_url(api) || env_flag_enabled("DEVBOX_ALLOW_NON_LOOPBACK_LOCAL_DEV_LOGIN") {
+        return Ok(());
+    }
+
+    Err(
+        "devbox login --local-dev-direct is local-dev only; use a loopback --api URL or set DEVBOX_ALLOW_NON_LOOPBACK_LOCAL_DEV_LOGIN=1 for local development".to_string(),
+    )
+}
+
+fn is_loopback_api_url(api: &str) -> bool {
+    let Some((_, rest)) = api.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority)
+        .trim();
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or(bracketed)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    }
+    .to_ascii_lowercase();
+
+    host.parse::<IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or_else(|_| host == "localhost" || host == "localhost.")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 fn api_path_segment(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty()
@@ -1857,6 +2028,47 @@ fn default_api_url() -> String {
         .ok()
         .or_else(|| option_env!("DEVBOX_DEFAULT_API_URL").map(ToString::to_string))
         .unwrap_or_else(|| LOCAL_DEV_API_URL.to_string())
+}
+
+fn default_web_url() -> String {
+    std::env::var(WEB_URL_ENV).unwrap_or_else(|_| LOCAL_DEV_WEB_URL.to_string())
+}
+
+fn cli_verification_url(web_url: &str, user_code: &str) -> Option<String> {
+    let user_code = api_path_segment(user_code).ok()?;
+    Some(format!(
+        "{}/auth/cli?code={}",
+        web_url.trim_end_matches('/'),
+        user_code
+    ))
+}
+
+fn open_browser_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn stable_device_id(device_name: &str) -> String {
