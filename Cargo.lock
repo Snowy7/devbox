@@ -128,6 +128,7 @@ dependencies = [
  "bindhub-sync",
  "blake3",
  "loom-core",
+ "loom-pack",
  "postgres",
  "serde",
  "serde_json",

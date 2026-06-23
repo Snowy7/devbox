@@ -110,6 +110,31 @@ type DeviceWire = {
   display_name: string
 }
 
+type SharedFolderTreeWire = {
+  revision_id: string | null
+  file_count: number
+  entries: SharedFolderTreeEntryWire[]
+  revisions: SharedFolderRevisionWire[]
+}
+
+type SharedFolderTreeEntryWire = {
+  path: string
+  name: string
+  kind: "directory" | "file" | "symlink" | "unsupported"
+  parent_path: string | null
+  size_bytes: number | null
+  updated_at: string
+  object_id: string | null
+}
+
+type SharedFolderRevisionWire = {
+  id: string
+  parent_id: string | null
+  boundary: string
+  created_at: string
+  changed_files: number
+}
+
 type BindhubSessionWire = {
   account_id: string
   session_id: string
@@ -315,12 +340,20 @@ async function dataFromApi(
     fetchJson<SharedFolderWire[]>(`${baseUrl}/v1/shared-folders`, headers),
     fetchJson<DeviceWire[]>(`${baseUrl}/v1/devices`, headers),
   ])
+  const trees = await Promise.all(
+    folders.map((folder) =>
+      fetchJson<SharedFolderTreeWire>(
+        `${baseUrl}/v1/loom/shared-folders/${encodeURIComponent(folder.id)}/tree`,
+        headers
+      ).catch(() => emptyHostedTree())
+    )
+  )
 
   return {
     identity,
     source,
     overview: overview(folders, machines),
-    folders: folders.map((folder) => ({
+    folders: folders.map((folder, index) => ({
       id: folder.id,
       displayName: folder.display_name,
       description: "Hosted shared folder",
@@ -330,25 +363,26 @@ async function dataFromApi(
       visibility: folder.role === "viewer" ? "team" : "private",
       syncStatus: "synced",
       hydrationState: "fully-local",
-      lastCheckpoint: "Synced from Bindhub API",
-      updatedAt: "Known to Bindhub API",
+      lastCheckpoint: trees[index].revision_id ?? "No synced revision yet",
+      updatedAt: latestTreeTimestamp(trees[index]) ?? "Known to Bindhub API",
       sizeLabel: "Remote metadata",
-      fileCount: 0,
+      fileCount: trees[index].file_count,
       machineCount: machines.length,
-      entries: hostedPlaceholderEntries(folder.display_name),
-      revisions: hostedPlaceholderRevisions(),
+      entries: hostedEntriesFromTree(trees[index]),
+      revisions: hostedRevisionsFromTree(trees[index]),
       settings: hostedPlaceholderSettings(folder.role === "viewer" ? "team" : "private"),
       recentActivity: [
         {
           id: `${folder.id}-api-sync`,
           title: "Synced from hosted API",
           detail:
-            "Folder membership is live. File-tree metadata will come from Loom revisions.",
+            trees[index].revision_id
+              ? `${trees[index].file_count} files are visible from the latest Loom revision.`
+              : "Folder membership is live. No Loom revision has synced yet.",
           timestamp: "Now",
         },
       ],
-      readme:
-        "This folder is backed by hosted bindhub metadata. File browsing will become exact once the API exposes Loom folder revision trees.",
+      readme: hostedReadmeFromTree(folder.display_name, trees[index]),
     })),
     machines: machines.map((machine) => ({
       id: machine.id,
@@ -732,37 +766,109 @@ function fixtureDashboardData(
   }
 }
 
-function hostedPlaceholderEntries(displayName: string): SharedFolderEntry[] {
-  return [
-    {
-      path: "README.md",
-      name: "README.md",
-      kind: "file",
-      parentPath: null,
-      sizeLabel: "remote",
-      updatedAt: "Awaiting Loom tree",
-      hydrationState: "remote-only",
-      language: "Markdown",
-      summary: `${displayName} file tree metadata is not exposed by the API yet.`,
-      content:
-        "This hosted folder exists, but the hosted API does not expose Loom file-tree metadata yet.",
-    },
-  ]
+function emptyHostedTree(): SharedFolderTreeWire {
+  return {
+    revision_id: null,
+    file_count: 0,
+    entries: [],
+    revisions: [],
+  }
 }
 
-function hostedPlaceholderRevisions(): FolderRevision[] {
-  return [
-    {
-      id: "hosted-current",
-      label: "Hosted cursor",
-      message: "Folder membership is live; Loom revision history is pending API support.",
-      kind: "auto",
-      createdAt: "Known to Bindhub API",
-      author: "Bindhub hosted",
-      changedFiles: 0,
-      pinned: false,
-    },
-  ]
+function hostedEntriesFromTree(tree: SharedFolderTreeWire): SharedFolderEntry[] {
+  return tree.entries
+    .filter(
+      (
+        entry
+      ): entry is SharedFolderTreeEntryWire & { kind: "file" | "directory" } =>
+        entry.kind === "file" || entry.kind === "directory"
+    )
+    .map((entry) => ({
+      path: entry.path,
+      name: entry.name,
+      kind: entry.kind,
+      parentPath: entry.parent_path,
+      sizeLabel:
+        entry.kind === "directory" ? "folder" : formatBytes(entry.size_bytes ?? 0),
+      updatedAt: entry.updated_at,
+      hydrationState: "remote-only",
+      language: languageForPath(entry.path),
+      summary:
+        entry.kind === "directory"
+          ? "Folder in the latest hosted revision."
+          : "File in the latest hosted revision.",
+    }))
+}
+
+function hostedRevisionsFromTree(tree: SharedFolderTreeWire): FolderRevision[] {
+  return tree.revisions.map((revision) => ({
+    id: revision.id,
+    label: revision.id,
+    message: `Loom ${revision.boundary} revision`,
+    kind: "auto",
+    createdAt: revision.created_at,
+    author: "Bindhub hosted",
+    changedFiles: revision.changed_files,
+    pinned: false,
+  }))
+}
+
+function hostedReadmeFromTree(displayName: string, tree: SharedFolderTreeWire) {
+  if (!tree.revision_id) {
+    return `${displayName} is known to Bindhub, but no synced folder revision is available yet.`
+  }
+  return `${displayName} is backed by hosted Loom revision ${tree.revision_id}.`
+}
+
+function latestTreeTimestamp(tree: SharedFolderTreeWire) {
+  return tree.revisions.at(-1)?.created_at ?? tree.entries[0]?.updated_at ?? null
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KiB`
+  }
+  return `${bytes} bytes`
+}
+
+function languageForPath(path: string) {
+  const extension = path.split(".").pop()?.toLowerCase()
+  switch (extension) {
+    case "astro":
+      return "Astro"
+    case "css":
+      return "CSS"
+    case "go":
+      return "Go"
+    case "html":
+      return "HTML"
+    case "js":
+    case "jsx":
+      return "JavaScript"
+    case "json":
+      return "JSON"
+    case "md":
+    case "mdx":
+      return "Markdown"
+    case "rs":
+      return "Rust"
+    case "ts":
+    case "tsx":
+      return "TypeScript"
+    case "toml":
+      return "TOML"
+    case "yml":
+    case "yaml":
+      return "YAML"
+    default:
+      return undefined
+  }
 }
 
 function hostedPlaceholderSettings(

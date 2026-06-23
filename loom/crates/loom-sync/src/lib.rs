@@ -46,6 +46,20 @@ pub struct SyncReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncProgress {
+    UploadObject {
+        index: usize,
+        total: usize,
+        size_bytes: u64,
+    },
+    DownloadObject {
+        index: usize,
+        total: usize,
+        size_bytes: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportReport {
     pub latest_revision_id: FolderRevisionId,
     pub imported_file_versions: usize,
@@ -284,6 +298,14 @@ impl LoomRemote for LocalFilesystemRemote {
 }
 
 pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> SyncResult<SyncReport> {
+    sync_store_to_remote_with_progress(store, remote, |_| {})
+}
+
+pub fn sync_store_to_remote_with_progress(
+    store: &LocalStore,
+    remote: &dyn LoomRemote,
+    mut progress: impl FnMut(SyncProgress),
+) -> SyncResult<SyncReport> {
     let latest = store.latest_revision()?.ok_or(SyncError::NoLocalRevision)?;
     let previous_remote_revision_id = remote.get_cursor(DEFAULT_CURSOR_ID)?;
     if let Some(remote_revision_id) = &previous_remote_revision_id {
@@ -306,8 +328,14 @@ pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> Sync
         ObjectTransferCapability::SeparateObjects => {
             let pack = build_metadata_pack(store, latest.id())?;
             let mut uploaded_objects = 0;
-            for object in &pack.manifest.objects {
+            let total = pack.manifest.objects.len();
+            for (index, object) in pack.manifest.objects.iter().enumerate() {
                 if !remote.has_object(&object.object_id)? {
+                    progress(SyncProgress::UploadObject {
+                        index: index + 1,
+                        total,
+                        size_bytes: object.size_bytes,
+                    });
                     let payload = store.object_cache().read(&object.object_id)?;
                     remote.put_object(&object.object_id, &payload)?;
                     uploaded_objects += 1;
@@ -336,7 +364,7 @@ pub fn sync_store_to_remote(store: &LocalStore, remote: &dyn LoomRemote) -> Sync
 }
 
 pub fn import_pack(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, None, true)
+    import_pack_with_remote(store, pack, None, true, |_| {})
 }
 
 pub fn import_pack_from_remote(
@@ -344,11 +372,20 @@ pub fn import_pack_from_remote(
     pack: &LoomPack,
     remote: &dyn LoomRemote,
 ) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, Some(remote), true)
+    import_pack_from_remote_with_progress(store, pack, remote, |_| {})
+}
+
+pub fn import_pack_from_remote_with_progress(
+    store: &LocalStore,
+    pack: &LoomPack,
+    remote: &dyn LoomRemote,
+    progress: impl FnMut(SyncProgress),
+) -> SyncResult<ImportReport> {
+    import_pack_with_remote(store, pack, Some(remote), true, progress)
 }
 
 pub fn import_pack_metadata_only(store: &LocalStore, pack: &LoomPack) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, None, false)
+    import_pack_with_remote(store, pack, None, false, |_| {})
 }
 
 pub fn import_pack_metadata_only_from_remote(
@@ -356,7 +393,7 @@ pub fn import_pack_metadata_only_from_remote(
     pack: &LoomPack,
     remote: &dyn LoomRemote,
 ) -> SyncResult<ImportReport> {
-    import_pack_with_remote(store, pack, Some(remote), false)
+    import_pack_with_remote(store, pack, Some(remote), false, |_| {})
 }
 
 fn import_pack_with_remote(
@@ -364,15 +401,22 @@ fn import_pack_with_remote(
     pack: &LoomPack,
     remote: Option<&dyn LoomRemote>,
     hydrate_missing_objects: bool,
+    mut progress: impl FnMut(SyncProgress),
 ) -> SyncResult<ImportReport> {
     let mut imported_objects = 0;
-    for object in &pack.manifest.objects {
+    let total = pack.manifest.objects.len();
+    for (index, object) in pack.manifest.objects.iter().enumerate() {
         if !store.object_cache().exists(&object.object_id) {
             let payload = if let Some(payload) = pack.object_payload(&object.object_id) {
                 Some(payload.payload.clone())
             } else if hydrate_missing_objects {
                 let remote = remote
                     .ok_or_else(|| SyncError::MissingObjectPayload(object.object_id.clone()))?;
+                progress(SyncProgress::DownloadObject {
+                    index: index + 1,
+                    total,
+                    size_bytes: object.size_bytes,
+                });
                 Some(remote.get_object(&object.object_id)?)
             } else {
                 None

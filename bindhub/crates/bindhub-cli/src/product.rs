@@ -4,8 +4,9 @@ use loom_core::{FileKind, ObjectId, RevisionBoundary, SharedFolderId};
 use loom_daemon::{DaemonLoopOptions, DaemonStartOptions};
 use loom_store::{path_to_store_string, LocalStore, RemoteConfig, StoreError};
 use loom_sync::{
-    hydrate_object_from_remote, import_pack_from_remote, import_pack_metadata_only_from_remote,
-    sync_store_to_remote, LoomRemote, SyncError, DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME,
+    hydrate_object_from_remote, import_pack_from_remote_with_progress,
+    import_pack_metadata_only_from_remote, sync_store_to_remote_with_progress, LoomRemote,
+    SyncError, SyncProgress, DEFAULT_CURSOR_ID, DEFAULT_REMOTE_NAME,
 };
 use loom_worktree::{
     cache_status_for_scope, evaluate_directory_policy, hydrate_versions, prune_cache_to_limit,
@@ -510,7 +511,7 @@ fn run_clone(args: CloneArgs) -> Result<(), String> {
         import_pack_metadata_only_from_remote(&store, &pack, &remote)
             .map_err(|_| "could not prepare shared folder data on this machine".to_string())?;
     } else {
-        import_pack_from_remote(&store, &pack, &remote)
+        import_pack_from_remote_with_progress(&store, &pack, &remote, print_sync_progress)
             .map_err(|_| "could not prepare shared folder data on this machine".to_string())?;
     }
     let revision = store
@@ -1051,8 +1052,46 @@ fn sync_once(store: &LocalStore, session: &Session) -> Result<WorktreeCapture, S
     )
     .map_err(|error| error.to_string())?;
     let remote = BindhubHostedRemote::new(remote_config);
-    sync_store_to_remote(store, &remote).map_err(product_sync_error)?;
+    sync_store_to_remote_with_progress(store, &remote, print_sync_progress)
+        .map_err(product_sync_error)?;
     Ok(capture)
+}
+
+fn print_sync_progress(progress: SyncProgress) {
+    match progress {
+        SyncProgress::UploadObject {
+            index,
+            total,
+            size_bytes,
+        } => eprintln!(
+            "Uploading file data {index}/{total} ({})",
+            product_size_label(size_bytes)
+        ),
+        SyncProgress::DownloadObject {
+            index,
+            total,
+            size_bytes,
+        } => eprintln!(
+            "Downloading file data {index}/{total} ({})",
+            product_size_label(size_bytes)
+        ),
+    }
+}
+
+fn product_size_label(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes_f = bytes as f64;
+    if bytes_f >= GIB {
+        format!("{:.1} GiB", bytes_f / GIB)
+    } else if bytes_f >= MIB {
+        format!("{:.1} MiB", bytes_f / MIB)
+    } else if bytes_f >= KIB {
+        format!("{:.1} KiB", bytes_f / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 fn configure_hosted_remote(store: &LocalStore, session: &Session) -> Result<(), String> {

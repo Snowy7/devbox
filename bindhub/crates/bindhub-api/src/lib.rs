@@ -9,7 +9,8 @@ use bindhub_sync::{
     ObjectKey, RemoteBlobProvider, S3CompatibleBlobProvider, S3CompatibleConfig,
     S3CredentialsSource, SyncError,
 };
-use loom_core::{CursorId, FolderRevisionId, ObjectId, SharedFolderId};
+use loom_core::{CursorId, FileKind, FolderRevisionId, ObjectId, SharedFolderId};
+use loom_pack::LoomPack;
 use postgres::{Client as PostgresClient, NoTls, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -106,6 +107,34 @@ pub struct SharedFolderResponse {
     pub account_id: AccountId,
     pub role: SharedFolderRole,
     pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedFolderTreeResponse {
+    pub revision_id: Option<String>,
+    pub file_count: usize,
+    pub entries: Vec<SharedFolderTreeEntryResponse>,
+    pub revisions: Vec<SharedFolderRevisionResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedFolderTreeEntryResponse {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub parent_path: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub updated_at: String,
+    pub object_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedFolderRevisionResponse {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub boundary: String,
+    pub created_at: String,
+    pub changed_files: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1682,9 +1711,12 @@ impl LocalBindhubApi {
             .as_deref()
             .unwrap_or(verified.user_id.as_str());
         let account_id = safe_prefixed_id("account", account_source, "WorkOS account identity")?;
-        let session_id =
-            safe_prefixed_id("session", &verified.session_id, "WorkOS session identity")?;
         let device_id = safe_prefixed_id("device", &verified.device_id, "device id")?;
+        let session_id = safe_prefixed_id(
+            "session",
+            &format!("{}:{}", verified.session_id, device_id),
+            "WorkOS session identity",
+        )?;
         let session_token = format!(
             "bindhub-workos-session-{}",
             digest_hex(&format!(
@@ -1821,6 +1853,82 @@ impl LocalBindhubApi {
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         Ok(responses)
+    }
+
+    pub fn shared_folder_tree(
+        &self,
+        auth: &AuthContext,
+        folder_id: &str,
+    ) -> ApiResult<SharedFolderTreeResponse> {
+        self.require_membership(auth, folder_id)?;
+        let folder_id = validate_id(folder_id, "shared folder id")?;
+        let Some(revision_id) = self.metadata.get_cursor(&folder_id, "shared-folder")? else {
+            return Ok(SharedFolderTreeResponse {
+                revision_id: None,
+                file_count: 0,
+                entries: Vec::new(),
+                revisions: Vec::new(),
+            });
+        };
+        let pack_bytes = self.pack_storage.get_pack(&folder_id, &revision_id)?;
+        let pack = LoomPack::decode(&pack_bytes)
+            .map_err(|error| ApiError::RemoteStorage(error.to_string()))?;
+        let latest = pack
+            .revisions
+            .iter()
+            .find(|revision| revision.id().as_str() == revision_id)
+            .ok_or_else(|| ApiError::NotFound("folder revision not found in pack".to_string()))?;
+        let file_versions = pack
+            .file_versions
+            .iter()
+            .map(|version| (version.id().as_str(), version))
+            .collect::<BTreeMap<_, _>>();
+        let mut entries = Vec::new();
+        for entry in latest.entries() {
+            let Some(version) = file_versions.get(entry.file_version_id().as_str()) else {
+                continue;
+            };
+            let path = path_to_api_string(entry.path());
+            let name = entry
+                .path()
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            let parent_path = entry
+                .path()
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(path_to_api_string);
+            entries.push(SharedFolderTreeEntryResponse {
+                path,
+                name,
+                kind: file_kind_to_api(version.kind()).to_string(),
+                parent_path,
+                size_bytes: version.size_bytes(),
+                updated_at: version.captured_at().to_string(),
+                object_id: version.object_id().map(|object| object.to_string()),
+            });
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let file_count = entries.iter().filter(|entry| entry.kind == "file").count();
+        let revisions = pack
+            .revisions
+            .iter()
+            .map(|revision| SharedFolderRevisionResponse {
+                id: revision.id().to_string(),
+                parent_id: revision.parent_id().map(|parent| parent.to_string()),
+                boundary: format!("{:?}", revision.boundary()).to_ascii_lowercase(),
+                created_at: revision.created_at().to_string(),
+                changed_files: revision.entries().len(),
+            })
+            .collect();
+
+        Ok(SharedFolderTreeResponse {
+            revision_id: Some(revision_id),
+            file_count,
+            entries,
+            revisions,
+        })
     }
 
     pub fn list_devices(&self, auth: &AuthContext) -> ApiResult<Vec<DeviceResponse>> {
@@ -2194,6 +2302,11 @@ fn route_request(api: &LocalBindhubApi, request: HttpRequest) -> ApiResult<Vec<u
             let response = api.shared_folder(&auth, folder_id)?;
             json_response(200, &shared_folder_wire(response))
         }
+        ("GET", ["v1", "loom", "shared-folders", folder_id, "tree"]) => {
+            let auth = auth_from_request(api, &request)?;
+            let response = api.shared_folder_tree(&auth, folder_id)?;
+            json_response(200, &response)
+        }
         ("PUT", ["v1", "loom", "shared-folders", folder_id, "packs", revision_id]) => {
             let auth = auth_from_request(api, &request)?;
             let uploaded = api.put_pack(&auth, folder_id, revision_id, &request.body)?;
@@ -2362,6 +2475,25 @@ fn shared_folder_wire(response: SharedFolderResponse) -> SharedFolderWire {
         account_id: response.account_id.to_string(),
         role: role_to_string(response.role),
         display_name: response.display_name,
+    }
+}
+
+fn path_to_api_string(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn file_kind_to_api(kind: &FileKind) -> &'static str {
+    match kind {
+        FileKind::Directory => "directory",
+        FileKind::File => "file",
+        FileKind::Symlink => "symlink",
+        FileKind::Unsupported => "unsupported",
     }
 }
 
@@ -2895,6 +3027,90 @@ mod tests {
     }
 
     #[test]
+    fn shared_folder_tree_reads_latest_loom_pack() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalBindhubApi::open(dir.path()).expect("api opens");
+        let session = api
+            .create_dev_session(Some("alice"), Some("laptop"), Some("Laptop"))
+            .expect("session creates");
+        let auth = api
+            .authenticate(&session.session_token, &session.device_id)
+            .expect("session authenticates");
+        api.ensure_shared_folder(&auth, "shared-folder-1", "Code")
+            .expect("folder exists");
+
+        let object_bytes = b"hello";
+        let object = ObjectId::from_blake3_hex(&object_id_for(object_bytes)).expect("object id");
+        let file_version = loom_core::FileVersion::new(
+            loom_core::FileVersionId::new("file-version-1").expect("file version id"),
+            "README.md",
+            FileKind::File,
+            Some(object.clone()),
+            Some(object_bytes.len() as u64),
+            "2026-06-24T00:00:00Z",
+        )
+        .expect("file version creates");
+        let revision = loom_core::FolderRevision::new(
+            FolderRevisionId::new("folder-revision-1").expect("revision id"),
+            SharedFolderId::new("shared-folder-1").expect("folder id"),
+            None,
+            loom_core::RevisionBoundary::Sync,
+            vec![loom_core::FolderEntry::new(
+                "README.md",
+                file_version.id().clone(),
+            )
+            .expect("entry creates")],
+            "2026-06-24T00:00:01Z",
+        )
+        .expect("revision creates");
+        let pack = LoomPack::new(
+            SharedFolderId::new("shared-folder-1").expect("folder id"),
+            "Code",
+            revision.id().clone(),
+            vec![file_version],
+            vec![revision],
+            Vec::new(),
+            Vec::new(),
+            vec![loom_pack::PackObject {
+                object_id: object.clone(),
+                size_bytes: object_bytes.len() as u64,
+                compression: loom_pack::PackCompression::None,
+                availability: loom_pack::PackPayloadAvailability::Remote,
+            }],
+            Vec::new(),
+        )
+        .expect("pack creates");
+        api.put_object(&auth, "shared-folder-1", object.as_str(), object_bytes)
+            .expect("object uploads");
+        api.put_pack(
+            &auth,
+            "shared-folder-1",
+            "folder-revision-1",
+            &pack.encode(),
+        )
+        .expect("pack uploads");
+        api.compare_and_set_cursor(
+            &auth,
+            "shared-folder-1",
+            "shared-folder",
+            None,
+            "folder-revision-1",
+        )
+        .expect("cursor writes");
+
+        let tree = api
+            .shared_folder_tree(&auth, "shared-folder-1")
+            .expect("tree reads");
+
+        assert_eq!(tree.revision_id.as_deref(), Some("folder-revision-1"));
+        assert_eq!(tree.file_count, 1);
+        assert_eq!(tree.entries.len(), 1);
+        assert_eq!(tree.entries[0].path, "README.md");
+        assert_eq!(tree.entries[0].kind, "file");
+        assert_eq!(tree.entries[0].size_bytes, Some(5));
+    }
+
+    #[test]
     fn workos_session_association_uses_verified_boundary() {
         let dir = tempfile::tempdir().expect("temp dir");
         let api = LocalBindhubApi::open(dir.path()).expect("api opens");
@@ -2916,13 +3132,41 @@ mod tests {
 
         assert_ne!(session.session_token, "verified-workos-access-token");
         assert_eq!(authenticated.account_id, "account-org_123");
-        assert_eq!(authenticated.session_id, "session-session_123");
+        assert_eq!(authenticated.session_id, "session-session_123-device-browser");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].display_name, "Browser session");
         assert!(matches!(
             api.authenticate("verified-workos-access-token", &session.device_id),
             Err(ApiError::Unauthorized)
         ));
+    }
+
+    #[test]
+    fn workos_session_tokens_do_not_replace_other_devices() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalBindhubApi::open(dir.path()).expect("api opens");
+        let cli = api
+            .associate_verified_workos_session(VerifiedWorkOsSession {
+                user_id: "user_123".to_string(),
+                session_id: "session_123".to_string(),
+                organization_id: Some("org_123".to_string()),
+                device_id: "cli-device".to_string(),
+                device_display_name: "CLI".to_string(),
+            })
+            .expect("cli session associates");
+        let web = api
+            .associate_verified_workos_session(VerifiedWorkOsSession {
+                user_id: "user_123".to_string(),
+                session_id: "session_123".to_string(),
+                organization_id: Some("org_123".to_string()),
+                device_id: "web-device".to_string(),
+                device_display_name: "Web".to_string(),
+            })
+            .expect("web session associates");
+
+        assert_ne!(cli.session_id, web.session_id);
+        assert!(api.authenticate(&cli.session_token, &cli.device_id).is_ok());
+        assert!(api.authenticate(&web.session_token, &web.device_id).is_ok());
     }
 
     #[test]
