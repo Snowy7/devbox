@@ -1,0 +1,58 @@
+---
+import DocsShell from "../../components/DocsShell.astro"
+---
+
+<DocsShell
+  title="Concepts"
+  description="The Devbox and Loom vocabulary used by the alpha product, docs, and agents working in the repo."
+>
+  <h2>Devbox vs Loom</h2>
+  <p>
+    Devbox is the product users open. Loom is the engine direction underneath
+    Devbox. The user-facing promise stays focused on folders, machines, and
+    trust while Loom supplies the lower-level model.
+  </p>
+
+  <h2>Shared folders</h2>
+  <p>
+    A shared folder is the folder the user wants to keep continuous across
+    machines. It might contain many repos, one repo, no repo, nested apps,
+    secrets, dependencies, generated files, and agent work.
+  </p>
+
+  <h2>File versions and folder revisions</h2>
+  <p>
+    Loom captures file versions frequently. It coalesces them into folder
+    revisions at stable boundaries such as debounce windows, Loom commands,
+    sync, restore, sandbox merge, and checkpoint creation.
+  </p>
+
+  <h2>Machines and cursors</h2>
+  <p>
+    A cursor is a moving pointer for a machine, remote, or materialized folder
+    state. Cursors let Devbox explain which state each side believes is current
+    before syncing, restoring, or merging.
+  </p>
+
+  <h2>Hydration and cache</h2>
+  <p>
+    Hydration state records whether object bytes are remote-only, partial, or
+    fully local. Cache entries track byte availability separately from file
+    versions and folder revisions.
+  </p>
+
+  <h2>Hosted auth</h2>
+  <p>
+    The dashboard uses WorkOS/AuthKit as the hosted authentication direction.
+    Server code exchanges the verified WorkOS session with the hosted Devbox API
+    instead of exposing WorkOS access tokens to browser code.
+  </p>
+
+  <h2>Agents and workspaces</h2>
+  <p>
+    Agents need isolated workspaces and sandboxes so parallel work can be
+    reviewed and merged without damaging the shared folder a human trusts.
+    Overlays cover local non-source state such as dependencies, caches,
+    configuration, and secrets.
+  </p>
+</DocsShell>

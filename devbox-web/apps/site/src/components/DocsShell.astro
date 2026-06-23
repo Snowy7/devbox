@@ -1,0 +1,43 @@
+---
+import SiteShell from "./SiteShell.astro"
+
+interface Props {
+  title: string
+  description: string
+  eyebrow?: string
+}
+
+const { title, description, eyebrow = "Docs" } = Astro.props
+
+const docsNav = [
+  { href: "/docs/", label: "Overview" },
+  { href: "/docs/getting-started/", label: "Getting started" },
+  { href: "/docs/concepts/", label: "Concepts" },
+  { href: "/docs/security/", label: "Security and trust" },
+]
+---
+
+<SiteShell title={title} description={description}>
+  <section class="docs-hero">
+    <p class="eyebrow">{eyebrow}</p>
+    <h1>{title}</h1>
+    <p>{description}</p>
+  </section>
+  <div class="docs-layout">
+    <aside class="docs-nav" aria-label="Documentation">
+      {
+        docsNav.map((item) => (
+          <a
+            class:list={[Astro.url.pathname === item.href && "active"]}
+            href={item.href}
+          >
+            {item.label}
+          </a>
+        ))
+      }
+    </aside>
+    <article class="docs-content">
+      <slot />
+    </article>
+  </div>
+</SiteShell>

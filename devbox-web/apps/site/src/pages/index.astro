@@ -1,24 +1,239 @@
 ---
-
+import SiteShell from "../components/SiteShell.astro"
 ---
 
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Devbox</title>
-	</head>
-	<body>
-		<main>
-			<p>Devbox</p>
-			<h1>Your code folder, already there.</h1>
-			<p>
-				This Astro app is the public site foundation for landing pages,
-				docs, waitlist forms, and product updates.
-			</p>
-		</main>
-	</body>
-</html>
+<SiteShell
+  title="Devbox"
+  description="Devbox keeps a shared code folder continuous across machines, backed by the Loom sync engine direction."
+>
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Folder continuity for developers</p>
+      <h1>Your code folder, already there.</h1>
+      <p>
+        Devbox is for the moment you open another machine and the folder you
+        trust is ready: source, context, machine state, and enough local bytes
+        to keep moving.
+      </p>
+      <div class="hero-actions">
+        <a class="button primary" href="/auth/sign-in">Open dashboard</a>
+        <a class="button secondary" href="/docs/">Read the alpha docs</a>
+      </div>
+    </div>
+    <figure class="hero-media">
+      <img
+        src="/devbox-folder-continuity.png"
+        alt="Two laptops showing the same code folder across machines"
+        width="1536"
+        height="864"
+      />
+      <figcaption class="hero-caption">
+        Same folder, different machine, with Devbox tracking what is local,
+        cached, or remote-only.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section class="section band" id="continuity">
+    <div class="section-heading">
+      <p class="eyebrow">Shared folders</p>
+      <h2>The folder is the product boundary.</h2>
+      <p>
+        A shared folder can hold one repo, many repos, no repo, nested apps,
+        secrets, dependencies, generated files, and agent work. Devbox treats
+        that as normal developer life instead of asking the user to clean it up
+        first.
+      </p>
+    </div>
+    <div class="grid">
+      <article class="feature-card">
+        <h3>Capture file versions often</h3>
+        <p>
+          Loom records individual file states frequently, then coalesces stable
+          folder revisions at sync, restore, checkpoint, and merge boundaries.
+        </p>
+      </article>
+      <article class="feature-card">
+        <h3>Restore a coherent tree</h3>
+        <p>
+          Folder revisions describe a complete view of the tree without turning
+          every edit into a whole-folder snapshot.
+        </p>
+      </article>
+      <article class="feature-card">
+        <h3>Trust messy folders</h3>
+        <p>
+          Devbox keeps user intent centered on folders while the engine handles
+          object storage, cache metadata, and future chunk transfer.
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <section class="section" id="machines">
+    <div class="split">
+      <div class="section-heading">
+        <p class="eyebrow">Machines</p>
+        <h2>Move between computers without rebuilding context.</h2>
+        <p>
+          Machines are first-class in Devbox. Each machine needs a clear cursor,
+          a known hydration state, and a trusted auth boundary before it can
+          materialize or update a shared folder.
+        </p>
+        <div class="section-actions">
+          <a class="button primary" href="/dashboard">View app route</a>
+          <a class="button secondary" href="/docs/getting-started/">
+            Alpha setup
+          </a>
+        </div>
+      </div>
+      <div class="signal-list">
+        <article class="signal">
+          <h3>Cursor clarity</h3>
+          <p>
+            Machine, remote, and materialized-folder cursors explain what each
+            side believes is current.
+          </p>
+        </article>
+        <article class="signal">
+          <h3>Checkpoint intent</h3>
+          <p>
+            Human labels and pins help users retain meaningful folder revisions
+            without managing object internals.
+          </p>
+        </article>
+        <article class="signal">
+          <h3>Sandbox work</h3>
+          <p>
+            Humans and agents need isolated parallel workspaces that can merge
+            back into a trusted shared folder.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section band" id="storage">
+    <div class="section-heading">
+      <p class="eyebrow">Sparse and lazy storage</p>
+      <h2>Know which bytes are here before pretending they are.</h2>
+      <p>
+        The alpha documents the direction without claiming sparse clone is
+        complete: cache entries record object byte availability separately from
+        file versions and folder revisions.
+      </p>
+    </div>
+    <div class="timeline">
+      <div class="step">
+        <span>Remote-only</span>
+        <p>Metadata is known, but the object bytes are not local yet.</p>
+      </div>
+      <div class="step">
+        <span>Partial</span>
+        <p>Some bytes are available while future chunk transfer fills gaps.</p>
+      </div>
+      <div class="step">
+        <span>Fully local</span>
+        <p>The cache can serve the object without remote reads.</p>
+      </div>
+      <div class="step">
+        <span>Pinned</span>
+        <p>Retention intent keeps important revisions from being pruned.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="loom">
+    <div class="grid">
+      <article class="feature-card">
+        <h3>Devbox is the product</h3>
+        <p>
+          The user should think in folders and machines, not protocol details or
+          Git-only workflows.
+        </p>
+      </article>
+      <article class="feature-card">
+        <h3>Loom is the engine direction</h3>
+        <p>
+          Loom is the deeper sync and source-control model underneath Devbox:
+          objects, file versions, revisions, cursors, and cache records.
+        </p>
+      </article>
+      <article class="feature-card">
+        <h3>Git still matters</h3>
+        <p>
+          Devbox respects today&apos;s repos, but it is not built around Git as
+          the only shape a folder can take.
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <section class="section band" id="trust">
+    <div class="split">
+      <div class="section-heading">
+        <p class="eyebrow">Trust and safety</p>
+        <h2>Continuity is only useful when the boundary is clear.</h2>
+        <p>
+          Devbox needs plain behavior around secrets, generated files,
+          authentication, sparse storage caveats, and what is safe to hydrate on
+          a new machine.
+        </p>
+      </div>
+      <div class="signal-list">
+        <article class="signal">
+          <h3>Secrets deserve policy</h3>
+          <p>
+            Secret detection and block policies should stop unsafe captures
+            before object writes.
+          </p>
+        </article>
+        <article class="signal">
+          <h3>Auth stays server-owned</h3>
+          <p>
+            Browser code should not pass WorkOS access tokens directly to the
+            hosted Devbox API.
+          </p>
+        </article>
+        <article class="signal">
+          <h3>Generated files need intent</h3>
+          <p>
+            Dependencies, caches, build output, and local overlays are useful,
+            but they should not blur the trusted source boundary.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="agents">
+    <div class="split">
+      <div class="section-heading">
+        <p class="eyebrow">Developers and agents</p>
+        <h2>Parallel work should not damage the folder people trust.</h2>
+        <p>
+          Devbox is heading toward sandboxes for human and agent work, with
+          merge points that make folder state, overlays, and machine identity
+          explicit.
+        </p>
+      </div>
+      <form class="contact-form" aria-label="Alpha waitlist form">
+        <div class="field">
+          <label for="email">Work email</label>
+          <input id="email" name="email" type="email" autocomplete="email" />
+        </div>
+        <div class="field">
+          <label for="folder">What folder should Devbox help with?</label>
+          <textarea id="folder" name="folder"></textarea>
+        </div>
+        <button class="button primary" type="button"
+          >Request alpha access</button
+        >
+        <p class="form-note">
+          Form boundary: this PR ships the UI only. Wire this to an API, CRM, or
+          mail action before collecting submissions.
+        </p>
+      </form>
+    </div>
+  </section>
+</SiteShell>
