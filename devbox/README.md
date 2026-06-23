@@ -15,6 +15,13 @@ Devbox owns:
 - the Devbox-hosted implementation of Loom's remote protocol
 - product CLI commands such as `login`, `share`, `clone`, `pause`, `resume`, and `unlink`
 
+`devbox login` uses browser-based machine auth by default. The CLI starts a
+short-lived device flow with `devbox-api`, opens the web app's `/auth/cli`
+route, and stores the Devbox session returned by API polling after WorkOS/AuthKit
+has verified the browser session. Hosted browser auth must derive account
+identity from that verified session; use `devbox login --local-dev-direct` only
+for deterministic local alpha setup against a local dev API.
+
 Devbox configures and hosts Loom. It does not decide folder-state semantics, file-version capture,
 folder revision shape, checkpoint behavior, pack format, or remote reconciliation.
 

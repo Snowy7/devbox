@@ -31,6 +31,19 @@ import DocsShell from "../../components/DocsShell.astro"
     be committed.
   </p>
 
+  <h2>Connect the CLI</h2>
+  <p>
+    Run <code>devbox login</code> to connect this machine. The CLI opens the dashboard's
+    <code>/auth/cli</code> route, waits for browser sign-in, then stores the returned
+    Devbox session locally. The API derives account identity from the verified browser
+    session; do not pass raw account IDs for hosted browser auth.
+  </p>
+  <p>
+    For CI or local alpha work without live WorkOS, set
+    <code>DEVBOX_LOCAL_DEV_CLI_AUTH=1</code> with a local API URL and service token.
+    That mode is local-dev only and is not production authentication.
+  </p>
+
   <div class="callout">
     <h3>Alpha setup expectation</h3>
     <p>
