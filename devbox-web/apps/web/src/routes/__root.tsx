@@ -1,4 +1,10 @@
-import { HeadContent, Scripts, createRootRoute } from "@tanstack/react-router"
+import {
+  HeadContent,
+  Outlet,
+  Scripts,
+  createRootRoute,
+} from "@tanstack/react-router"
+import { AuthKitProvider } from "@workos/authkit-tanstack-react-start/client"
 
 import appCss from "@workspace/ui/globals.css?url"
 
@@ -29,8 +35,17 @@ export const Route = createRootRoute({
       <p>The requested page could not be found.</p>
     </main>
   ),
+  component: RootComponent,
   shellComponent: RootDocument,
 })
+
+function RootComponent() {
+  return (
+    <AuthKitProvider>
+      <Outlet />
+    </AuthKitProvider>
+  )
+}
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (

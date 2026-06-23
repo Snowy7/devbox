@@ -5,6 +5,16 @@ export const authRoutes = {
   signOut: "/auth/sign-out",
 } as const
 
+export const defaultSignedInPath = "/dashboard"
+
+export function safeReturnPathname(value: string | null): string | undefined {
+  if (!value || !value.startsWith("/") || value.startsWith("//")) {
+    return undefined
+  }
+
+  return value
+}
+
 export type WorkOsAuthEnv = {
   clientId?: string
   apiKey?: string
