@@ -65,7 +65,6 @@ pub struct DevSessionResponse {
 pub struct VerifiedWorkOsSession {
     pub user_id: String,
     pub session_id: String,
-    pub access_token: String,
     pub organization_id: Option<String>,
     pub device_id: String,
     pub device_display_name: String,
@@ -1061,6 +1060,15 @@ struct DevSessionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkOsSessionRequest {
+    user_id: String,
+    session_id: String,
+    organization_id: Option<String>,
+    device_id: String,
+    device_display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct DeviceRequest {
     device_id: Option<String>,
     display_name: Option<String>,
@@ -1240,7 +1248,7 @@ impl LocalDevboxApi {
     pub fn associate_verified_workos_session(
         &self,
         verified: VerifiedWorkOsSession,
-    ) -> ApiResult<AuthContext> {
+    ) -> ApiResult<DevSessionResponse> {
         let account_source = verified
             .organization_id
             .as_deref()
@@ -1249,22 +1257,29 @@ impl LocalDevboxApi {
         let session_id =
             safe_prefixed_id("session", &verified.session_id, "WorkOS session identity")?;
         let device_id = safe_prefixed_id("device", &verified.device_id, "device id")?;
-
-        if verified.access_token.trim().is_empty() {
-            return Err(ApiError::Unauthorized);
-        }
+        let session_token = format!(
+            "devbox-workos-session-{}",
+            digest_hex(&format!(
+                "{}:{}:{}:{}",
+                account_id,
+                session_id,
+                device_id,
+                timestamp()
+            ))
+        );
 
         self.metadata.upsert_session(SessionRecord {
             session_id: session_id.clone(),
             account_id: account_id.clone(),
-            token_hash: digest_hex(&verified.access_token),
+            token_hash: digest_hex(&session_token),
             created_at: timestamp(),
         })?;
         self.register_device_for_account(&account_id, &device_id, &verified.device_display_name)?;
 
-        Ok(AuthContext {
+        Ok(DevSessionResponse {
             account_id,
             session_id,
+            session_token,
             device_id,
         })
     }
@@ -1659,6 +1674,18 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
             )?;
             json_response(200, &response)
         }
+        ("POST", ["v1", "auth", "workos-session"]) => {
+            require_service_token(&request)?;
+            let body: WorkOsSessionRequest = json_body(&request.body)?;
+            let response = api.associate_verified_workos_session(VerifiedWorkOsSession {
+                user_id: body.user_id,
+                session_id: body.session_id,
+                organization_id: body.organization_id,
+                device_id: body.device_id,
+                device_display_name: body.device_display_name,
+            })?;
+            json_response(200, &response)
+        }
         ("POST", ["v1", "devices"]) => {
             let auth = auth_from_request(api, &request)?;
             let body: DeviceRequest = json_body(&request.body)?;
@@ -1784,6 +1811,19 @@ fn auth_from_request(api: &LocalDevboxApi, request: &HttpRequest) -> ApiResult<A
         .get("x-devbox-device-id")
         .ok_or(ApiError::Unauthorized)?;
     api.authenticate(token, device_id)
+}
+
+fn require_service_token(request: &HttpRequest) -> ApiResult<()> {
+    let expected = optional_env_value("DEVBOX_API_SERVICE_TOKEN").ok_or(ApiError::Unauthorized)?;
+    let actual = request
+        .headers
+        .get("x-devbox-api-service-token")
+        .ok_or(ApiError::Unauthorized)?;
+    if actual == &expected {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized)
+    }
 }
 
 fn read_http_request(stream: &mut TcpStream) -> ApiResult<Option<HttpRequest>> {
@@ -2379,38 +2419,134 @@ mod tests {
     fn workos_session_association_uses_verified_boundary() {
         let dir = tempfile::tempdir().expect("temp dir");
         let api = LocalDevboxApi::open(dir.path()).expect("api opens");
-        let auth = api
+        let session = api
             .associate_verified_workos_session(VerifiedWorkOsSession {
                 user_id: "user_123".to_string(),
                 session_id: "session_123".to_string(),
-                access_token: "verified-workos-access-token".to_string(),
                 organization_id: Some("org_123".to_string()),
                 device_id: "browser".to_string(),
                 device_display_name: "Browser session".to_string(),
             })
             .expect("verified WorkOS session associates");
         let authenticated = api
-            .authenticate("verified-workos-access-token", &auth.device_id)
-            .expect("stored verified token authenticates");
+            .authenticate(&session.session_token, &session.device_id)
+            .expect("stored Devbox session token authenticates");
         let devices = api
             .list_devices(&authenticated)
             .expect("associated device lists");
 
+        assert_ne!(session.session_token, "verified-workos-access-token");
         assert_eq!(authenticated.account_id, "account-org_123");
         assert_eq!(authenticated.session_id, "session-session_123");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].display_name, "Browser session");
         assert!(matches!(
-            api.associate_verified_workos_session(VerifiedWorkOsSession {
-                user_id: "user_123".to_string(),
-                session_id: "session_123".to_string(),
-                access_token: " ".to_string(),
-                organization_id: None,
-                device_id: "browser".to_string(),
-                device_display_name: "Browser session".to_string(),
-            }),
+            api.authenticate("verified-workos-access-token", &session.device_id),
             Err(ApiError::Unauthorized)
         ));
+    }
+
+    #[test]
+    fn hosted_workos_exchange_requires_service_token_and_returns_devbox_session() {
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let old_service_token = std::env::var("DEVBOX_API_SERVICE_TOKEN").ok();
+        std::env::set_var("DEVBOX_API_SERVICE_TOKEN", "service-secret");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open(dir.path()).expect("api opens");
+
+        let missing_service_token = route_request(
+            &api,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/auth/workos-session".to_string(),
+                headers: BTreeMap::new(),
+                body: br#"{
+                    "user_id": "user_123",
+                    "session_id": "session_123",
+                    "organization_id": "org_123",
+                    "device_id": "browser",
+                    "device_display_name": "Browser session"
+                }"#
+                .to_vec(),
+            },
+        )
+        .expect_err("service token is required");
+        assert!(matches!(missing_service_token, ApiError::Unauthorized));
+
+        let mut exchange_headers = BTreeMap::new();
+        exchange_headers.insert(
+            "x-devbox-api-service-token".to_string(),
+            "service-secret".to_string(),
+        );
+        let response = route_request(
+            &api,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/auth/workos-session".to_string(),
+                headers: exchange_headers,
+                body: br#"{
+                    "user_id": "user_123",
+                    "session_id": "session_123",
+                    "organization_id": "org_123",
+                    "device_id": "browser",
+                    "device_display_name": "Browser session"
+                }"#
+                .to_vec(),
+            },
+        )
+        .expect("verified WorkOS exchange succeeds");
+        let text = String::from_utf8(response).expect("response is utf8");
+        let body = text.split("\r\n\r\n").nth(1).expect("response has body");
+        let session: DevSessionResponse =
+            serde_json::from_str(body).expect("session response parses");
+
+        assert!(session.session_token.starts_with("devbox-workos-session-"));
+        assert_ne!(session.session_token, "workos-access-token");
+
+        let mut raw_workos_headers = BTreeMap::new();
+        raw_workos_headers.insert(
+            "authorization".to_string(),
+            "Bearer workos-access-token".to_string(),
+        );
+        raw_workos_headers.insert("x-devbox-device-id".to_string(), session.device_id.clone());
+        assert!(matches!(
+            route_request(
+                &api,
+                HttpRequest {
+                    method: "GET".to_string(),
+                    path: "/v1/devices".to_string(),
+                    headers: raw_workos_headers,
+                    body: Vec::new(),
+                },
+            ),
+            Err(ApiError::Unauthorized)
+        ));
+
+        let mut devbox_headers = BTreeMap::new();
+        devbox_headers.insert(
+            "authorization".to_string(),
+            format!("Bearer {}", session.session_token),
+        );
+        devbox_headers.insert("x-devbox-device-id".to_string(), session.device_id);
+        let devices_response = route_request(
+            &api,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/devices".to_string(),
+                headers: devbox_headers,
+                body: Vec::new(),
+            },
+        )
+        .expect("Devbox session token can list devices");
+        let devices_text = String::from_utf8(devices_response).expect("response is utf8");
+
+        assert!(devices_text.starts_with("HTTP/1.1 200 OK"));
+        assert!(devices_text.contains("Browser session"));
+
+        match old_service_token {
+            Some(value) => std::env::set_var("DEVBOX_API_SERVICE_TOKEN", value),
+            None => std::env::remove_var("DEVBOX_API_SERVICE_TOKEN"),
+        }
     }
 
     #[test]

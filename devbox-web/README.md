@@ -54,9 +54,13 @@ Dashboard data modes:
 ```sh
 DEVBOX_DASHBOARD_DATA_MODE=hosted-workos
 DEVBOX_HOSTED_API_URL=https://api.example.com
+DEVBOX_HOSTED_API_SERVICE_TOKEN=
 ```
 
-Uses the WorkOS access token as the hosted API bearer token.
+Uses the AuthKit-verified WorkOS session on the web server, exchanges it with
+the hosted API over a server-to-server service token, then uses the returned
+Devbox session token and device id for dashboard API reads. Browser code should
+never send WorkOS access tokens directly to `devbox-api`.
 
 ```sh
 DEVBOX_DASHBOARD_DATA_MODE=local-dev-api
