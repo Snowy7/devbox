@@ -219,6 +219,7 @@ pub struct LocalDevboxApi {
     root: Arc<PathBuf>,
     metadata: Arc<dyn ApiMetadataStore>,
     pack_storage: Arc<dyn PackStorage>,
+    local_dev_sessions_enabled: bool,
 }
 
 trait ApiMetadataStore: fmt::Debug + Send + Sync {
@@ -1407,7 +1408,7 @@ impl LocalDevboxApi {
         let root = root.as_ref().to_path_buf();
         let metadata = Arc::new(MemoryMetadataStore::default());
         let pack_storage = Arc::new(LocalFilePackStorage::open(&root)?);
-        Self::open_with_stores(root, metadata, pack_storage)
+        Self::open_with_stores(root, metadata, pack_storage, false)
     }
 
     pub fn open_from_env(root: impl AsRef<Path>) -> ApiResult<Self> {
@@ -1433,13 +1434,19 @@ impl LocalDevboxApi {
         } else {
             Arc::new(LocalFilePackStorage::open(&root)?)
         };
-        Self::open_with_stores(root, metadata, pack_storage)
+        Self::open_with_stores(
+            root,
+            metadata,
+            pack_storage,
+            env_flag_enabled("DEVBOX_API_ENABLE_LOCAL_DEV_SESSION"),
+        )
     }
 
     fn open_with_stores(
         root: impl AsRef<Path>,
         metadata: Arc<dyn ApiMetadataStore>,
         pack_storage: Arc<dyn PackStorage>,
+        local_dev_sessions_enabled: bool,
     ) -> ApiResult<Self> {
         let root = root.as_ref().to_path_buf();
         create_dir_all(&root)?;
@@ -1447,7 +1454,13 @@ impl LocalDevboxApi {
             root: Arc::new(root),
             metadata,
             pack_storage,
+            local_dev_sessions_enabled,
         })
+    }
+
+    fn with_local_dev_sessions(mut self) -> Self {
+        self.local_dev_sessions_enabled = true;
+        self
     }
 
     #[cfg(test)]
@@ -1456,7 +1469,7 @@ impl LocalDevboxApi {
         pack_storage: Arc<dyn PackStorage>,
     ) -> ApiResult<Self> {
         let metadata = Arc::new(MemoryMetadataStore::default());
-        Self::open_with_stores(root, metadata, pack_storage)
+        Self::open_with_stores(root, metadata, pack_storage, false)
     }
 
     pub fn root(&self) -> &Path {
@@ -1990,7 +2003,7 @@ impl Drop for LocalApiServer {
 }
 
 pub fn spawn_local_test_server(root: impl AsRef<Path>) -> ApiResult<LocalApiServer> {
-    let api = LocalDevboxApi::open(root)?;
+    let api = LocalDevboxApi::open(root)?.with_local_dev_sessions();
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|source| ApiError::Io {
         path: PathBuf::from("<tcp-listener>"),
         source,
@@ -2081,6 +2094,9 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
             }),
         ),
         ("POST", ["v1", "auth", "dev-session"]) => {
+            if !api.local_dev_sessions_enabled {
+                return Err(ApiError::Unauthorized);
+            }
             let body: DevSessionRequest = json_body(&request.body)?;
             let response = api.create_dev_session(
                 body.account_hint.as_deref(),
@@ -2498,6 +2514,10 @@ fn optional_env_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    optional_env_value(name).is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 fn metadata_database_url() -> ApiResult<String> {
@@ -3006,6 +3026,30 @@ mod tests {
             Some(value) => std::env::set_var("DEVBOX_API_SERVICE_TOKEN", value),
             None => std::env::remove_var("DEVBOX_API_SERVICE_TOKEN"),
         }
+    }
+
+    #[test]
+    fn dev_session_route_rejects_by_default_without_local_dev_gate() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open(dir.path()).expect("api opens");
+
+        let error = route_request(
+            &api,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/auth/dev-session".to_string(),
+                headers: BTreeMap::new(),
+                body: br#"{
+                    "account_hint": "alice",
+                    "device_id": "device-cli",
+                    "device_display_name": "Desk"
+                }"#
+                .to_vec(),
+            },
+        )
+        .expect_err("production/default API rejects direct dev session minting");
+
+        assert!(matches!(error, ApiError::Unauthorized));
     }
 
     #[test]

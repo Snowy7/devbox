@@ -41,7 +41,10 @@ import DocsShell from "../../components/DocsShell.astro"
   <p>
     For CI or local alpha work without live WorkOS, set
     <code>DEVBOX_LOCAL_DEV_CLI_AUTH=1</code> with a local API URL and service token.
-    That mode is local-dev only and is not production authentication.
+    That mode is local-dev only and is not production authentication. The direct local
+    session helper additionally requires
+    <code>DEVBOX_API_ENABLE_LOCAL_DEV_SESSION=1</code> on the API and loopback API
+    URLs in the CLI by default.
   </p>
 
   <div class="callout">

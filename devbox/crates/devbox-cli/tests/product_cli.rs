@@ -268,6 +268,31 @@ fn unauthenticated_share_and_clone_fail_without_touching_files() {
 }
 
 #[test]
+fn local_dev_direct_login_refuses_non_loopback_api_by_default() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = dir.path().join("config");
+
+    let login = run_devbox_with_env(
+        [("DEVBOX_CONFIG_DIR", path_str(&config))],
+        [
+            "login",
+            "--local-dev-direct",
+            "--api",
+            "https://api.devbox.example",
+            "--account",
+            "alice",
+            "--device-name",
+            "Desk",
+        ],
+    );
+
+    assert_failure(&login);
+    let stderr = stderr(&login);
+    assert!(stderr.contains("--local-dev-direct is local-dev only"));
+    assert!(stderr.contains("loopback --api URL"));
+}
+
+#[test]
 fn secret_blocking_still_applies_through_product_share() {
     let fixture = ProductCliFixture::new("secret");
     let raw_secret = "sk-abcdefghijklmnopqrstuvwxyzABCDEFGH123456";

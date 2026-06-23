@@ -20,7 +20,10 @@ short-lived device flow with `devbox-api`, opens the web app's `/auth/cli`
 route, and stores the Devbox session returned by API polling after WorkOS/AuthKit
 has verified the browser session. Hosted browser auth must derive account
 identity from that verified session; use `devbox login --local-dev-direct` only
-for deterministic local alpha setup against a local dev API.
+for deterministic local alpha setup against a local dev API. The direct helper
+requires `DEVBOX_API_ENABLE_LOCAL_DEV_SESSION=1` on `devbox-api`, and the CLI
+refuses non-loopback API URLs unless `DEVBOX_ALLOW_NON_LOOPBACK_LOCAL_DEV_LOGIN=1`
+is set for local development.
 
 Devbox configures and hosts Loom. It does not decide folder-state semantics, file-version capture,
 folder revision shape, checkpoint behavior, pack format, or remote reconciliation.

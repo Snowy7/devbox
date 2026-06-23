@@ -73,6 +73,11 @@ DEVBOX_LOCAL_DEV_AUTH_EMAIL=local-dev@example.test
 This bypass is only for CI/local-dev when live WorkOS is unavailable. Production
 must leave `DEVBOX_LOCAL_DEV_CLI_AUTH` unset and use AuthKit.
 
+The older direct local session helper is also gated: `devbox-api` must run with
+`DEVBOX_API_ENABLE_LOCAL_DEV_SESSION=1`, and `devbox login --local-dev-direct`
+refuses non-loopback API URLs unless
+`DEVBOX_ALLOW_NON_LOOPBACK_LOCAL_DEV_LOGIN=1` is set for local development.
+
 ## Dashboard data
 
 Authenticated dashboard routes are under `/dashboard`. The loaders require a

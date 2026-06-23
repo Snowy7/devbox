@@ -300,6 +300,7 @@ fn run_login(args: LoginArgs) -> Result<(), String> {
 }
 
 fn local_dev_login(args: &LoginArgs) -> Result<DevSessionResponse, String> {
+    ensure_local_dev_direct_api_allowed(&args.api_url)?;
     let request = serde_json::json!({
         "account_hint": args.account_hint,
         "device_id": stable_device_id(&args.device_name),
@@ -1958,6 +1959,43 @@ fn validate_web_url(web: &str) -> Result<(), String> {
     } else {
         Err("--web requires an http(s) URL".to_string())
     }
+}
+
+fn ensure_local_dev_direct_api_allowed(api: &str) -> Result<(), String> {
+    if is_loopback_api_url(api) || env_flag_enabled("DEVBOX_ALLOW_NON_LOOPBACK_LOCAL_DEV_LOGIN") {
+        return Ok(());
+    }
+
+    Err(
+        "devbox login --local-dev-direct is local-dev only; use a loopback --api URL or set DEVBOX_ALLOW_NON_LOOPBACK_LOCAL_DEV_LOGIN=1 for local development".to_string(),
+    )
+}
+
+fn is_loopback_api_url(api: &str) -> bool {
+    let Some((_, rest)) = api.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority)
+        .trim();
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or(bracketed)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    }
+    .to_ascii_lowercase();
+
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 fn api_path_segment(value: &str) -> Result<String, String> {

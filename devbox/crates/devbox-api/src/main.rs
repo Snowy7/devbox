@@ -39,7 +39,7 @@ fn run() -> Result<(), String> {
                 println!("devbox-api --root <PATH> [--bind 127.0.0.1:0]");
                 println!("Env: DATABASE_URL or DEVBOX_API_DATABASE_URL, DEVBOX_API_METADATA_MODE=memory for local smoke/dev, DEVBOX_API_ROOT, DEVBOX_API_BIND, PORT");
                 println!("Auth: CLI browser login uses /v1/auth/cli-device-flow plus service-token approval after web-side WorkOS verification");
-                println!("Local dev: /v1/auth/dev-session and devbox login --local-dev-direct are deterministic setup helpers, not production auth");
+                println!("Local dev: /v1/auth/dev-session requires DEVBOX_API_ENABLE_LOCAL_DEV_SESSION=1 and is not production auth");
                 println!("R2 pack storage: DEVBOX_R2_ENDPOINT, DEVBOX_R2_BUCKET, DEVBOX_R2_ACCESS_KEY_ID, DEVBOX_R2_SECRET_ACCESS_KEY, optional DEVBOX_R2_REGION, DEVBOX_R2_PREFIX, DEVBOX_R2_SESSION_TOKEN");
                 return Ok(());
             }
