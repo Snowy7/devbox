@@ -125,8 +125,8 @@ docker run --rm -p 3000:3000 \
 For staging, point the redirect and API values at the deployed domains:
 
 ```bash
-WORKOS_REDIRECT_URI=https://app-staging.bindhub.com/auth/callback
-WORKOS_SIGN_OUT_REDIRECT_URI=https://app-staging.bindhub.com/
+WORKOS_REDIRECT_URI=https://beta.bindhub.dev/auth/callback
+WORKOS_SIGN_OUT_REDIRECT_URI=https://beta.bindhub.dev/
 VITE_BINDHUB_DOCS_URL=https://staging.bindhub.com/docs
 BINDHUB_HOSTED_API_URL=https://staging-api.bindhub.dev/
 ```

@@ -237,7 +237,7 @@ BINDHUB_R2_SECRET_ACCESS_KEY=<optional blob secret>
 Site hosted env:
 
 ```sh
-PUBLIC_BINDHUB_DASHBOARD_URL=https://app-staging.bindhub.com
+PUBLIC_BINDHUB_DASHBOARD_URL=https://beta.bindhub.dev
 ```
 
 This is public. In the Docker/hosted path, the site server applies it at runtime when serving HTML,

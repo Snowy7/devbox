@@ -18,7 +18,7 @@ if (-not $WebUrl) {
     $WebUrl = if ($env:BINDHUB_DEFAULT_WEB_URL) {
         $env:BINDHUB_DEFAULT_WEB_URL
     } else {
-        "https://app-staging.bindhub.com"
+        "https://beta.bindhub.dev"
     }
 }
 
@@ -68,7 +68,7 @@ if ($ReleaseExists) {
         "release", "create", $Tag
     ) + $Assets + @(
         "--title", "Bindhub CLI $Tag",
-        "--notes", "Alpha command-line tools for Loom and Bindhub. The default API is https://staging-api.bindhub.dev/ and browser login opens https://app-staging.bindhub.com. OAuth, signed installers, and production hardening are not included yet."
+        "--notes", "Alpha command-line tools for Loom and Bindhub. The default API is https://staging-api.bindhub.dev/ and browser login opens https://beta.bindhub.dev. OAuth, signed installers, and production hardening are not included yet."
     )
     if ($Tag.Contains("-")) {
         $ghArgs += "--prerelease"

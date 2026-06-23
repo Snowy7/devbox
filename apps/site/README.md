@@ -32,7 +32,7 @@ PUBLIC_BINDHUB_DASHBOARD_URL=http://localhost:3000
 ```
 
 In staging, set this to the dashboard origin, for example
-`https://app-staging.bindhub.com`. The "Open dashboard" and "Sign in" links use
+`https://beta.bindhub.dev`. The "Open dashboard" and "Sign in" links use
 that value. If it is unset, links fall back to same-origin paths for local proxy
 setups.
 

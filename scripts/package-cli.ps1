@@ -22,7 +22,7 @@ if (-not $WebUrl) {
     $WebUrl = if ($env:BINDHUB_DEFAULT_WEB_URL) {
         $env:BINDHUB_DEFAULT_WEB_URL
     } else {
-        "https://app-staging.bindhub.com"
+        "https://beta.bindhub.dev"
     }
 }
 
@@ -75,7 +75,7 @@ Copy-Item -Force -Path (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $
 # Packaged production builds should already know the Bindhub API endpoint.
 
 # BINDHUB_API_URL=https://staging-api.bindhub.dev/
-# BINDHUB_WEB_URL=https://app-staging.bindhub.com
+# BINDHUB_WEB_URL=https://beta.bindhub.dev
 BINDHUB_CONFIG_DIR=.bindhub
 "@ | Set-Content -Encoding UTF8 -Path (Join-Path $StageDir ".env.example")
 

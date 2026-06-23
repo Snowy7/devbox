@@ -16,7 +16,7 @@ permissions:
 
 env:
   BINDHUB_DEFAULT_API_URL: https://staging-api.bindhub.dev/
-  BINDHUB_DEFAULT_WEB_URL: https://app-staging.bindhub.com
+  BINDHUB_DEFAULT_WEB_URL: https://beta.bindhub.dev
 
 jobs:
   macos-cli:
@@ -59,6 +59,6 @@ jobs:
             esac
             gh release create "$RELEASE_TAG" "${assets[@]}" \
               --title "Bindhub CLI $RELEASE_TAG" \
-              --notes "Alpha command-line tools for Loom and Bindhub. The default API is https://staging-api.bindhub.dev/ and browser login opens https://app-staging.bindhub.com. OAuth, signed installers, and production hardening are not included yet." \
+              --notes "Alpha command-line tools for Loom and Bindhub. The default API is https://staging-api.bindhub.dev/ and browser login opens https://beta.bindhub.dev. OAuth, signed installers, and production hardening are not included yet." \
               "${flags[@]}"
           fi
