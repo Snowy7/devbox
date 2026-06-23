@@ -62,6 +62,16 @@ pub struct DevSessionResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedWorkOsSession {
+    pub user_id: String,
+    pub session_id: String,
+    pub access_token: String,
+    pub organization_id: Option<String>,
+    pub device_id: String,
+    pub device_display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedFolderResponse {
     pub id: SharedFolderId,
     pub account_id: AccountId,
@@ -188,6 +198,7 @@ trait ApiMetadataStore: fmt::Debug + Send + Sync {
     fn session_by_token_hash(&self, token_hash: &str) -> ApiResult<Option<SessionRecord>>;
     fn device(&self, device_id: &str) -> ApiResult<Option<DeviceRecord>>;
     fn upsert_device(&self, device: DeviceRecord) -> ApiResult<()>;
+    fn devices_for_account(&self, account_id: &str) -> ApiResult<Vec<DeviceRecord>>;
     fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>>;
     fn insert_folder(&self, folder: FolderRecord) -> ApiResult<()>;
     fn membership(&self, account_id: &str, folder_id: &str) -> ApiResult<Option<MembershipRecord>>;
@@ -530,6 +541,24 @@ impl ApiMetadataStore for MemoryMetadataStore {
         Ok(())
     }
 
+    fn devices_for_account(&self, account_id: &str) -> ApiResult<Vec<DeviceRecord>> {
+        let mut devices = self
+            .state
+            .lock()
+            .map_err(lock_error)?
+            .devices
+            .iter()
+            .filter(|device| device.account_id == account_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        devices.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.device_id.cmp(&right.device_id))
+        });
+        Ok(devices)
+    }
+
     fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>> {
         Ok(self
             .state
@@ -800,6 +829,24 @@ impl ApiMetadataStore for PostgresMetadataStore {
             )
             .map_err(postgres_error)?;
         Ok(())
+    }
+
+    fn devices_for_account(&self, account_id: &str) -> ApiResult<Vec<DeviceRecord>> {
+        Ok(self
+            .client()?
+            .query(
+                "
+                SELECT account_id, device_id, display_name, registered_at
+                FROM api_devices
+                WHERE account_id = $1
+                ORDER BY display_name, device_id
+                ",
+                &[&account_id],
+            )
+            .map_err(postgres_error)?
+            .into_iter()
+            .map(device_from_row)
+            .collect())
     }
 
     fn folder(&self, folder_id: &str) -> ApiResult<Option<FolderRecord>> {
@@ -1190,6 +1237,38 @@ impl LocalDevboxApi {
         })
     }
 
+    pub fn associate_verified_workos_session(
+        &self,
+        verified: VerifiedWorkOsSession,
+    ) -> ApiResult<AuthContext> {
+        let account_source = verified
+            .organization_id
+            .as_deref()
+            .unwrap_or(verified.user_id.as_str());
+        let account_id = safe_prefixed_id("account", account_source, "WorkOS account identity")?;
+        let session_id =
+            safe_prefixed_id("session", &verified.session_id, "WorkOS session identity")?;
+        let device_id = safe_prefixed_id("device", &verified.device_id, "device id")?;
+
+        if verified.access_token.trim().is_empty() {
+            return Err(ApiError::Unauthorized);
+        }
+
+        self.metadata.upsert_session(SessionRecord {
+            session_id: session_id.clone(),
+            account_id: account_id.clone(),
+            token_hash: digest_hex(&verified.access_token),
+            created_at: timestamp(),
+        })?;
+        self.register_device_for_account(&account_id, &device_id, &verified.device_display_name)?;
+
+        Ok(AuthContext {
+            account_id,
+            session_id,
+            device_id,
+        })
+    }
+
     pub fn register_device(
         &self,
         auth: &AuthContext,
@@ -1299,6 +1378,22 @@ impl LocalDevboxApi {
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         Ok(responses)
+    }
+
+    pub fn list_devices(&self, auth: &AuthContext) -> ApiResult<Vec<DeviceResponse>> {
+        self.metadata
+            .devices_for_account(&auth.account_id)?
+            .into_iter()
+            .map(|device| {
+                Ok(DeviceResponse {
+                    id: DeviceId::new(device.device_id)
+                        .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+                    account_id: AccountId::new(device.account_id)
+                        .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+                    display_name: device.display_name,
+                })
+            })
+            .collect()
     }
 
     pub fn put_pack(
@@ -1580,6 +1675,19 @@ fn route_request(api: &LocalDevboxApi, request: HttpRequest) -> ApiResult<Vec<u8
                     display_name: response.display_name,
                 },
             )
+        }
+        ("GET", ["v1", "devices"]) => {
+            let auth = auth_from_request(api, &request)?;
+            let response = api
+                .list_devices(&auth)?
+                .into_iter()
+                .map(|device| DeviceWire {
+                    id: device.id.to_string(),
+                    account_id: device.account_id.to_string(),
+                    display_name: device.display_name,
+                })
+                .collect::<Vec<_>>();
+            json_response(200, &response)
         }
         ("PUT", ["v1", "shared-folders", folder_id]) => {
             let auth = auth_from_request(api, &request)?;
@@ -2115,10 +2223,13 @@ mod tests {
         let folders = api
             .list_shared_folders(&auth)
             .expect("folders list for account");
+        let devices = api.list_devices(&auth).expect("devices list for account");
 
         assert_eq!(folder.id.as_str(), "shared-folder-1");
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].display_name, "Code");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].display_name, "Laptop");
         assert!(api
             .put_pack(&auth, "shared-folder-1", "folder-revision-1", b"pack")
             .expect("pack writes"));
@@ -2261,6 +2372,44 @@ mod tests {
         assert!(matches!(
             api.ensure_shared_folder(&bob_auth, "shared-folder-1", "Code"),
             Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn workos_session_association_uses_verified_boundary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let api = LocalDevboxApi::open(dir.path()).expect("api opens");
+        let auth = api
+            .associate_verified_workos_session(VerifiedWorkOsSession {
+                user_id: "user_123".to_string(),
+                session_id: "session_123".to_string(),
+                access_token: "verified-workos-access-token".to_string(),
+                organization_id: Some("org_123".to_string()),
+                device_id: "browser".to_string(),
+                device_display_name: "Browser session".to_string(),
+            })
+            .expect("verified WorkOS session associates");
+        let authenticated = api
+            .authenticate("verified-workos-access-token", &auth.device_id)
+            .expect("stored verified token authenticates");
+        let devices = api
+            .list_devices(&authenticated)
+            .expect("associated device lists");
+
+        assert_eq!(authenticated.account_id, "account-org_123");
+        assert_eq!(authenticated.session_id, "session-session_123");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].display_name, "Browser session");
+        assert!(matches!(
+            api.associate_verified_workos_session(VerifiedWorkOsSession {
+                user_id: "user_123".to_string(),
+                session_id: "session_123".to_string(),
+                access_token: " ".to_string(),
+                organization_id: None,
+                device_id: "browser".to_string(),
+                device_display_name: "Browser session".to_string(),
+            }),
+            Err(ApiError::Unauthorized)
         ));
     }
 
