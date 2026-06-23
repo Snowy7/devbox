@@ -117,11 +117,17 @@ for binary in loom bindhub bindhub-daemon bindhub-metadata; do
 done
 
 if [ "$(uname -s)" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
-  xattr -dr com.apple.quarantine \
+  xattr -cr \
     "$install_dir/loom" \
     "$install_dir/bindhub" \
     "$install_dir/bindhub-daemon" \
     "$install_dir/bindhub-metadata" 2>/dev/null || true
+fi
+
+if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+  for binary in loom bindhub bindhub-daemon bindhub-metadata; do
+    codesign --force --sign - "$install_dir/$binary" >/dev/null 2>&1 || true
+  done
 fi
 
 if [ "${BINDHUB_NO_PATH:-}" != "1" ]; then
