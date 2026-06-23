@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn folder_revisions_are_coherent_sets_of_file_versions() {
-        let folder_id = SharedFolderId::new("folder-devbox").expect("folder id");
+        let folder_id = SharedFolderId::new("folder-bindhub").expect("folder id");
         let revision_id = FolderRevisionId::new("revision-1").expect("revision id");
         let file_version_id = FileVersionId::new("file-version-1").expect("file version id");
         let entry = FolderEntry::new("README.md", file_version_id.clone()).expect("entry");
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn checkpoints_pins_and_cursors_reference_folder_revisions() {
-        let folder_id = SharedFolderId::new("folder-devbox").expect("folder id");
+        let folder_id = SharedFolderId::new("folder-bindhub").expect("folder id");
         let revision_id = FolderRevisionId::new("revision-1").expect("revision id");
         let checkpoint = Checkpoint::new(
             CheckpointId::new("checkpoint-1").expect("checkpoint id"),
@@ -951,8 +951,8 @@ mod tests {
     fn workspace_sessions_name_virtual_views_over_folder_revisions() {
         let session = WorkspaceSession::new(
             WorkspaceSessionId::new("agent-session-1").expect("session id"),
-            WorkspaceId::new("workspace-devbox").expect("workspace id"),
-            SharedFolderId::new("folder-devbox").expect("folder id"),
+            WorkspaceId::new("workspace-bindhub").expect("workspace id"),
+            SharedFolderId::new("folder-bindhub").expect("folder id"),
             FolderRevisionId::new("revision-1").expect("revision id"),
             WorkspaceKind::AgentVirtual,
             WorkspaceSessionState::Open,
@@ -961,8 +961,8 @@ mod tests {
         .expect("workspace session creates");
 
         assert_eq!(session.id().as_str(), "agent-session-1");
-        assert_eq!(session.workspace_id().as_str(), "workspace-devbox");
-        assert_eq!(session.shared_folder_id().as_str(), "folder-devbox");
+        assert_eq!(session.workspace_id().as_str(), "workspace-bindhub");
+        assert_eq!(session.shared_folder_id().as_str(), "folder-bindhub");
         assert_eq!(session.base_revision_id().as_str(), "revision-1");
         assert_eq!(session.kind(), WorkspaceKind::AgentVirtual);
         assert_eq!(session.state(), WorkspaceSessionState::Open);

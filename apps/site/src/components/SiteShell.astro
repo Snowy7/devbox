@@ -1,0 +1,90 @@
+---
+import "../styles/site.css"
+import Logo from "./Logo.astro"
+
+interface Props {
+  title: string
+  description: string
+  canonicalPath?: string
+}
+
+const { title, description, canonicalPath = Astro.url.pathname } = Astro.props
+const pageTitle = title === "Bindhub" ? "Bindhub" : `${title} | Bindhub`
+const canonicalUrl = new URL(canonicalPath, Astro.url.origin)
+const ogImageUrl = new URL("/bindhub-folder-continuity.png", Astro.url.origin)
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonicalUrl} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Bindhub" />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={ogImageUrl} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImageUrl} />
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="site-header">
+      <nav class="nav" aria-label="Primary">
+        <a class="brand" href="/" aria-label="Bindhub home">
+          <Logo withWordmark size={28} />
+        </a>
+        <div class="nav-links">
+          <a href="/#continuity">Folders</a>
+          <a href="/#machines">Machines</a>
+          <a href="/#storage">Storage</a>
+          <a href="/docs/">Docs</a>
+          <a href="/auth/sign-in">Sign in</a>
+          <a class="button primary sm nav-cta" href="/auth/sign-in">
+            Open dashboard
+          </a>
+        </div>
+      </nav>
+    </header>
+    <main id="content">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="footer-brand">
+        <Logo withWordmark size={26} />
+        <p>Your code folder, already there — on every machine.</p>
+      </div>
+      <div class="footer-links">
+        <a href="/docs/">Docs</a>
+        <a href="/docs/security/">Security</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/auth/sign-in">Sign in</a>
+      </div>
+    </footer>
+    <script is:inline>
+      ;(() => {
+        const header = document.querySelector(".site-header")
+        if (!header) return
+        const onScroll = () =>
+          header.classList.toggle("scrolled", window.scrollY > 8)
+        onScroll()
+        window.addEventListener("scroll", onScroll, { passive: true })
+      })()
+    </script>
+  </body>
+</html>

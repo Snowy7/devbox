@@ -208,5 +208,5 @@ Deliverables:
 Exit criteria:
 
 - users perform meaningful workflows without manual branch/stash/worktree commands
-- teams can keep GitHub/GitLab as system of record while using Devbox locally
+- teams can keep GitHub/GitLab as system of record while using Bindhub locally
 - source-control layer increases retention and paid conversion

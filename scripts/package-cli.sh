@@ -5,15 +5,15 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/package-cli.sh [VERSION]
 
-Builds and packages Devbox alpha command-line tools for the current macOS/Linux host.
+Builds and packages Bindhub alpha command-line tools for the current macOS/Linux host.
 
 Environment:
-  DEVBOX_RELEASE_TARGET   Optional Rust target triple.
-  DEVBOX_DEFAULT_API_URL  Optional default Devbox API URL baked into the CLI.
+  BINDHUB_RELEASE_TARGET   Optional Rust target triple.
+  BINDHUB_DEFAULT_API_URL  Optional default Bindhub API URL baked into the CLI.
 
 Examples:
   scripts/package-cli.sh v0.1.0-alpha.1
-  DEVBOX_RELEASE_TARGET=x86_64-unknown-linux-gnu scripts/package-cli.sh v0.1.0-alpha.1
+  BINDHUB_RELEASE_TARGET=x86_64-unknown-linux-gnu scripts/package-cli.sh v0.1.0-alpha.1
 USAGE
 }
 
@@ -26,8 +26,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 version="${1:-$(git rev-parse --short HEAD)}"
-target="${DEVBOX_RELEASE_TARGET:-}"
-export DEVBOX_DEFAULT_API_URL="${DEVBOX_DEFAULT_API_URL:-https://devbox-staging.up.railway.app}"
+target="${BINDHUB_RELEASE_TARGET:-}"
+export BINDHUB_DEFAULT_API_URL="${BINDHUB_DEFAULT_API_URL:-https://bindhub-staging.up.railway.app}"
 
 if [[ -z "$target" ]]; then
   os="$(uname -s)"
@@ -44,7 +44,7 @@ if [[ -z "$target" ]]; then
       ;;
     *)
       echo "unsupported host for default target: $os $arch" >&2
-      echo "set DEVBOX_RELEASE_TARGET explicitly if Rust can build it here" >&2
+      echo "set BINDHUB_RELEASE_TARGET explicitly if Rust can build it here" >&2
       exit 1
       ;;
   esac
@@ -59,7 +59,7 @@ case "$target" in
     ;;
 esac
 
-package_name="devbox-$version-$target"
+package_name="bindhub-$version-$target"
 dist_dir="$repo_root/dist"
 stage_dir="$dist_dir/$package_name"
 archive="$dist_dir/$package_name.tar.gz"
@@ -71,30 +71,30 @@ mkdir -p "$stage_dir"
 rustup target add "$target"
 cargo build --release --locked \
   -p loom-cli \
-  -p devbox-cli \
-  -p devbox-daemon \
-  -p devbox-metadata \
+  -p bindhub-cli \
+  -p bindhub-daemon \
+  -p bindhub-metadata \
   --target "$target"
 
 cp "$repo_root/target/$target/release/loom" "$stage_dir/loom"
-cp "$repo_root/target/$target/release/devbox" "$stage_dir/devbox"
-cp "$repo_root/target/$target/release/devbox-daemon" "$stage_dir/devbox-daemon"
-cp "$repo_root/target/$target/release/devbox-metadata" "$stage_dir/devbox-metadata"
+cp "$repo_root/target/$target/release/bindhub" "$stage_dir/bindhub"
+cp "$repo_root/target/$target/release/bindhub-daemon" "$stage_dir/bindhub-daemon"
+cp "$repo_root/target/$target/release/bindhub-metadata" "$stage_dir/bindhub-metadata"
 cp "$repo_root/README.md" "$stage_dir/README.md"
 cp "$repo_root/LICENSE" "$stage_dir/LICENSE"
 cat > "$stage_dir/.env.example" <<'ENV'
-# Devbox CLI local/dev overrides.
-# Packaged production builds should already know the Devbox API endpoint.
+# Bindhub CLI local/dev overrides.
+# Packaged production builds should already know the Bindhub API endpoint.
 
-# DEVBOX_API_URL=https://devbox-staging.up.railway.app
-DEVBOX_CONFIG_DIR=.devbox
+# BINDHUB_API_URL=https://bindhub-staging.up.railway.app
+BINDHUB_CONFIG_DIR=.bindhub
 ENV
 cp "$repo_root/.env.example" "$stage_dir/.env.operator.example"
 mkdir -p "$stage_dir/scripts" "$stage_dir/docs"
-cp "$repo_root/scripts/install-devbox.sh" "$stage_dir/scripts/install-devbox.sh"
-cp "$repo_root/scripts/install-devbox.ps1" "$stage_dir/scripts/install-devbox.ps1"
+cp "$repo_root/scripts/install-bindhub.sh" "$stage_dir/scripts/install-bindhub.sh"
+cp "$repo_root/scripts/install-bindhub.ps1" "$stage_dir/scripts/install-bindhub.ps1"
 cp "$repo_root/scripts/load-r2-env.sh" "$stage_dir/scripts/load-r2-env.sh"
-cp "$repo_root/scripts/devbox-live-sync-alpha.sh" "$stage_dir/scripts/devbox-live-sync-alpha.sh"
+cp "$repo_root/scripts/bindhub-live-sync-alpha.sh" "$stage_dir/scripts/bindhub-live-sync-alpha.sh"
 cp "$repo_root/scripts/alpha-two-device-smoke.sh" "$stage_dir/scripts/alpha-two-device-smoke.sh"
 cp "$repo_root/docs/alpha-cli-distribution.md" "$stage_dir/docs/alpha-cli-distribution.md"
 

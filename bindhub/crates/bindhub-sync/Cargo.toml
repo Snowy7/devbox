@@ -1,0 +1,26 @@
+[package]
+name = "bindhub-sync"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake3 = "1"
+chacha20poly1305 = "0.10"
+bindhub-core = { path = "../bindhub-core" }
+bindhub-store = { path = "../bindhub-store" }
+getrandom = "0.2"
+hmac = "0.12"
+percent-encoding = "2"
+quick-xml = { version = "0.31", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "macros"] }
+ureq = "2"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

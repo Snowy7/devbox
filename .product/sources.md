@@ -17,7 +17,7 @@ Sources gathered on 2026-06-18.
 3. Mordor Intelligence: Software Development Tools Market  
    URL: https://www.mordorintelligence.com/industry-reports/software-development-tools-market  
    Useful facts: Estimates software development tools at USD 7.44B in 2026 and USD 15.72B in 2031.  
-   Caveat: Analyst estimates are model-based and categories may not map directly to Devbox.
+   Caveat: Analyst estimates are model-based and categories may not map directly to Bindhub.
 
 4. Mordor Intelligence: Version Control System Market  
    URL: https://www.mordorintelligence.com/industry-reports/version-control-system-market  

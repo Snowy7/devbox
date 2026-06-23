@@ -61,9 +61,9 @@ The 2026 software development tools market plus version control market is roughl
 USD 7.44B + USD 1.72B = USD 9.16B
 ```
 
-That makes a USD 3B to USD 9B long-term TAM plausible if Devbox becomes a durable workspace layer that competes for developer tools, version-control, CDE, and agent-workflow budgets.
+That makes a USD 3B to USD 9B long-term TAM plausible if Bindhub becomes a durable workspace layer that competes for developer tools, version-control, CDE, and agent-workflow budgets.
 
-The broader application development software market is much larger, but it includes many products Devbox will not directly replace. It should be used as an adjacency signal, not as the core TAM.
+The broader application development software market is much larger, but it includes many products Bindhub will not directly replace. It should be used as an adjacency signal, not as the core TAM.
 
 ## SAM And SOM
 

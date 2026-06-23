@@ -2458,16 +2458,16 @@ mod tests {
     #[test]
     fn capture_requests_are_for_shared_folders() {
         let folder = SharedFolder::new(
-            SharedFolderId::new("folder-devbox").expect("folder id"),
-            "/workspace/devbox",
-            "devbox",
+            SharedFolderId::new("folder-bindhub").expect("folder id"),
+            "/workspace/bindhub",
+            "bindhub",
             FolderScope::WholeFolder,
         )
         .expect("folder");
 
         let request = CaptureRequest::new(folder, RevisionBoundary::LoomCommand);
 
-        assert_eq!(request.shared_folder.display_name(), "devbox");
+        assert_eq!(request.shared_folder.display_name(), "bindhub");
         assert_eq!(request.boundary, RevisionBoundary::LoomCommand);
     }
 

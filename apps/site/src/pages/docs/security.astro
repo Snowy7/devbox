@@ -1,0 +1,53 @@
+---
+import DocsShell from "../../components/DocsShell.astro"
+---
+
+<DocsShell
+  title="Security and trust"
+  description="Trust boundaries for secrets, generated files, hosted auth, sessions, and sparse storage in the Bindhub alpha."
+>
+  <h2>Secrets</h2>
+  <p>
+    Bindhub should block unsafe secret capture before object writes. Treat
+    credentials, tokens, private keys, local database URLs, and service tokens
+    as local environment data unless a reviewed policy says otherwise.
+  </p>
+
+  <h2>Generated files and overlays</h2>
+  <p>
+    Dependencies, caches, build output, editor state, and machine-specific
+    configuration can be useful, but they are not always source. Bindhub should
+    make overlay state explicit so restoring a folder does not silently import
+    unsafe local clutter.
+  </p>
+
+  <h2>Auth and session boundary</h2>
+  <p>
+    Browser code should not send WorkOS access tokens directly to the hosted
+    Bindhub API. The dashboard server verifies the WorkOS session, performs a
+    server-to-server exchange, and uses the returned Bindhub session token and
+    device id for dashboard reads.
+  </p>
+
+  <h2>Sparse storage caveats</h2>
+  <p>
+    Chunk vocabulary and cache metadata do not mean sparse clone is complete.
+    Remote protocol v2, chunk transfer, compression, lazy materialization, and
+    OS virtual filesystem work remain later steps.
+  </p>
+
+  <div class="callout">
+    <h3>Operational rule</h3>
+    <p>
+      Bindhub should never pretend bytes are local when cache metadata says they
+      are remote-only or partial. Hydration state is part of the trust boundary.
+    </p>
+  </div>
+
+  <h2>Agent work</h2>
+  <p>
+    Agents should work in sandboxes or explicit workspaces and merge through
+    reviewed boundaries. Generated patches, dependency changes, and local tool
+    output should stay visible to the human who owns the folder.
+  </p>
+</DocsShell>

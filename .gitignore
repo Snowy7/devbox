@@ -31,6 +31,8 @@ dist/
 build/
 out/
 .next/
+.astro/
+apps/**/.astro/
 .turbo/
 .cache/
 coverage/
@@ -50,19 +52,19 @@ __pycache__/
 venv/
 
 # Test fixtures intentionally include generated-artifact directory names.
-!crates/devbox-core/tests/fixtures/**/node_modules/
-!crates/devbox-core/tests/fixtures/**/node_modules/**
-!crates/devbox-core/tests/fixtures/**/dist/
-!crates/devbox-core/tests/fixtures/**/dist/**
-!crates/devbox-core/tests/fixtures/**/target/
-!crates/devbox-core/tests/fixtures/**/target/**
-!crates/devbox-core/tests/fixtures/**/.venv/
-!crates/devbox-core/tests/fixtures/**/.venv/**
-!crates/devbox-core/tests/fixtures/**/__pycache__/
-!crates/devbox-core/tests/fixtures/**/__pycache__/**
-!crates/devbox-core/tests/fixtures/**/*.pyc
+!crates/bindhub-core/tests/fixtures/**/node_modules/
+!crates/bindhub-core/tests/fixtures/**/node_modules/**
+!crates/bindhub-core/tests/fixtures/**/dist/
+!crates/bindhub-core/tests/fixtures/**/dist/**
+!crates/bindhub-core/tests/fixtures/**/target/
+!crates/bindhub-core/tests/fixtures/**/target/**
+!crates/bindhub-core/tests/fixtures/**/.venv/
+!crates/bindhub-core/tests/fixtures/**/.venv/**
+!crates/bindhub-core/tests/fixtures/**/__pycache__/
+!crates/bindhub-core/tests/fixtures/**/__pycache__/**
+!crates/bindhub-core/tests/fixtures/**/*.pyc
 
-# Local devbox data
-.devbox/
-.devbox-alpha-evidence/
-.devbox-cache/
+# Local bindhub data
+.bindhub/
+.bindhub-alpha-evidence/
+.bindhub-cache/

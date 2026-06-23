@@ -1,0 +1,134 @@
+/* Andromeda design tokens — source: uiNerd16/aicanvas design-systems/andromeda/tokens.ts */
+
+:root {
+    /* Text */
+    --token-text-primary: #f5f5f5;
+    --token-text-secondary: #a3a3a3;
+    --token-text-muted: #9a9a9a;
+    --token-text-faint: #6e6e6e;
+
+    /* Surfaces */
+    --token-surface-base: #0e0e0f;
+    --token-surface-raised: #141415;
+    --token-surface-overlay: #19191a;
+    --token-surface-hover: #1c1c1d;
+    --token-surface-active: #232325;
+    --token-surface-alpha: rgba(0, 0, 0, 0.65);
+
+    /* Borders */
+    --token-border-subtle: #212122;
+    --token-border-base: #3e3e3f;
+    --token-border-bright: #5b5b5c;
+    --token-border-strong: #939393;
+
+    /* Accent */
+    --token-accent-100: #baf8ec;
+    --token-accent-200: #56f0d6;
+    --token-accent-300: #0fcfb2;
+    --token-accent-400: #109380;
+    --token-accent-500: #126059;
+
+    /* Red / Orange */
+    --token-red-300: #ff3939;
+    --token-red-400: #b82424;
+    --token-orange-300: #ffa000;
+
+    /* Typography */
+    --token-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+        Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    --token-font-mono: "JetBrains Mono Variable", "JetBrains Mono",
+        "IBM Plex Mono", Menlo, Monaco, Consolas, monospace;
+    --token-text-xs: 11px;
+    --token-text-sm: 13px;
+    --token-text-md: 14px;
+    --token-text-lg: 16px;
+    --token-text-xl: 20px;
+    --token-text-2xl: 24px;
+    --token-tracking-wide: 0.06em;
+    --token-tracking-wider: 0.12em;
+
+    /* Spacing */
+    --token-space-1: 4px;
+    --token-space-2: 8px;
+    --token-space-3: 12px;
+    --token-space-4: 16px;
+    --token-space-5: 20px;
+    --token-space-6: 24px;
+    --token-space-8: 32px;
+
+    /* Radius */
+    --token-radius-sm: 0px;
+    --token-radius-md: 0px;
+
+    /* Layout */
+    --token-shell-padding: 16px;
+    --token-shell-gap: 16px;
+    --token-sidebar-width: 240px;
+    --token-rail-width: 300px;
+    --token-header-height: 56px;
+    --token-content-max-width: 1280px;
+
+    /* Motion */
+    --token-duration-normal: 140ms;
+    --token-easing-out: cubic-bezier(0, 0, 0.2, 1);
+
+    /* Marker */
+    --token-marker-size: 12px;
+    --token-marker-color: var(--token-border-bright);
+
+    /* Semantic → shadcn */
+    --background: var(--token-surface-base);
+    --foreground: var(--token-text-primary);
+    --card: var(--token-surface-raised);
+    --card-foreground: var(--token-text-primary);
+    --popover: var(--token-surface-overlay);
+    --popover-foreground: var(--token-text-primary);
+    --primary: var(--token-accent-400);
+    --primary-foreground: var(--token-text-primary);
+    --secondary: var(--token-surface-active);
+    --secondary-foreground: var(--token-text-primary);
+    --muted: var(--token-surface-hover);
+    --muted-foreground: var(--token-text-secondary);
+    --accent: var(--token-accent-500);
+    --accent-foreground: var(--token-accent-100);
+    --destructive: var(--token-red-400);
+    --border: var(--token-border-base);
+    --input: var(--token-surface-overlay);
+    --ring: var(--token-accent-400);
+    --signal: var(--token-accent-300);
+    --faint: var(--token-text-faint);
+    --divider: var(--token-border-subtle);
+    --canvas: var(--token-surface-base);
+    --highlight: var(--token-surface-raised);
+    --overlay: var(--token-surface-alpha);
+    --radius: var(--token-radius-sm);
+    --sidebar: var(--token-surface-raised);
+    --sidebar-foreground: var(--token-text-primary);
+    --sidebar-primary: var(--token-accent-400);
+    --sidebar-primary-foreground: var(--token-text-primary);
+    --sidebar-accent: var(--token-surface-hover);
+    --sidebar-accent-foreground: var(--token-accent-300);
+    --sidebar-border: var(--token-border-subtle);
+    --sidebar-ring: var(--token-accent-400);
+    --chart-1: var(--token-accent-300);
+    --chart-2: var(--token-accent-400);
+    --chart-3: var(--token-text-muted);
+    --chart-4: var(--token-orange-300);
+    --chart-5: var(--token-red-300);
+}
+
+.light {
+    --token-text-primary: #1f2328;
+    --token-text-secondary: #656d76;
+    --token-text-muted: #6e7781;
+    --token-text-faint: #8c959f;
+    --token-surface-base: #f6f8fa;
+    --token-surface-raised: #ffffff;
+    --token-surface-overlay: #ffffff;
+    --token-surface-hover: #f3f4f6;
+    --token-surface-active: #eaeef2;
+    --token-border-subtle: #d8dee4;
+    --token-border-base: #d0d7de;
+    --primary-foreground: #ffffff;
+    --sidebar-accent-foreground: var(--token-accent-400);
+}

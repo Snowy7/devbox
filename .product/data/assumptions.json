@@ -1,6 +1,6 @@
 {
   "updated": "2026-06-19",
-  "product": "Devbox",
+  "product": "Bindhub",
   "core_thesis": "Your code folder, everywhere.",
   "foundation_thesis": "Loom: a folder-state graph for implicit history, checkpoints, safe sandboxes, shared overlays, and Git compatibility.",
   "market_anchors": {

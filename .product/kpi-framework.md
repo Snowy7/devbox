@@ -2,7 +2,7 @@
 
 ## Measurement Goal
 
-The metric system should prove that Devbox makes developer folder continuity reliable, fast, and
+The metric system should prove that Bindhub makes developer folder continuity reliable, fast, and
 trusted.
 
 The first dashboard should answer:
@@ -62,8 +62,8 @@ These metrics should be treated as executive-level guardrails.
 
 | Guardrail | Definition | Target |
 | --- | --- | --- |
-| Data loss incidents | Confirmed cases where user work is unrecoverable due to Devbox | 0 |
-| Corrupt Git repo incidents | Repos made unusable by Devbox sync/restore | 0 |
+| Data loss incidents | Confirmed cases where user work is unrecoverable due to Bindhub | 0 |
+| Corrupt Git repo incidents | Repos made unusable by bindhub sync/restore | 0 |
 | Secret leak incidents | Sensitive file synced contrary to policy | 0 |
 | CPU overhead | Daemon CPU while idle and while syncing | Idle under 1%, sync bounded by policy |
 | Battery impact | Battery drain attributable to daemon | Low enough for laptop trust |

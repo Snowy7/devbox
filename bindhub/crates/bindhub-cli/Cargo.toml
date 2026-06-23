@@ -1,0 +1,36 @@
+[package]
+name = "bindhub-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "bindhub"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1"
+bindhub-auth = { path = "../bindhub-auth" }
+bindhub-conflict = { path = "../bindhub-conflict" }
+bindhub-core = { path = "../bindhub-core" }
+bindhub-materialize = { path = "../bindhub-materialize" }
+bindhub-metadata = { path = "../bindhub-metadata" }
+bindhub-remote = { path = "../bindhub-remote" }
+bindhub-snapshot = { path = "../bindhub-snapshot" }
+bindhub-store = { path = "../bindhub-store" }
+bindhub-sync = { path = "../bindhub-sync" }
+loom-core = { path = "../../../loom/crates/loom-core" }
+loom-daemon = { path = "../../../loom/crates/loom-daemon" }
+loom-store = { path = "../../../loom/crates/loom-store" }
+loom-sync = { path = "../../../loom/crates/loom-sync" }
+loom-worktree = { path = "../../../loom/crates/loom-worktree" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+bindhub-api = { path = "../bindhub-api" }
+rusqlite = "0.31"
+tempfile = "3"

@@ -1,6 +1,13 @@
-# Devbox Web
+# Bindhub Dashboard
 
-Placeholder for the later Devbox web app.
+This TanStack Start app owns the authenticated Bindhub dashboard.
 
-The MVP product surface is CLI-first. Add web code here only when account, device, shared-folder,
-team, billing, or hosted-management workflows need a browser UI.
+Run it from the repo root:
+
+```sh
+pnpm dev:web
+```
+
+The dashboard runs at `http://localhost:3000`. Copy `.env.example` to
+`.env.local` before using real WorkOS auth or API data. Full local stack and
+deployment notes live in `docs/web.md`.

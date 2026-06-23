@@ -11,7 +11,7 @@ function createWindow() {
     height: 820,
     minWidth: 960,
     minHeight: 680,
-    title: "Devbox Alpha",
+    title: "Bindhub Alpha",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -31,11 +31,11 @@ function createWindow() {
 function createTray() {
   const state = buildAlphaStateFromEnv(process.env);
   tray = new Tray(nativeImage.createEmpty());
-  tray.setToolTip(`Devbox alpha: ${state.status}`);
+  tray.setToolTip(`Bindhub alpha: ${state.status}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
-        label: "Show Devbox",
+        label: "Show Bindhub",
         click: () => {
           mainWindow?.show();
         }
@@ -52,7 +52,7 @@ function createTray() {
   );
 }
 
-ipcMain.handle("devbox:alpha-state", () => buildAlphaStateFromEnv(process.env));
+ipcMain.handle("bindhub:alpha-state", () => buildAlphaStateFromEnv(process.env));
 
 void app.whenReady().then(() => {
   createWindow();

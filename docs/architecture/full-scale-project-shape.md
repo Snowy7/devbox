@@ -1,17 +1,17 @@
 # Full-Scale Project Shape
 
-This is the target shape if we rebuild Devbox around the clean Loom/Devbox split.
+This is the target shape if we rebuild Bindhub around the clean Lo../bindhub split.
 
 ## Core Split
 
 ```text
 Loom   = engine
-Devbox = hosted platform and product
+Bindhub = hosted platform and product
 ```
 
 Loom decides what folder state is and how it syncs.
 
-Devbox decides who owns it, where it is hosted, and who can access it.
+Bindhub decides who owns it, where it is hosted, and who can access it.
 
 ## Repository Shape
 
@@ -28,20 +28,20 @@ loom/
     loom-daemon
     loom-cli
     loom-git
-devbox/
+bindhub/
   crates/
-    devbox-auth
-    devbox-platform
-    devbox-remote
-    devbox-api
-    devbox-cli
+    bindhub-auth
+    bindhub-platform
+    bindhub-remote
+    bindhub-api
+    bindhub-cli
 ```
 
-Legacy alpha compatibility crates also live under `devbox/crates/` until their responsibilities are
+Legacy alpha compatibility crates also live under `bindhub/crates/` until their responsibilities are
 absorbed or retired. The full repository shape is:
 
 ```text
-devbox/
+bindhub/
   loom/
     crates/
       loom-core/
@@ -53,13 +53,13 @@ devbox/
       loom-cli/
       loom-git/
 
-  devbox/
+  bindhub/
     crates/
-      devbox-auth/
-      devbox-platform/
-      devbox-api/
-      devbox-remote/
-      devbox-cli/
+      bindhub-auth/
+      bindhub-platform/
+      bindhub-api/
+      bindhub-remote/
+      bindhub-cli/
 
   apps/
     desktop/
@@ -67,12 +67,12 @@ devbox/
 
   docs/
     loom/
-    devbox/
+    bindhub/
     architecture/
 
   tests/
     loom-fixtures/
-    devbox-e2e/
+    Bindhub-e2e/
 
   infra/
     local/
@@ -81,7 +81,7 @@ devbox/
 
 ## Loom
 
-Loom is the full local engine and sync system. It should be useful with no Devbox account, no hosted
+Loom is the full local engine and sync system. It should be useful with no Bindhub account, no hosted
 remote, and no network.
 
 All Loom crates should be Rust.
@@ -147,53 +147,53 @@ loom-git        Rust
 
 Git compatibility analyzer: detect Git, protect `.git`, preserve normal Git workflows.
 
-## Devbox
+## Bindhub
 
-Devbox is the hosted platform for Loom.
+Bindhub is the hosted platform for Loom.
 
-All Devbox backend and CLI crates should be Rust.
+All Bindhub backend and CLI crates should be Rust.
 
 ```text
-devbox-auth      Rust
+bindhub-auth      Rust
 ```
 
 Accounts, sessions, device identity, tokens.
 
 ```text
-devbox-platform  Rust
+bindhub-platform  Rust
 ```
 
 Shared folder registry, permissions, device membership, folder discovery.
 
 ```text
-devbox-remote    Rust
+bindhub-remote    Rust
 ```
 
 Hosted implementation of the Loom remote protocol.
 
 ```text
-devbox-api       Rust
+bindhub-api       Rust
 ```
 
 HTTP service for auth, platform APIs, hosted storage, object access, metadata.
 
 ```text
-devbox-cli       Rust
+bindhub-cli       Rust
 ```
 
 Product CLI:
 
 ```text
-devbox login
-devbox share <folder>
-devbox clone [name]
-devbox manage <name>
-devbox pause <name>
-devbox resume <name>
-devbox unlink <name>
+bindhub login
+bindhub share <folder>
+bindhub clone [name]
+bindhub manage <name>
+bindhub pause <name>
+bindhub resume <name>
+bindhub unlink <name>
 ```
 
-Devbox CLI should mostly authenticate, discover hosted folders, configure Loom, and then let Loom do
+Bindhub CLI should mostly authenticate, discover hosted folders, configure Loom, and then let Loom do
 the actual tracking and syncing.
 
 ## Apps
@@ -202,7 +202,7 @@ the actual tracking and syncing.
 apps/desktop    TypeScript + React + Electron
 ```
 
-Local product shell. Talks to Loom daemon and Devbox API. It must not mutate shared folders
+Local product shell. Talks to Loom daemon and Bindhub API. It must not mutate shared folders
 directly.
 
 ```text
@@ -221,7 +221,7 @@ infra/hosted    deployment configs
 
 ## MVP Proofs
 
-The MVP should prove Loom and Devbox separately.
+The MVP should prove Loom and Bindhub separately.
 
 ```text
 Loom proof:
@@ -231,11 +231,11 @@ Loom proof:
   restore previous states
   sync to a simple Loom remote
 
-Devbox proof:
+Bindhub proof:
   login
   share a folder
   clone it on another machine
-  let Loom keep it synced through Devbox hosted storage
+  let Loom keep it synced through Bindhub hosted storage
 ```
 
 ## Language Summary
@@ -243,8 +243,8 @@ Devbox proof:
 ```text
 Loom engine: Rust
 Loom CLI/daemon: Rust
-Devbox backend/platform: Rust
-Devbox CLI: Rust
+Bindhub backend/platform: Rust
+Bindhub CLI: Rust
 Desktop app: TypeScript + React + Electron
 Web app later: TypeScript + React
 Docs: Markdown/MDX

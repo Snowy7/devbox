@@ -10,7 +10,7 @@ pushes the tag, and uploads the package to a GitHub Release.
 
 Examples:
   scripts/publish-cli-release.sh v0.1.0-alpha.1
-  DEVBOX_RELEASE_TARGET=aarch64-apple-darwin scripts/publish-cli-release.sh v0.1.0-alpha.1
+  BINDHUB_RELEASE_TARGET=aarch64-apple-darwin scripts/publish-cli-release.sh v0.1.0-alpha.1
 USAGE
 }
 
@@ -48,7 +48,7 @@ git push origin "$tag"
 
 "$repo_root/scripts/package-cli.sh" "$tag"
 
-mapfile -t assets < <(find "$repo_root/dist" -maxdepth 1 -type f \( -name "devbox-$tag-*.tar.gz" -o -name "devbox-$tag-*.tar.gz.sha256" \) | sort)
+mapfile -t assets < <(find "$repo_root/dist" -maxdepth 1 -type f \( -name "bindhub-$tag-*.tar.gz" -o -name "bindhub-$tag-*.tar.gz.sha256" \) | sort)
 if [[ "${#assets[@]}" -eq 0 ]]; then
   echo "no release assets found for $tag" >&2
   exit 1
@@ -65,7 +65,7 @@ if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
 else
   gh release create "$tag" "${assets[@]}" \
     --repo "$repo" \
-    --title "Devbox CLI $tag" \
+    --title "Bindhub CLI $tag" \
     --notes "Alpha command-line tools for hosted object transfer, trusted direct-R2 smoke, hosted metadata, and two-device live-sync testing. OAuth, signed installers, and production deployment hardening are not included yet." \
     "${release_flags[@]}"
 fi

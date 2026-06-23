@@ -1522,10 +1522,10 @@ fn cache_status_counts_materialized_duplicate_objects_once_per_present_file() {
 }
 
 #[test]
-fn devbox_hosted_remote_sync_and_clone_move_folder_state() {
+fn bindhub_hosted_remote_sync_and_clone_move_folder_state() {
     let dir = tempfile::tempdir().expect("temp dir");
     let api =
-        devbox_api::spawn_local_test_server(dir.path().join("api")).expect("api server starts");
+        bindhub_api::spawn_local_test_server(dir.path().join("api")).expect("api server starts");
     let api_url = api.base_url();
     let source = dir.path().join("source");
     let target = dir.path().join("target");
@@ -1542,19 +1542,19 @@ fn devbox_hosted_remote_sync_and_clone_move_folder_state() {
     let remote_add = run_loom([
         "remote",
         "add",
-        "devbox",
+        "bindhub",
         &api_url,
         source.to_str().expect("UTF-8 path"),
     ]);
     assert_success(&remote_add);
     let remote_add_stdout = stdout(&remote_add);
-    assert!(remote_add_stdout.contains("Kind: devbox"));
+    assert!(remote_add_stdout.contains("Kind: bindhub"));
     let clone_url = value_after(&remote_add_stdout, "Clone URL: ");
 
     let sync = run_loom(["sync", source.to_str().expect("UTF-8 path")]);
     assert_success(&sync);
     let sync_stdout = stdout(&sync);
-    assert!(sync_stdout.contains("Remote: devbox"));
+    assert!(sync_stdout.contains("Remote: bindhub"));
     assert!(sync_stdout.contains("Synced revision:"));
     assert!(sync_stdout.contains("Pack objects: 1"));
 

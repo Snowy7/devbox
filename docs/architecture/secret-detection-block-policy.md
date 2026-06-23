@@ -5,7 +5,7 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice adds local high-confidence secret blocking to snapshot and local/mock sync
 foundations. It protects the future cloud path by preventing obvious secrets from becoming included
@@ -35,7 +35,7 @@ before blob-cache writes. Local policy records let the alpha UI and CLI distingu
 
 ## Detector Rules
 
-`devbox-core` owns the detector rules in `secrets`.
+`Bindhub-core` owns the detector rules in `secrets`.
 
 The initial rule set is intentionally conservative and high-confidence:
 
@@ -53,7 +53,7 @@ even in synthetic tests or examples.
 
 ## Snapshot Semantics
 
-`devbox-snapshot` applies secret detection before writing file bytes to `BlobCache`.
+`Bindhub-snapshot` applies secret detection before writing file bytes to `BlobCache`.
 
 If a regular file triggers a high-confidence rule:
 
@@ -72,13 +72,13 @@ The local change feed only persists uploadable operations for included regular f
 Blocked-secret files are counted as skipped/deferred and do not become pending created or modified
 operations.
 
-`devbox sync publish-snapshot` only uploads included file blobs from persisted snapshot metadata. A
+`bindhub sync publish-snapshot` only uploads included file blobs from persisted snapshot metadata. A
 blocked-secret entry has no blob ref, so it cannot publish a file blob or materialize as a restored
 file on another local/mock device.
 
 ## CLI Surface
 
-`devbox snapshot` prints:
+`bindhub snapshot` prints:
 
 - `Blocked secrets: <count>`
 - `SECRET<TAB><path><TAB><redacted policy reason>` rows for blocked entries
@@ -89,8 +89,8 @@ entries remain visible as deferred/skipped policy entries without exposing raw s
 Explicit alpha policy records are managed with:
 
 ```text
-devbox secrets policy add --db <DB_PATH> --project <PROJECT_ID> --path <REL_PATH> --action block|template|envelope [--envelope-ref <REF>] [--note <TEXT>]
-devbox secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]
+bindhub secrets policy add --db <DB_PATH> --project <PROJECT_ID> --path <REL_PATH> --action block|template|envelope [--envelope-ref <REF>] [--note <TEXT>]
+bindhub secrets policy list --db <DB_PATH> [--project <PROJECT_ID>]
 ```
 
 The CLI and store reject secret-looking envelope references or notes. Envelope references must use

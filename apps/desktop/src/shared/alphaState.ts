@@ -125,13 +125,13 @@ export type AlphaState = {
 };
 
 export function buildAlphaStateFromEnv(env: Record<string, string | undefined> = {}): AlphaState {
-  const remoteKind = env.DEVBOX_REMOTE_KIND === "s3" ? "s3-compatible" : "local-filesystem";
+  const remoteKind = env.BINDHUB_REMOTE_KIND === "s3" ? "s3-compatible" : "local-filesystem";
   const local = buildLocalPaths(env);
   const hosted = buildHostedConfig(env);
   const remote = buildRemoteConfig(env, remoteKind, hosted);
   const pairing = buildPairingState(env, local);
   const liveSync = buildLiveSyncState(env, local, remoteKind);
-  const source = hasAnyDevboxEnv(env) ? "environment" : "safe-placeholder";
+  const source = hasAnyBindhubEnv(env) ? "environment" : "safe-placeholder";
   const status = deriveStatus(local, hosted, remote, liveSync);
   const projectName = projectNameFromPath(local.projectRoot);
 
@@ -151,7 +151,7 @@ export function buildAlphaStateFromEnv(env: Record<string, string | undefined> =
         name: projectName,
         path: local.projectRoot,
         status,
-        lastSnapshot: "resolved by devbox-daemon sync",
+        lastSnapshot: "resolved by bindhub-daemon sync",
         pendingChanges: 0,
         blockedSecrets: 0,
         openConflicts: 0,
@@ -167,7 +167,7 @@ export function buildAlphaStateFromEnv(env: Record<string, string | undefined> =
         incomingSnapshot: "<incoming-snapshot-id>",
         affectedPaths: 0,
         command:
-          "devbox conflicts resolve --db " +
+          "bindhub conflicts resolve --db " +
           shellValue(local.dbPath) +
           " <CONFLICT_ID> --manual-resolution keep-both --confirm-no-auto-apply"
       }
@@ -213,7 +213,7 @@ export function buildAlphaStateFromEnv(env: Record<string, string | undefined> =
       packageCli: "scripts/package-cli.sh v0.1.0-alpha.1",
       publishCli: "scripts/publish-cli-release.sh v0.1.0-alpha.1",
       smokeTest: "scripts/alpha-two-device-smoke.sh",
-      desktopBuild: "cd apps/desktop && npm run build",
+      desktopBuild: "pnpm --filter @bindhub/desktop build",
       liveSync: liveSync.command
     }
   };
@@ -223,49 +223,49 @@ export const alphaStateFixture: AlphaState = buildAlphaStateFromEnv({});
 
 function buildLocalPaths(env: Record<string, string | undefined>): LocalPaths {
   return {
-    dbPath: env.DEVBOX_LIVE_DB ?? "./devbox.sqlite3",
-    cacheRoot: env.DEVBOX_LIVE_CACHE ?? "./.devbox-cache",
-    projectRoot: env.DEVBOX_LIVE_PROJECT_ROOT ?? "./project",
-    targetPath: env.DEVBOX_LIVE_TARGET ?? "./receiver-project",
-    remoteDir: env.DEVBOX_REMOTE_DIR ?? "./remote",
-    evidenceDir: env.DEVBOX_ALPHA_EVIDENCE_DIR ?? "./.devbox-alpha-evidence"
+    dbPath: env.BINDHUB_LIVE_DB ?? "./bindhub.sqlite3",
+    cacheRoot: env.BINDHUB_LIVE_CACHE ?? "./.bindhub-cache",
+    projectRoot: env.BINDHUB_LIVE_PROJECT_ROOT ?? "./project",
+    targetPath: env.BINDHUB_LIVE_TARGET ?? "./receiver-project",
+    remoteDir: env.BINDHUB_REMOTE_DIR ?? "./remote",
+    evidenceDir: env.BINDHUB_ALPHA_EVIDENCE_DIR ?? "./.bindhub-alpha-evidence"
   };
 }
 
 function buildHostedConfig(env: Record<string, string | undefined>): HostedConfig {
-  const api = env.DEVBOX_METADATA_API ?? "http://127.0.0.1:8787";
-  const metadataDb = env.DEVBOX_METADATA_DB ?? "./metadata-alpha.sqlite3";
-  const metadataProject = env.DEVBOX_METADATA_PROJECT ?? "project-example";
-  const sessionTokenEnv = env.DEVBOX_SESSION_TOKEN_ENV ?? "DEVBOX_SESSION_TOKEN";
+  const api = env.BINDHUB_METADATA_API ?? "http://127.0.0.1:8787";
+  const metadataDb = env.BINDHUB_METADATA_DB ?? "./metadata-alpha.sqlite3";
+  const metadataProject = env.BINDHUB_METADATA_PROJECT ?? "project-example";
+  const sessionTokenEnv = env.BINDHUB_SESSION_TOKEN_ENV ?? "BINDHUB_SESSION_TOKEN";
   const sessionState = env[sessionTokenEnv] ? "configured" : "missing";
 
   return {
     api,
     metadataDb,
-    metadataAccount: env.DEVBOX_METADATA_ACCOUNT ?? "<account-id-from-hosted-status>",
+    metadataAccount: env.BINDHUB_METADATA_ACCOUNT ?? "<account-id-from-hosted-status>",
     metadataProject,
     sessionTokenEnv,
     sessionState,
-    authMode: env.DEVBOX_METADATA_DB ? "mock-dev-sqlite" : "account-session",
+    authMode: env.BINDHUB_METADATA_DB ? "mock-dev-sqlite" : "account-session",
     commands: {
       login:
-        "devbox auth hosted-login --api " +
+        "bindhub auth hosted-login --api " +
         shellValue(api) +
-        " --email <tester-email> --invite-code-env DEVBOX_ALPHA_INVITE_CODE",
+        " --email <tester-email> --invite-code-env BINDHUB_ALPHA_INVITE_CODE",
       status:
-        "devbox auth hosted-status --api " +
+        "bindhub auth hosted-status --api " +
         shellValue(api) +
         " --session-token-env " +
         shellValue(sessionTokenEnv),
       objectAccess:
-        "devbox metadata object-access resolve --api " +
+        "bindhub metadata object-access resolve --api " +
         shellValue(api) +
         " --session-token-env " +
         shellValue(sessionTokenEnv) +
         " --project " +
         shellValue(metadataProject) +
         " --lease " +
-        shellValue(env.DEVBOX_OBJECT_ACCESS_LEASE ?? "lease-alpha")
+        shellValue(env.BINDHUB_OBJECT_ACCESS_LEASE ?? "lease-alpha")
     }
   };
 }
@@ -292,8 +292,8 @@ function buildRemoteConfig(
     };
   }
 
-  const accessKeyEnv = env.DEVBOX_R2_ACCESS_KEY_ENV ?? "DEVBOX_R2_ACCESS_KEY_ID";
-  const secretKeyEnv = env.DEVBOX_R2_SECRET_KEY_ENV ?? "DEVBOX_R2_SECRET_ACCESS_KEY";
+  const accessKeyEnv = env.BINDHUB_R2_ACCESS_KEY_ENV ?? "BINDHUB_R2_ACCESS_KEY_ID";
+  const secretKeyEnv = env.BINDHUB_R2_SECRET_KEY_ENV ?? "BINDHUB_R2_SECRET_ACCESS_KEY";
   const credentials =
     env[accessKeyEnv] && env[secretKeyEnv]
       ? "loaded from env names; values hidden"
@@ -301,15 +301,15 @@ function buildRemoteConfig(
 
   return {
     kind: remoteKind,
-    endpoint: env.DEVBOX_R2_ENDPOINT ?? "https://example-account-id.r2.cloudflarestorage.com",
-    bucket: env.DEVBOX_R2_BUCKET ?? "devbox-alpha",
-    region: env.DEVBOX_R2_REGION ?? "auto",
+    endpoint: env.BINDHUB_R2_ENDPOINT ?? "https://example-account-id.r2.cloudflarestorage.com",
+    bucket: env.BINDHUB_R2_BUCKET ?? "bindhub-alpha",
+    region: env.BINDHUB_R2_REGION ?? "auto",
     prefix:
-      env.DEVBOX_R2_PREFIX ??
+      env.BINDHUB_R2_PREFIX ??
       "accounts/" + hosted.metadataAccount + "/projects/" + hosted.metadataProject,
     credentials,
     objectAccess: {
-      leaseId: env.DEVBOX_OBJECT_ACCESS_LEASE ?? "lease-alpha",
+      leaseId: env.BINDHUB_OBJECT_ACCESS_LEASE ?? "lease-alpha",
       capabilities: "read,write,list,head",
       grantStatus: hosted.sessionState,
       sharedBucketBoundary: "one bucket, per-account/project prefixes"
@@ -321,10 +321,10 @@ function buildPairingState(
   env: Record<string, string | undefined>,
   local: LocalPaths
 ): PairingState {
-  const tokenEnv = env.DEVBOX_PAIRING_TOKEN_ENV ?? "DEVBOX_PAIRING_TOKEN";
-  const joinRequestEnv = env.DEVBOX_PAIRING_JOIN_REQUEST_ENV ?? "DEVBOX_PAIRING_JOIN_REQUEST";
-  const completionEnv = env.DEVBOX_PAIRING_COMPLETION_ENV ?? "DEVBOX_PAIRING_COMPLETION";
-  const receiverDb = env.DEVBOX_RECEIVER_DB ?? "./receiver.sqlite3";
+  const tokenEnv = env.BINDHUB_PAIRING_TOKEN_ENV ?? "BINDHUB_PAIRING_TOKEN";
+  const joinRequestEnv = env.BINDHUB_PAIRING_JOIN_REQUEST_ENV ?? "BINDHUB_PAIRING_JOIN_REQUEST";
+  const completionEnv = env.BINDHUB_PAIRING_COMPLETION_ENV ?? "BINDHUB_PAIRING_COMPLETION";
+  const receiverDb = env.BINDHUB_RECEIVER_DB ?? "./receiver.sqlite3";
   const hasToken = Boolean(env[tokenEnv]);
   const hasJoinRequest = Boolean(env[joinRequestEnv]);
   const hasCompletion = Boolean(env[completionEnv]);
@@ -342,15 +342,15 @@ function buildPairingState(
     joinRequestEnv,
     completionEnv,
     commands: {
-      invite: "devbox devices invite --db " + shellValue(local.dbPath),
+      invite: "bindhub devices invite --db " + shellValue(local.dbPath),
       join:
-        "devbox devices join --db " +
+        "bindhub devices join --db " +
         shellValue(receiverDb) +
         " --token-env " +
         shellValue(tokenEnv) +
         " --device-name <receiver-name>",
       approveJoin:
-        "devbox devices approve-join --db " +
+        "bindhub devices approve-join --db " +
         shellValue(local.dbPath) +
         " --token-env " +
         shellValue(tokenEnv) +
@@ -358,7 +358,7 @@ function buildPairingState(
         shellValue(joinRequestEnv) +
         " --device-name <receiver-name>",
       complete:
-        "devbox devices complete --db " +
+        "bindhub devices complete --db " +
         shellValue(receiverDb) +
         " --completion-env " +
         shellValue(completionEnv)
@@ -371,15 +371,15 @@ function buildLiveSyncState(
   local: LocalPaths,
   remoteKind: RemoteConfig["kind"]
 ): LiveSyncState {
-  const mode = parseMode(env.DEVBOX_LIVE_MODE);
-  const once = env.DEVBOX_LIVE_ONCE === "true";
-  const apply = env.DEVBOX_LIVE_APPLY === "true";
+  const mode = parseMode(env.BINDHUB_LIVE_MODE);
+  const once = env.BINDHUB_LIVE_ONCE === "true";
+  const apply = env.BINDHUB_LIVE_APPLY === "true";
   const missing = [
-    ["DEVBOX_LIVE_DB", env.DEVBOX_LIVE_DB],
-    ["DEVBOX_LIVE_CACHE", env.DEVBOX_LIVE_CACHE],
-    ["DEVBOX_LIVE_PROJECT_ROOT", env.DEVBOX_LIVE_PROJECT_ROOT]
+    ["BINDHUB_LIVE_DB", env.BINDHUB_LIVE_DB],
+    ["BINDHUB_LIVE_CACHE", env.BINDHUB_LIVE_CACHE],
+    ["BINDHUB_LIVE_PROJECT_ROOT", env.BINDHUB_LIVE_PROJECT_ROOT]
   ].filter(([, value]) => !value);
-  const command = "scripts/devbox-live-sync-alpha.sh " + shellValue(env.DEVBOX_ALPHA_ENV_FILE ?? ".env.r2.local");
+  const command = "scripts/bindhub-live-sync-alpha.sh " + shellValue(env.BINDHUB_ALPHA_ENV_FILE ?? ".env.r2.local");
   const notes = [
     "No sync starts from the desktop until a local daemon bridge is wired.",
     remoteKind === "s3-compatible"
@@ -437,8 +437,8 @@ function parseMode(value: string | undefined): LiveSyncState["mode"] {
   return "push";
 }
 
-function hasAnyDevboxEnv(env: Record<string, string | undefined>): boolean {
-  return Object.keys(env).some((key) => key.startsWith("DEVBOX_"));
+function hasAnyBindhubEnv(env: Record<string, string | undefined>): boolean {
+  return Object.keys(env).some((key) => key.startsWith("BINDHUB_"));
 }
 
 function projectNameFromPath(path: string): string {

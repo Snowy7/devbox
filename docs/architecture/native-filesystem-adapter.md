@@ -1,11 +1,11 @@
 # Native Filesystem Adapter Alpha
 
-Devbox wants a shared folder to feel continuous across machines. Native filesystem adapters are one
+Bindhub wants a shared folder to feel continuous across machines. Native filesystem adapters are one
 way to make sparse folders feel ordinary later, but they are not Loom core. Loom owns objects, cache
 entries, file versions, folder revisions, checkpoints, pins, cursors, sandboxes, and overlays. A
 filesystem adapter projects one selected folder revision through an operating-system surface.
 
-The alpha boundary lives in `loom-fs` and is exposed through `loom fs ...` first. Devbox can wrap
+The alpha boundary lives in `loom-fs` and is exposed through `loom fs ...` first. Bindhub can wrap
 this with product wording later, but the underlying model stays folder/revision/cache centered.
 
 ## CLI Surface

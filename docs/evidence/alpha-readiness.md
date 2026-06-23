@@ -17,7 +17,7 @@ On Windows, run:
 powershell -ExecutionPolicy Bypass -File scripts/mvp-two-device-smoke.ps1
 ```
 
-The smoke builds local binaries when needed, starts a temporary `devbox-api` with in-memory
+The smoke builds local binaries when needed, starts a temporary `bindhub-api` with in-memory
 metadata, simulates two machines, and writes redacted logs under the printed evidence directory.
 It does not require live R2 or Postgres.
 
@@ -27,7 +27,7 @@ For the workspace adapter alpha path, run:
 powershell -ExecutionPolicy Bypass -File scripts/alpha-workspace-adapters-smoke.ps1
 ```
 
-That smoke uses a temporary in-memory `devbox-api` plus local Loom folders to prove sparse folder
+That smoke uses a temporary in-memory `bindhub-api` plus local Loom folders to prove sparse folder
 intents, agent virtual sessions, materialized sandbox fallback, and filesystem adapter alpha
 truthfulness. It is local-dev evidence only; it does not claim native hydrate-on-open or OS
 placeholder support.
@@ -38,8 +38,8 @@ placeholder support.
   diagnose a shared folder.
 - Sparse clones preserve remote-only object metadata and do not treat absent source files as
   deletions.
-- Devbox can `login`, `share`, `clone`, push a source edit, and pull it to another local machine
-  through `devbox-api`.
+- Bindhub can `login`, `share`, `clone`, push a source edit, and pull it to another local machine
+  through `bindhub-api`.
 - Hosted metadata and object bytes are split; object uploads are hash-validated and mismatches are
   refused.
 - Git metadata and generated dependency/build folders are not materialized into clones.
@@ -49,7 +49,7 @@ placeholder support.
 
 ## Workspace Adapter Alpha Proofs
 
-- Devbox sparse clone starts metadata-only, then `status`, `hydrate`, `warm`, `keep`, and
+- Bindhub sparse clone starts metadata-only, then `status`, `hydrate`, `warm`, `keep`, and
   `free-space` expose cache intent without treating cloud-only files as deletions.
 - `free-space` succeeds only for clean, unpinned local bytes with hosted proof and refuses when that
   proof is missing.
@@ -67,13 +67,13 @@ Useful targeted checks for this PR:
 ```text
 cargo test -p loom-daemon
 cargo test -p loom-cli --test cli
-cargo test -p devbox-cli --test product_cli -- --test-threads=1
-cargo test -p devbox-api
+cargo test -p bindhub-cli --test product_cli -- --test-threads=1
+cargo test -p bindhub-api
 ```
 
 The Loom CLI test suite also covers `loom cache warm` behavior and manifest-only warmup.
 The product CLI alpha test uses local API servers and is documented as serial because the default
 parallel runner is still flaky on that test target.
 
-Operator-only hosted deployment checks can additionally run the `devbox-api` Railway/container path
+Operator-only hosted deployment checks can additionally run the `bindhub-api` Railway/container path
 with Postgres and server-side R2 configured. That is not required for the local alpha smoke.

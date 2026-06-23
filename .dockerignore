@@ -27,10 +27,10 @@ __pycache__/
 .venv/
 venv/
 
-# Devbox local runtime/evidence data
-.devbox/
-.devbox-alpha-evidence/
-.devbox-cache/
+# Bindhub local runtime/evidence data
+.bindhub/
+.bindhub-alpha-evidence/
+.bindhub-cache/
 
 # Logs and local secrets
 *.log

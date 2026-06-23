@@ -1,0 +1,33 @@
+{
+  "name": "bindhub",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "dev:api": "powershell -ExecutionPolicy Bypass -File scripts/bindhub-api-local.ps1",
+    "dev:web": "pnpm --filter web dev",
+    "dev:site": "pnpm --filter apps-site dev",
+    "dev:desktop": "pnpm --filter @bindhub/desktop dev",
+    "dev:stack": "powershell -ExecutionPolicy Bypass -File start.ps1",
+    "lint": "turbo lint",
+    "format": "turbo format",
+    "typecheck": "turbo typecheck"
+  },
+  "devDependencies": {
+    "prettier": "^3.8.3",
+    "prettier-plugin-tailwindcss": "^0.8.0",
+    "turbo": "^2.9.15",
+    "typescript": "^6"
+  },
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "lightningcss"
+    ]
+  }
+}

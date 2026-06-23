@@ -18,8 +18,8 @@ loom-store = { path = "../loom-store" }
 loom-sync = { path = "../loom-sync" }
 loom-workspace = { path = "../loom-workspace" }
 loom-worktree = { path = "../loom-worktree" }
-devbox-remote = { path = "../../../devbox/crates/devbox-remote" }
+bindhub-remote = { path = "../../../bindhub/crates/bindhub-remote" }
 
 [dev-dependencies]
-devbox-api = { path = "../../../devbox/crates/devbox-api" }
+bindhub-api = { path = "../../../bindhub/crates/bindhub-api" }
 tempfile = "3"

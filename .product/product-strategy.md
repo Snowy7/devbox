@@ -2,14 +2,14 @@
 
 ## One-Line Product
 
-Devbox is developer-native folder sync: your code folder, work-in-progress, and local context follow
+Bindhub is developer-native folder sync: your code folder, work-in-progress, and local context follow
 you across every machine.
 
 ## Category Bet
 
 The next source-control primitive is not the commit. It is the live folder timeline.
 
-Git records intentional repo history. Devbox records live developer folder state:
+Git records intentional repo history. Bindhub records live developer folder state:
 
 - changed files
 - untracked files
@@ -21,7 +21,7 @@ Git records intentional repo history. Devbox records live developer folder state
 - automatic checkpoints
 - agent sandboxes
 
-The codename for this deeper primitive is **Loom**. Devbox is the product users install. Loom is the
+The codename for this deeper primitive is **Loom**. Bindhub is the product users install. Loom is the
 source-control engine direction underneath it.
 
 Loom history should be layered: frequent file versions, coherent folder revisions at stable

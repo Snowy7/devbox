@@ -7,7 +7,7 @@ const files = [
   "src/shared/alphaState.ts",
   "src/main.ts",
   "src/preload.ts",
-  "src/renderer/devbox.d.ts",
+  "src/renderer/bindhub.d.ts",
   "src/renderer/App.tsx"
 ];
 

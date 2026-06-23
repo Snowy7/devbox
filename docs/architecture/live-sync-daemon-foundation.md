@@ -5,14 +5,14 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
-This Phase 1 slice moves Devbox from manual publish/import commands toward "things are always
+This Phase 1 slice moves Bindhub from manual publish/import commands toward "things are always
 synced" while keeping the alpha boundary conservative.
 
 ## Scope
 
-`devbox-daemon sync` watches or scans a project root and runs a bounded live sync cycle:
+`bindhub-daemon sync` watches or scans a project root and runs a bounded live sync cycle:
 
 1. scan the local tree with the shared local change-feed scanner
 2. refuse unsafe cache/database paths and pending pairing identities
@@ -33,7 +33,7 @@ live publish, latest remote discovery, receiver materialization, and redacted ev
 lower-level daemon push command is:
 
 ```text
-devbox-daemon sync \
+bindhub-daemon sync \
   --db <DB_PATH> \
   --cache <CACHE_ROOT> \
   --remote <REMOTE_DIR> \
@@ -47,7 +47,7 @@ devbox-daemon sync \
 Receivers can discover the latest published snapshot for the remote project:
 
 ```text
-devbox-daemon sync \
+bindhub-daemon sync \
   --db <RECEIVER_DB> \
   --cache <RECEIVER_CACHE> \
   --remote <REMOTE_DIR> \
@@ -65,7 +65,7 @@ devbox-daemon sync \
 External hosted alpha sync swaps the shared mock metadata DB for the live account-session API:
 
 ```text
-devbox-daemon sync \
+bindhub-daemon sync \
   --db <DB_PATH> \
   --cache <CACHE_ROOT> \
   --remote-kind hosted \
@@ -74,7 +74,7 @@ devbox-daemon sync \
   --metadata-mode hosted-api \
   --metadata-api <URL> \
   --metadata-project <PROJECT_ID> \
-  --metadata-session-token-env DEVBOX_SESSION_TOKEN \
+  --metadata-session-token-env BINDHUB_SESSION_TOKEN \
   --push \
   --once \
   <PROJECT_ROOT>
@@ -101,11 +101,11 @@ Live sync fails closed when:
 - S3 live sync is missing object-access API/lease configuration or a grant-matching prefix
 
 Successful live publish clears pending local changes for the published project, because the current
-snapshot has become the remote candidate. Manual `devbox sync publish-snapshot` remains unchanged.
+snapshot has become the remote candidate. Manual `bindhub sync publish-snapshot` remains unchanged.
 
 ## Hosted Metadata Discovery
 
-`devbox-metadata` now supports latest published snapshot lookup by `(account_id, project_id)`,
+`bindhub-metadata` now supports latest published snapshot lookup by `(account_id, project_id)`,
 including:
 
 ```text
@@ -121,7 +121,7 @@ For external tester object transfer, `--remote-kind hosted` requires:
 
 - `--object-access-api <URL>`
 - `--object-access-lease <LEASE_ID>`
-- `--object-access-session-token-env <ENV>` (defaults to `DEVBOX_SESSION_TOKEN`)
+- `--object-access-session-token-env <ENV>` (defaults to `BINDHUB_SESSION_TOKEN`)
 - `--metadata-project <PROJECT_ID>`
 
 The daemon resolves the account-session object-access grant before opening the hosted object provider.
@@ -134,7 +134,7 @@ For trusted-operator direct R2/S3 smoke, `--remote-kind s3` requires:
 - `--s3-prefix accounts/<account-id>/projects/<project-id>`
 - `--object-access-api <URL>`
 - `--object-access-lease <LEASE_ID>`
-- `--object-access-session-token-env <ENV>` (defaults to `DEVBOX_SESSION_TOKEN`)
+- `--object-access-session-token-env <ENV>` (defaults to `BINDHUB_SESSION_TOKEN`)
 
 The daemon resolves the account-session object-access grant before opening the S3 provider and
 verifies the grant bucket, region, project, account when supplied, and prefix. The grant does not

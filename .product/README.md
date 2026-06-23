@@ -1,8 +1,8 @@
-# Devbox Product Folder
+# Bindhub Product Folder
 
 Last updated: 2026-06-19
 
-This folder is the working product foundation for Devbox: developer folder continuity that can later
+This folder is the working product foundation for Bindhub: developer folder continuity that can later
 expand into teams, agent sandboxes, and a new source-control primitive.
 
 ## Core Thesis

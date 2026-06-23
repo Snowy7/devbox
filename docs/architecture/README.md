@@ -1,6 +1,6 @@
 # Architecture Docs
 
-Start with [Full-Scale Project Shape](full-scale-project-shape.md) for the Loom/Devbox split.
+Start with [Full-Scale Project Shape](full-scale-project-shape.md) for the Loom/Bindhub split.
 [Loom Storage Consistency](loom-storage-consistency.md) records the current testable guarantees and
 non-guarantees for cursors, compare-and-set, sparse hydration, eviction, pins, and hosted
 metadata/object integrity.

@@ -7,10 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $ApiUrl) {
-    $ApiUrl = if ($env:DEVBOX_DEFAULT_API_URL) {
-        $env:DEVBOX_DEFAULT_API_URL
+    $ApiUrl = if ($env:BINDHUB_DEFAULT_API_URL) {
+        $env:BINDHUB_DEFAULT_API_URL
     } else {
-        "https://devbox-staging.up.railway.app"
+        "https://bindhub-staging.up.railway.app"
     }
 }
 
@@ -34,8 +34,8 @@ git push origin $Tag
 & "$PSScriptRoot\package-cli.ps1" -Version $Tag -ApiUrl $ApiUrl
 
 $Assets = @(
-    Join-Path $RepoRoot "dist\devbox-$Tag-x86_64-pc-windows-msvc.zip"
-    Join-Path $RepoRoot "dist\devbox-$Tag-x86_64-pc-windows-msvc.zip.sha256"
+    Join-Path $RepoRoot "dist\bindhub-$Tag-x86_64-pc-windows-msvc.zip"
+    Join-Path $RepoRoot "dist\bindhub-$Tag-x86_64-pc-windows-msvc.zip.sha256"
 )
 foreach ($asset in $Assets) {
     if (-not (Test-Path $asset)) {
@@ -59,8 +59,8 @@ if ($ReleaseExists) {
     $ghArgs = @(
         "release", "create", $Tag
     ) + $Assets + @(
-        "--title", "Devbox CLI $Tag",
-        "--notes", "Alpha command-line tools for Loom and Devbox. The default API is https://devbox-staging.up.railway.app. OAuth, signed installers, and production hardening are not included yet."
+        "--title", "Bindhub CLI $Tag",
+        "--notes", "Alpha command-line tools for Loom and Bindhub. The default API is https://bindhub-staging.up.railway.app. OAuth, signed installers, and production hardening are not included yet."
     )
     if ($Tag.Contains("-")) {
         $ghArgs += "--prerelease"

@@ -148,12 +148,12 @@ Git repositories need a dedicated adapter:
 4. Snapshot uncommitted and untracked files separately.
 5. Reconstruct on another device atomically:
    - clone/fetch from remote when available
-   - hydrate missing Git objects from Devbox when no remote exists
+   - hydrate missing Git objects from Bindhub when no remote exists
    - apply WIP snapshot as a safe overlay
    - restore untracked files according to policy
 6. Run verification such as `git status`, `git fsck` where appropriate, and manifest checks.
 
-This lets Git keep doing what it is good at while Devbox owns live folder continuity.
+This lets Git keep doing what it is good at while Bindhub owns live folder continuity.
 
 ## Policy Engine
 
@@ -164,7 +164,7 @@ Policy layers, highest priority first:
 3. secret policy
 4. language/framework defaults
 5. `.gitignore` and related ignore files
-6. global Devbox safety defaults
+6. global Bindhub safety defaults
 
 Default generated directories:
 

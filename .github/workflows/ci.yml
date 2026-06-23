@@ -15,18 +15,18 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: devbox
-          POSTGRES_PASSWORD: devbox
-          POSTGRES_DB: devbox_metadata_test
+          POSTGRES_USER: bindhub
+          POSTGRES_PASSWORD: bindhub
+          POSTGRES_DB: bindhub_metadata_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U devbox -d devbox_metadata_test"
+          --health-cmd "pg_isready -U bindhub -d bindhub_metadata_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     env:
-      DEVBOX_TEST_POSTGRES_URL: postgres://devbox:devbox@localhost:5432/devbox_metadata_test
+      BINDHUB_TEST_POSTGRES_URL: postgres://bindhub:bindhub@localhost:5432/bindhub_metadata_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4

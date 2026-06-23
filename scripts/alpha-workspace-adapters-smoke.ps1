@@ -9,34 +9,34 @@ if ($Help) {
 Usage: powershell -ExecutionPolicy Bypass -File scripts/alpha-workspace-adapters-smoke.ps1
 
 Runs deterministic local alpha evidence for the workspace adapter arc:
-  - human sparse folder flow through devbox login/share/clone --sparse/status/warm/hydrate/keep/free-space
+  - human sparse folder flow through bindhub login/share/clone --sparse/status/warm/hydrate/keep/free-space
   - agent virtual workspace flow through loom workspace open/read/write/exec/diff/checkpoint/discard
   - materialized sandbox fallback flow with safe capture and unsafe host mutation refusal
   - filesystem adapter alpha flow with native fail-closed status and local-dev metadata simulation
 
 Environment:
   LOOM_BIN                         Optional path to a built loom binary.
-  DEVBOX_BIN                       Optional path to a built devbox binary.
-  DEVBOX_API_BIN                   Optional path to a built devbox-api binary.
-  DEVBOX_ADAPTER_SMOKE_DIR         Optional working directory to reuse.
-  DEVBOX_CLEAN_SMOKE_DIR           Set true to remove the generated temp directory after a pass.
+  BINDHUB_BIN                       Optional path to a built Bindhub binary.
+  BINDHUB_API_BIN                   Optional path to a built bindhub-api binary.
+  BINDHUB_ADAPTER_SMOKE_DIR         Optional working directory to reuse.
+  BINDHUB_CLEAN_SMOKE_DIR           Set true to remove the generated temp directory after a pass.
 "@
     exit 0
 }
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
-if ($env:DEVBOX_ADAPTER_SMOKE_DIR) {
-    $WorkDir = $env:DEVBOX_ADAPTER_SMOKE_DIR
+if ($env:BINDHUB_ADAPTER_SMOKE_DIR) {
+    $WorkDir = $env:BINDHUB_ADAPTER_SMOKE_DIR
     New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
     $Cleanup = $false
 } else {
-    $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("devbox-adapter-smoke." + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("Bindhub-adapter-smoke." + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
     $Cleanup = $false
 }
 
-if ($env:DEVBOX_CLEAN_SMOKE_DIR -eq "true") {
+if ($env:BINDHUB_CLEAN_SMOKE_DIR -eq "true") {
     $Cleanup = $true
 }
 
@@ -51,8 +51,8 @@ function Fail($Message) {
 }
 
 function Redact-Text($Text) {
-    $Text = $Text -replace "devbox-local-session-[A-Za-z0-9]+", "devbox-local-session-<redacted>"
-    $Text = $Text -replace "devbox://\S+", "devbox://<redacted>"
+    $Text = $Text -replace "Bindhub-local-session-[A-Za-z0-9]+", "Bindhub-local-session-<redacted>"
+    $Text = $Text -replace "bindhub://\S+", "bindhub://<redacted>"
     $Text = $Text -replace "sk-[A-Za-z0-9_.-]+", "sk-<redacted>"
     $Text = $Text -replace "github_pat_[A-Za-z0-9_]+", "github_pat_<redacted>"
     $Text = $Text -replace "ghp_[A-Za-z0-9_]+", "ghp_<redacted>"
@@ -199,21 +199,21 @@ function Remove-SmokePath($Path) {
 
 try {
     $LoomBin = Get-BinaryPath $env:LOOM_BIN "loom-cli" "loom"
-    $DevboxBin = Get-BinaryPath $env:DEVBOX_BIN "devbox-cli" "devbox"
-    $DevboxApiBin = Get-BinaryPath $env:DEVBOX_API_BIN "devbox-api" "devbox-api"
+    $BindhubBin = Get-BinaryPath $env:BINDHUB_BIN "bindhub-cli" "Bindhub"
+    $BindhubApiBin = Get-BinaryPath $env:BINDHUB_API_BIN "bindhub-api" "bindhub-api"
 
-    Write-Host "Devbox/Loom workspace adapter alpha smoke"
+    Write-Host "bindhub/Loom workspace adapter alpha smoke"
     Write-Host "workdir=$WorkDir"
     Write-Host "evidence=$EvidenceDir"
 
     $ApiRoot = Join-Path $WorkDir "api-root"
-    $ApiStdoutRaw = Join-Path $EvidenceDir "00-devbox-api.stdout.log.raw"
-    $ApiStderrRaw = Join-Path $EvidenceDir "00-devbox-api.stderr.log.raw"
-    $OldApiMetadataMode = [Environment]::GetEnvironmentVariable("DEVBOX_API_METADATA_MODE", "Process")
-    [Environment]::SetEnvironmentVariable("DEVBOX_API_METADATA_MODE", "memory", "Process")
+    $ApiStdoutRaw = Join-Path $EvidenceDir "00-bindhub-api.stdout.log.raw"
+    $ApiStderrRaw = Join-Path $EvidenceDir "00-bindhub-api.stderr.log.raw"
+    $OldApiMetadataMode = [Environment]::GetEnvironmentVariable("BINDHUB_API_METADATA_MODE", "Process")
+    [Environment]::SetEnvironmentVariable("BINDHUB_API_METADATA_MODE", "memory", "Process")
     try {
         $startArgs = @{
-            FilePath = $DevboxApiBin
+            FilePath = $BindhubApiBin
             ArgumentList = @("--root", $ApiRoot, "--bind", "127.0.0.1:0")
             RedirectStandardOutput = $ApiStdoutRaw
             RedirectStandardError = $ApiStderrRaw
@@ -224,14 +224,14 @@ try {
         }
         $ApiProcess = Start-Process @startArgs
     } finally {
-        [Environment]::SetEnvironmentVariable("DEVBOX_API_METADATA_MODE", $OldApiMetadataMode, "Process")
+        [Environment]::SetEnvironmentVariable("BINDHUB_API_METADATA_MODE", $OldApiMetadataMode, "Process")
     }
     $ApiUrl = ""
     for ($i = 0; $i -lt 100; $i++) {
         if ($ApiProcess.HasExited) {
-            Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "00-devbox-api.stdout.log")
-            Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "00-devbox-api.stderr.log")
-            Fail "devbox-api exited before it was ready"
+            Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "00-bindhub-api.stdout.log")
+            Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "00-bindhub-api.stderr.log")
+            Fail "bindhub-api exited before it was ready"
         }
         if (Test-Path $ApiStdoutRaw) {
             $apiLog = Get-Content -Raw -Path $ApiStdoutRaw
@@ -246,12 +246,12 @@ try {
         }
         Start-Sleep -Milliseconds 50
     }
-    Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "00-devbox-api.stdout.log")
-    Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "00-devbox-api.stderr.log")
+    Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "00-bindhub-api.stdout.log")
+    Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "00-bindhub-api.stderr.log")
     if (-not $ApiUrl) {
-        Fail "could not parse devbox-api URL"
+        Fail "could not parse bindhub-api URL"
     }
-    Write-Host "[PASS] 00-devbox-api-start"
+    Write-Host "[PASS] 00-bindhub-api-start"
 
     $SourceConfig = Join-Path $WorkDir "source-config"
     $TargetConfig = Join-Path $WorkDir "target-config"
@@ -264,45 +264,45 @@ try {
     New-TextFile (Join-Path $ProductSource "docs\guide.md") "guide"
     New-TextFile (Join-Path $ProductSource "big.bin") ("x" * 128)
 
-    Invoke-Logged -Name "01-human-source-login" -Exe $DevboxBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "adapter-alpha", "--device-name", "Adapter desktop") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig }
-    Invoke-Logged -Name "02-human-share" -Exe $DevboxBin -CommandArgs @("share", $ProductSource, "--no-background-sync") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig }
+    Invoke-Logged -Name "01-human-source-login" -Exe $BindhubBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "adapter-alpha", "--device-name", "Adapter desktop") -Env @{ BINDHUB_CONFIG_DIR = $SourceConfig }
+    Invoke-Logged -Name "02-human-share" -Exe $BindhubBin -CommandArgs @("share", $ProductSource, "--no-background-sync") -Env @{ BINDHUB_CONFIG_DIR = $SourceConfig }
     Expect-Contains (Join-Path $EvidenceDir "02-human-share.stdout.log") "Shared folder: human-source"
-    Invoke-Logged -Name "03-human-target-login" -Exe $DevboxBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "adapter-alpha", "--device-name", "Adapter laptop") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
-    Invoke-Logged -Name "04-human-sparse-clone" -Exe $DevboxBin -CommandArgs @("clone", "human-source", $ProductSparseTarget, "--sparse", "--no-background-sync") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "03-human-target-login" -Exe $BindhubBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "adapter-alpha", "--device-name", "Adapter laptop") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "04-human-sparse-clone" -Exe $BindhubBin -CommandArgs @("clone", "human-source", $ProductSparseTarget, "--sparse", "--no-background-sync") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-Contains (Join-Path $EvidenceDir "04-human-sparse-clone.stdout.log") "Files: available on demand"
     Expect-Absent (Join-Path $ProductSparseTarget "README.md")
-    Invoke-Logged -Name "05-human-sparse-status" -Exe $DevboxBin -CommandArgs @("status", $ProductSparseTarget) -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "05-human-sparse-status" -Exe $BindhubBin -CommandArgs @("status", $ProductSparseTarget) -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-Contains (Join-Path $EvidenceDir "05-human-sparse-status.stdout.log") "Cloud-only:"
-    Invoke-Logged -Name "06-human-hydrate-readme" -Exe $DevboxBin -CommandArgs @("hydrate", (Join-Path $ProductSparseTarget "README.md")) -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "06-human-hydrate-readme" -Exe $BindhubBin -CommandArgs @("hydrate", (Join-Path $ProductSparseTarget "README.md")) -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-Contains (Join-Path $EvidenceDir "06-human-hydrate-readme.stdout.log") "Hydrated: README.md"
     Expect-FileText (Join-Path $ProductSparseTarget "README.md") "hello"
-    Invoke-Logged -Name "07-human-warm-small-files" -Exe $DevboxBin -CommandArgs @("warm", $ProductSparseTarget, "--max-bytes", "40") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "07-human-warm-small-files" -Exe $BindhubBin -CommandArgs @("warm", $ProductSparseTarget, "--max-bytes", "40") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-Contains (Join-Path $EvidenceDir "07-human-warm-small-files.stdout.log") "Selected:"
     Expect-FileText (Join-Path $ProductSparseTarget "src\main.rs") "fn main() {}"
     Expect-FileText (Join-Path $ProductSparseTarget "config\app.toml") "debug=1"
     Expect-Absent (Join-Path $ProductSparseTarget "big.bin")
-    Invoke-Logged -Name "08-human-keep-readme" -Exe $DevboxBin -CommandArgs @("keep", (Join-Path $ProductSparseTarget "README.md")) -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "08-human-keep-readme" -Exe $BindhubBin -CommandArgs @("keep", (Join-Path $ProductSparseTarget "README.md")) -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-Contains (Join-Path $EvidenceDir "08-human-keep-readme.stdout.log") "Kept for offline: README.md"
     New-TextFile (Join-Path $ProductSparseTarget "src\main.rs") "dirty local change"
-    Invoke-Logged -Name "09-human-free-space-success" -Exe $DevboxBin -CommandArgs @("free-space", $ProductSparseTarget, "--max-bytes", "0") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "09-human-free-space-success" -Exe $BindhubBin -CommandArgs @("free-space", $ProductSparseTarget, "--max-bytes", "0") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-Contains (Join-Path $EvidenceDir "09-human-free-space-success.stdout.log") "Safety: changed and kept files were left alone"
     Expect-Contains (Join-Path $EvidenceDir "09-human-free-space-success.stdout.log") "Skipped:"
     Expect-FileText (Join-Path $ProductSparseTarget "README.md") "hello"
     Expect-FileText (Join-Path $ProductSparseTarget "src\main.rs") "dirty local change"
     Expect-Absent (Join-Path $ProductSparseTarget "config\app.toml")
-    Invoke-Logged -Name "10-human-status-after-free-space" -Exe $DevboxBin -CommandArgs @("status", $ProductSparseTarget) -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "10-human-status-after-free-space" -Exe $BindhubBin -CommandArgs @("status", $ProductSparseTarget) -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-Contains (Join-Path $EvidenceDir "10-human-status-after-free-space.stdout.log") "Kept offline:"
     Expect-Contains (Join-Path $EvidenceDir "10-human-status-after-free-space.stdout.log") "Changed locally:"
 
     $RefusalSource = Join-Path $WorkDir "human-free-space-refusal"
     New-TextFile (Join-Path $RefusalSource "README.md") "backed up proof"
-    Invoke-Logged -Name "11-human-refusal-share" -Exe $DevboxBin -CommandArgs @("share", $RefusalSource, "--no-background-sync") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig }
+    Invoke-Logged -Name "11-human-refusal-share" -Exe $BindhubBin -CommandArgs @("share", $RefusalSource, "--no-background-sync") -Env @{ BINDHUB_CONFIG_DIR = $SourceConfig }
     $ApiObjects = Join-Path $ApiRoot "objects"
     if (-not (Test-Path $ApiObjects)) {
         Fail "could not find hosted object directory for free-space refusal"
     }
     Remove-SmokePath $ApiObjects
-    Invoke-Logged -Name "12-human-free-space-refusal" -Exe $DevboxBin -CommandArgs @("free-space", $RefusalSource, "--max-bytes", "0") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig } -ExpectFailure
+    Invoke-Logged -Name "12-human-free-space-refusal" -Exe $BindhubBin -CommandArgs @("free-space", $RefusalSource, "--max-bytes", "0") -Env @{ BINDHUB_CONFIG_DIR = $SourceConfig } -ExpectFailure
     Expect-Contains (Join-Path $EvidenceDir "12-human-free-space-refusal.stderr.log") "not safely backed up"
     Expect-FileText (Join-Path $RefusalSource "README.md") "backed up proof"
 
@@ -374,20 +374,20 @@ try {
     Expect-Contains (Join-Path $EvidenceDir "37-fs-local-dev-status-unmounted.stdout.log") "state=unmounted"
 
     @"
-Devbox/Loom workspace adapter alpha smoke passed.
+bindhub/Loom workspace adapter alpha smoke passed.
 
 Workdir: $WorkDir
 API: $ApiUrl
 
 Proofs:
-- Human sparse folders: Devbox login/share/sparse clone/status/hydrate/warm/keep/free-space success/refusal.
+- Human sparse folders: bindhub login/share/sparse clone/status/hydrate/warm/keep/free-space success/refusal.
 - Agent virtual workspaces: session open, virtual read/exec, overlay write, diff, checkpoint, and discard.
 - Materialized fallback: real command changes captured into overlay; unsafe host shared-folder mutation refused.
 - Filesystem adapter alpha: native adapters report unsupported/no hydrate-on-open and record no mount; local-dev records metadata-only mount/status/unmount and creates no projected folder.
 
 Native OS hydrate-on-open, placeholder files, kernel callback hydration, chunk transport, and production filesystem drivers are intentionally not claimed here.
 
-Evidence logs are in this directory. Session tokens and Devbox URLs are redacted.
+Evidence logs are in this directory. Session tokens and Bindhub URLs are redacted.
 "@ | Set-Content -Path (Join-Path $EvidenceDir "SUMMARY.txt")
 
     Write-Host "workspace adapter smoke passed"

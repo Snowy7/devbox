@@ -5,15 +5,15 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice wires the existing local/mock second-device sync flows to the hosted metadata
 foundation without requiring a network service in normal development or CI.
 
 ## Scope
 
-`devbox/crates/devbox-materialize` now exposes a small `HostedMetadataClient` boundary implemented by any
-`devbox-metadata::MetadataStore` and by an account-session HTTP client. The local deterministic
+`bindhub/crates/bindhub-materialize` now exposes a small `HostedMetadataClient` boundary implemented by any
+`bindhub-metadata::MetadataStore` and by an account-session HTTP client. The local deterministic
 opt-in mode uses `SqliteMetadataStore` in-process:
 
 ```text
@@ -39,7 +39,7 @@ External hosted alpha sync uses the live API instead:
 
 ```text
 --metadata-mode hosted-api --metadata-api <URL> --metadata-project <PROJECT_ID>
---metadata-session-token-env DEVBOX_SESSION_TOKEN
+--metadata-session-token-env BINDHUB_SESSION_TOKEN
 ```
 
 Hosted API mode calls the account-session routes for snapshot registration, latest discovery, and
@@ -51,7 +51,7 @@ object bytes can use `--remote-kind hosted`, which proxies encrypted object put/
 through the metadata API without returning raw bucket credentials to the client.
 
 The live daemon adds latest-snapshot discovery for the same account/project scope. Receivers can
-omit a pasted snapshot id and let `devbox-daemon sync --pull` resolve the latest published metadata
+omit a pasted snapshot id and let `bindhub-daemon sync --pull` resolve the latest published metadata
 record before import or materialization.
 
 ## Publish Semantics
@@ -88,7 +88,7 @@ device inside that account boundary.
 
 ## CLI Boundary
 
-`devbox metadata check` remains a no-network validation command. Sync commands can optionally accept
+`bindhub metadata check` remains a no-network validation command. Sync commands can optionally accept
 `--metadata-endpoint <URL>` as a sanitized label for the mock-dev metadata boundary. Hosted alpha
 sync uses `--metadata-api <URL>` with account-session bearer auth and performs live endpoint calls.
 
@@ -96,18 +96,18 @@ Output states whether hosted mock-dev metadata wiring is active or whether the c
 local/mock metadata only. It does not print raw mock header values, raw keys, object credentials, or
 unsafe endpoint material.
 
-`devbox metadata object-access resolve` is the hosted/API-side counterpart. It uses
-`DEVBOX_SESSION_TOKEN` by default, calls the metadata API, and returns a redacted server-mediated
+`bindhub metadata object-access resolve` is the hosted/API-side counterpart. It uses
+`BINDHUB_SESSION_TOKEN` by default, calls the metadata API, and returns a redacted server-mediated
 grant for `accounts/<account-id>/projects/<project-id>`. `--remote-kind hosted` consumes the same
 API/session/lease boundary for encrypted object transfer. Direct S3-compatible sync flags remain a
 trusted-operator smoke path.
 
-`devbox-daemon sync --remote-kind s3` is stricter than the manual CLI smoke path: it requires an
+`bindhub-daemon sync --remote-kind s3` is stricter than the manual CLI smoke path: it requires an
 object-access API, lease id, session token environment variable name, and an `--s3-prefix` that
 matches the grant. The grant is used as an authorization/prefix preflight; raw object credentials
 are still loaded only from environment variable names for the current alpha transport.
 
-`devbox-daemon sync --remote-kind hosted` requires an object-access API, lease id, session token
+`bindhub-daemon sync --remote-kind hosted` requires an object-access API, lease id, session token
 environment variable name, `--metadata-mode hosted-api`, `--metadata-api`, and
 `--metadata-project` for external alpha use. The daemon resolves the grant at startup and the hosted
 object provider enforces read/write/head/list capabilities, lease activity, account/project scope,

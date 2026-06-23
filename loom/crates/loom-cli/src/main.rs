@@ -1,6 +1,6 @@
-use devbox_remote::{
-    provision_devbox_hosted_remote, DevboxHostedRemote, DevboxHostedRemoteConfig,
-    DEVBOX_HOSTED_REMOTE_KIND,
+use bindhub_remote::{
+    provision_bindhub_hosted_remote, BindhubHostedRemote, BindhubHostedRemoteConfig,
+    BINDHUB_HOSTED_REMOTE_KIND,
 };
 use loom_core::{
     FileKind, FileVersion, RevisionBoundary, WorkspaceKind, WorkspaceSessionId,
@@ -117,7 +117,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "remote",
-        usage: "loom remote add <NAME> <LOCAL_PATH|DEVBOX_API_URL> [FOLDER]\n       loom remote check [FOLDER]",
+        usage: "loom remote add <NAME> <LOCAL_PATH|BINDHUB_API_URL> [FOLDER]\n       loom remote check [FOLDER]",
         summary: "Configure a Loom remote endpoint",
         implemented: true,
         planned_behavior: "remember and inspect a named Loom folder-state endpoint",
@@ -537,8 +537,8 @@ fn run_remote(args: &[String]) -> Result<(), String> {
 
 fn run_remote_add(name: &str, location: &str, folder: Option<PathBuf>) -> Result<(), String> {
     let store = open_store_for_sync_source(folder)?;
-    let (kind, stored_location, display_location) = if looks_like_devbox_api_url(location) {
-        let provisioned = provision_devbox_hosted_remote(
+    let (kind, stored_location, display_location) = if looks_like_bindhub_api_url(location) {
+        let provisioned = provision_bindhub_hosted_remote(
             location,
             store.shared_folder().id(),
             store.shared_folder().display_name(),
@@ -546,7 +546,7 @@ fn run_remote_add(name: &str, location: &str, folder: Option<PathBuf>) -> Result
         .map_err(|error| error.to_string())?;
         let clone_url = provisioned.config.clone_url();
         (
-            DEVBOX_HOSTED_REMOTE_KIND,
+            BINDHUB_HOSTED_REMOTE_KIND,
             clone_url.clone(),
             format!(
                 "{}\nClone URL: {}\nAccount: {}\nSession: {}",
@@ -2412,17 +2412,17 @@ fn absolute_path_from_path(path: &Path) -> Result<PathBuf, String> {
         .join(path))
 }
 
-fn looks_like_devbox_api_url(value: &str) -> bool {
+fn looks_like_bindhub_api_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
 fn remote_from_config(config: &RemoteConfig) -> Result<Box<dyn LoomRemote>, String> {
     match config.kind() {
         LOCAL_FILESYSTEM_REMOTE_KIND => Ok(Box::new(LocalFilesystemRemote::new(config.location()))),
-        DEVBOX_HOSTED_REMOTE_KIND => {
-            let config = DevboxHostedRemoteConfig::from_clone_url(config.location())
+        BINDHUB_HOSTED_REMOTE_KIND => {
+            let config = BindhubHostedRemoteConfig::from_clone_url(config.location())
                 .map_err(|error| error.to_string())?;
-            Ok(Box::new(DevboxHostedRemote::new(config)))
+            Ok(Box::new(BindhubHostedRemote::new(config)))
         }
         kind => Err(format!(
             "remote {} uses unsupported kind {}",
@@ -2435,13 +2435,13 @@ fn remote_from_config(config: &RemoteConfig) -> Result<Box<dyn LoomRemote>, Stri
 fn clone_remote_from_location(
     location: &str,
 ) -> Result<(Box<dyn LoomRemote>, &'static str, String), String> {
-    if location.starts_with("devbox://") {
-        let config = DevboxHostedRemoteConfig::from_clone_url(location)
+    if location.starts_with("bindhub://") {
+        let config = BindhubHostedRemoteConfig::from_clone_url(location)
             .map_err(|error| error.to_string())?;
         let stored_location = config.clone_url();
         return Ok((
-            Box::new(DevboxHostedRemote::new(config)),
-            DEVBOX_HOSTED_REMOTE_KIND,
+            Box::new(BindhubHostedRemote::new(config)),
+            BINDHUB_HOSTED_REMOTE_KIND,
             stored_location,
         ));
     }

@@ -9,7 +9,7 @@ The immediate decision is what foundation to build so the first wedge is small e
 
 ## Working Definition
 
-Devbox is a developer-native folder continuity system.
+Bindhub is a developer-native folder continuity system.
 
 It syncs developer folders across machines, but it does not behave like generic file sync. It
 understands the developer-shaped mess inside those folders: repos, nested apps, ignored files,
@@ -27,9 +27,9 @@ generated artifacts, secrets, dependencies, restore points, and divergent work.
 
 - GitHub reported more than 180 million developers on GitHub in 2025, plus nearly 1 billion commits and 43.2 million merged pull requests per month. This indicates both a huge developer population and an expanding volume of code-change activity.
 - Stack Overflow's 2025 survey shows modern development is dependency-heavy and cloud/toolchain-heavy: Docker usage reached 71.1% among all respondents and 73.8% among professional developers. This reinforces why generic file sync struggles with code folders.
-- Gartner defines cloud development environments as remote, ready-to-use cloud-hosted workspaces that reduce local setup friction. That validates the pain, but CDEs solve it by moving work away from the local machine. Devbox should solve a different job: keep local workspaces continuous across machines.
+- Gartner defines cloud development environments as remote, ready-to-use cloud-hosted workspaces that reduce local setup friction. That validates the pain, but CDEs solve it by moving work away from the local machine. Bindhub should solve a different job: keep local workspaces continuous across machines.
 - Jujutsu shows a credible direction for better source-control UX through automatic snapshots and
-  Git compatibility. Devbox should learn from this, but users should not need to replace Git on day
+  Git compatibility. Bindhub should learn from this, but users should not need to replace Git on day
   one.
 - Sonar's 2026 State of Code report says 64% of surveyed developers have started using AI agents and 72% of developers who have tried AI coding tools use them every day. Agent workspaces are not a side quest; they are a future workspace primitive.
 

@@ -5,7 +5,7 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This slice adds the next Phase 1 trust foundation after local identity and encrypted object sync:
 
@@ -39,7 +39,7 @@ not a cloud session and must not be treated as durable proof outside the local m
 
 ## Domain Boundary
 
-`devbox/crates/devbox-auth` owns deterministic auth and device-pairing state transitions:
+`bindhub/crates/bindhub-auth` owns deterministic auth and device-pairing state transitions:
 
 - create and parse pairing invitation tokens
 - reject malformed, expired, reused, or account-mismatched invitations
@@ -86,21 +86,21 @@ rotation completion claims a persisted pending intent by expiry and key-envelope
 The manual path is:
 
 ```text
-devbox init --db <DB_PATH> [--device-name <NAME>]
-devbox auth mock-login --db <DB_PATH>
-devbox auth status --db <DB_PATH>
-devbox devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]
-devbox devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>
-devbox devices join --db <RECEIVER_DB> --token-env <ENV> --device-name <NAME>
-devbox devices approve-join --db <SOURCE_DB> --token-env <ENV> --join-request-env <ENV> --device-name <NAME>
-devbox devices complete --db <RECEIVER_DB> --completion-env <ENV>
-devbox devices list --db <DB_PATH>
-devbox devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]
-devbox devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF>
-devbox devices recovery revoke --db <DB_PATH> <GRANT_ID>
-devbox devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>
-devbox sync cursor set --db <DB_PATH> --project <PROJECT_ID> --value <CURSOR>
-devbox sync cursor get --db <DB_PATH> --project <PROJECT_ID>
+bindhub init --db <DB_PATH> [--device-name <NAME>]
+bindhub auth mock-login --db <DB_PATH>
+bindhub auth status --db <DB_PATH>
+bindhub devices invite --db <DB_PATH> [--ttl-seconds <SECONDS>]
+bindhub devices approve --db <DB_PATH> --token <TOKEN> --device-name <NAME>
+bindhub devices join --db <RECEIVER_DB> --token-env <ENV> --device-name <NAME>
+bindhub devices approve-join --db <SOURCE_DB> --token-env <ENV> --join-request-env <ENV> --device-name <NAME>
+bindhub devices complete --db <RECEIVER_DB> --completion-env <ENV>
+bindhub devices list --db <DB_PATH>
+bindhub devices revoke --db <DB_PATH> <DEVICE_ID> [--reason <TEXT>]
+bindhub devices recovery create --db <DB_PATH> --device <DEVICE_ID> --recovery-ref <REDACTED_REF>
+bindhub devices recovery revoke --db <DB_PATH> <GRANT_ID>
+bindhub devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>
+bindhub sync cursor set --db <DB_PATH> --project <PROJECT_ID> --value <CURSOR>
+bindhub sync cursor get --db <DB_PATH> --project <PROJECT_ID>
 ```
 
 `devices approve` is the older single-DB smoke path where the inviter generates the approved device
@@ -110,9 +110,9 @@ the source encrypts the account sync key into a token-wrapped completion payload
 receiver local device key, and the receiver opens that completion and installs its own local
 device-key envelope.
 
-Existing commands such as `devbox init`, `devbox devices list`, `devbox sync upload/download`,
-`devbox sync publish-snapshot/import-snapshot/materialize`, `devbox snapshot`, and
-`devbox snapshot restore` continue to work. Local/mock import and materialize now reconcile the
+Existing commands such as `bindhub init`, `bindhub devices list`, `bindhub sync upload/download`,
+`bindhub sync publish-snapshot/import-snapshot/materialize`, `bindhub snapshot`, and
+`bindhub snapshot restore` continue to work. Local/mock import and materialize now reconcile the
 receiving device/project cursor with the latest local and incoming snapshots before downloading file
 blobs or applying workspace bytes. Divergent local and incoming snapshots create a local conflict
 record and do not advance the cursor.

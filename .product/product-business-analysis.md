@@ -54,7 +54,7 @@ This has three advantages:
 - conflict semantics
 
 The opportunity is the gap between Git and generic sync. Loom is the long-term primitive that can
-own that gap, but Devbox should first make the folder-continuity promise real.
+own that gap, but Bindhub should first make the folder-continuity promise real.
 
 ## Alternatives Considered
 
@@ -73,7 +73,7 @@ Cons:
 - teams cannot adopt without ecosystem compatibility
 - hard to explain before users feel the workspace pain
 
-Decision: not first. Build Loom underneath, but sell Devbox as folder continuity.
+Decision: not first. Build Loom underneath, but sell Bindhub as folder continuity.
 
 ### Start With Cloud Development Environments
 

@@ -5,21 +5,21 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice adds production-shaped pairing recovery and device rotation primitives without
 building Electron UI, live OAuth login, provider-backed recovery, or multi-region hosted hardening.
 
 ## Scope
 
-`devbox/crates/devbox-auth` now models deterministic lifecycle state for:
+`bindhub/crates/bindhub-auth` now models deterministic lifecycle state for:
 
 - recovery grant references with account/device scope
 - grant expiry, consumption, revocation, and audit labels
 - device rotation intents with optional account-session linkage
 - key-envelope rotation generation
 
-`devbox/crates/devbox-store` persists those primitives in local SQLite schema version `9`:
+`bindhub/crates/bindhub-store` persists those primitives in local SQLite schema version `9`:
 
 - `recovery_grants`
 - `device_rotation_intents`
@@ -41,13 +41,13 @@ rejects never-persisted, completed, expired, or stale-generation intents.
 The CLI exposes no-network dev commands:
 
 ```text
-devbox devices recovery create \
+bindhub devices recovery create \
   --db <DB_PATH> \
   --device <DEVICE_ID> \
   --recovery-ref <REDACTED_REF>
 
-devbox devices recovery revoke --db <DB_PATH> <GRANT_ID>
-devbox devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>
+bindhub devices recovery revoke --db <DB_PATH> <GRANT_ID>
+bindhub devices rotate-key-envelope --db <DB_PATH> --device <DEVICE_ID>
 ```
 
 Output may show account/device ids, grant ids, redacted references, statuses, expiry/revocation

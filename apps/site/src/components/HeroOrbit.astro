@@ -1,0 +1,148 @@
+---
+// Hero orbital constellation — light & airy, inspired by the GitHub
+// Discussions hero. A large true circle that nearly fills the viewport: a
+// square stage with clear concentric rings. Each node sits directly ON its
+// ring (the icon/pill is the dot on the circle); the bigger rings carry
+// their own nodes too, with sparse sync beads punched into the lines.
+
+type Node = {
+  a: number // angle in degrees (0 = right, 90 = bottom)
+  r: number // radius in % of half the square (0..50+ to reach outer rings)
+  ring?: number // the ring this node is tethered to (default RING)
+  far?: boolean // a smaller, secondary node out on a bigger ring
+  kind: "tile" | "folder" | "pill"
+  icon?: string
+  label?: string
+  count?: string
+  dot?: "local" | "cached" | "remote"
+  good?: boolean
+  dur: number
+  delay?: number
+}
+
+const icons: Record<string, string> = {
+  laptop:
+    '<rect x="4" y="5" width="16" height="11" rx="1.6" stroke="currentColor" stroke-width="1.8"/><path d="M2 20h20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  desktop:
+    '<rect x="3" y="4" width="18" height="13" rx="1.6" stroke="currentColor" stroke-width="1.8"/><path d="M9 21h6m-3-4v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  server:
+    '<rect x="3" y="4" width="18" height="7" rx="1.6" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="18" height="7" rx="1.6" stroke="currentColor" stroke-width="1.8"/><path d="M7 7.5h.01M7 16.5h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  spark:
+    '<path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2L12 3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  cloud:
+    '<path d="M7 18a4 4 0 0 1 .6-7.96A5 5 0 0 1 17 10.5a3.5 3.5 0 0 1-.5 7H7Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+  folder:
+    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>',
+  check:
+    '<path d="m5 13 4 4 10-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  arrowup:
+    '<path d="M12 19V5m-6 6 6-6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  pin: '<path d="M9 3h6l-1 6 4 4v2H6v-2l4-4-1-6Zm3 13v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  phone:
+    '<rect x="6.5" y="3" width="11" height="18" rx="2.2" stroke="currentColor" stroke-width="1.8"/><path d="M10.5 18h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  merge:
+    '<path d="M7 5v8a4 4 0 0 0 4 4h6m0 0-3-3m3 3-3 3M7 5a2 2 0 1 0-.01-.01M7 17a2 2 0 1 0-.01-.01" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
+}
+
+const RING = 45 // the backbone circle nodes sit ON
+
+// each node sits directly ON its ring — the icon/pill IS the dot on the
+// circle (no offset, no connector stem). The top arc (~250–290°) is left
+// clear of nodes so nothing collides with the navbar.
+const nodes: Node[] = [
+  // inner ring (r = 45)
+  { a: 300, r: 45, kind: "pill", icon: "check", label: "Synced", good: true, dur: 6.6, delay: 0.5 },
+  { a: 326, r: 45, kind: "tile", icon: "server", dur: 7.5, delay: 0.2 },
+  { a: 350, r: 45, kind: "pill", icon: "arrowup", label: "pushed", count: "12", dur: 7.1, delay: 0.15 },
+  { a: 16, r: 45, kind: "tile", icon: "spark", dur: 6.8, delay: 0.6 },
+  { a: 40, r: 45, kind: "pill", dot: "cached", label: "Partial cache", dur: 6.7, delay: 0.55 },
+  { a: 64, r: 45, kind: "pill", dot: "remote", label: "Remote-only", dur: 7.3, delay: 0.25 },
+  { a: 90, r: 45, kind: "folder", icon: "folder", dur: 6, delay: 0.1 },
+  { a: 116, r: 45, kind: "pill", icon: "pin", label: "Pinned", dur: 7, delay: 0.2 },
+  { a: 142, r: 45, kind: "tile", icon: "cloud", dur: 7.2, delay: 0.3 },
+  { a: 168, r: 45, kind: "pill", dot: "local", label: "Fully local", dur: 6.9, delay: 0.35 },
+  { a: 196, r: 45, kind: "pill", icon: "check", label: "Checkpoint saved", good: true, dur: 6.4, delay: 0.45 },
+  { a: 222, r: 45, kind: "tile", icon: "laptop", dur: 7, delay: 0 },
+  { a: 245, r: 45, kind: "tile", icon: "desktop", dur: 6.5, delay: 0.4 },
+
+  // tier 2 — secondary machines / agents living ON the wider ring (r 66),
+  // at angles that stay visible: the sides and the lower / showcase arc.
+  { a: 180, r: 66, ring: 66, far: true, kind: "tile", icon: "phone", dur: 7.4, delay: 0.5 },
+  { a: 150, r: 66, ring: 66, far: true, kind: "tile", icon: "spark", dur: 6.6, delay: 0.2 },
+  { a: 106, r: 66, ring: 66, far: true, kind: "pill", dot: "remote", label: "+5 in sync", dur: 7.2, delay: 0.4 },
+  { a: 74, r: 66, ring: 66, far: true, kind: "tile", icon: "laptop", dur: 6.9, delay: 0.15 },
+  { a: 34, r: 66, ring: 66, far: true, kind: "tile", icon: "server", dur: 7.6, delay: 0.55 },
+  { a: 8, r: 66, ring: 66, far: true, kind: "pill", icon: "merge", label: "merged", good: true, dur: 6.5, delay: 0.3 },
+]
+
+const xy = (a: number, r: number) => {
+  const rad = (a * Math.PI) / 180
+  return { x: 50 + r * Math.cos(rad), y: 50 + r * Math.sin(rad) }
+}
+const fix = (n: number) => n.toFixed(2)
+
+// sparse sync beads sitting ON the lines at empty spots (no node there) —
+// they "cut" the ring, including on the bigger rings where arcs are visible.
+const beads = [
+  { a: 258, r: 45 }, { a: 272, r: 45 }, { a: 286, r: 45 }, // fill the cleared top arc
+  { a: 128, r: 45 }, { a: 206, r: 45 },
+  { a: 210, r: 66 }, { a: 330, r: 66 }, { a: 128, r: 66 }, { a: 50, r: 66 },
+  { a: 104, r: 92 }, { a: 72, r: 92 },
+].map((o) => xy(o.a, o.r))
+---
+
+<div class="hero-orbit" aria-hidden="true">
+  <svg class="orbit-lines" viewBox="0 0 100 100" fill="none">
+    <!-- huge faint rings that bleed beyond the page; only arcs show -->
+    <circle cx="50" cy="50" r="92" stroke="currentColor" stroke-width="0.16"
+      stroke-opacity="0.32"></circle>
+    <circle cx="50" cy="50" r="66" stroke="currentColor" stroke-width="0.2"
+      stroke-opacity="0.45"></circle>
+    <!-- clear backbone + inner ring -->
+    <circle cx="50" cy="50" r="45" stroke="currentColor" stroke-width="0.3"
+      stroke-opacity="0.9"></circle>
+    <circle cx="50" cy="50" r="30" stroke="currentColor" stroke-width="0.25"
+      stroke-opacity="0.45"></circle>
+
+    {/* sync points: mask cuts the ring, a dot sits in the gap */}
+    {
+      beads.map((p) => (
+        <circle class="j-mask" cx={fix(p.x)} cy={fix(p.y)} r="0.85" />
+      ))
+    }
+    {
+      beads.map((p) => (
+        <circle class="j-dot" cx={fix(p.x)} cy={fix(p.y)} r="0.5" />
+      ))
+    }
+  </svg>
+
+  {
+    nodes.map((n) => {
+      const p = xy(n.a, n.r)
+      return (
+        <div
+          class:list={["o-node", n.far && "o-far"]}
+          style={`top:${fix(p.y)}%;left:${fix(p.x)}%;--dur:${n.dur}s;--delay:${n.delay ?? 0}s`}
+        >
+          {n.kind === "pill" ? (
+            <div class:list={["o-pill", n.good && "is-good"]}>
+              {n.dot && <span class:list={["dot", n.dot]} />}
+              {n.icon && (
+                <svg class="o-float" viewBox="0 0 24 24" fill="none" set:html={icons[n.icon]} />
+              )}
+              {n.label}
+              {n.count && (
+                <span style="color:var(--muted-foreground)">&nbsp;{n.count}</span>
+              )}
+            </div>
+          ) : (
+            <div class:list={["o-tile", n.kind === "folder" && "is-folder"]}>
+              <svg class="o-float" viewBox="0 0 24 24" fill="none" set:html={icons[n.icon!]} />
+            </div>
+          )}
+        </div>
+      )
+    })
+  }
+</div>

@@ -5,7 +5,7 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This slice completes the first local/mock Phase 1 vertical path for second-device continuation:
 
@@ -40,12 +40,12 @@ not a production key exchange.
 
 ## Domain Boundary
 
-`devbox/crates/devbox-materialize` composes the existing foundations:
+`bindhub/crates/bindhub-materialize` composes the existing foundations:
 
-- `devbox-store` loads and persists snapshot/project/manifest metadata
-- `devbox-store::BlobCache` owns local plaintext cache bytes
-- `devbox-sync` encrypts/decrypts remote snapshot bundle and file blob objects
-- `devbox-snapshot` plans and applies safe restore/materialization
+- `bindhub-store` loads and persists snapshot/project/manifest metadata
+- `bindhub-store::BlobCache` owns local plaintext cache bytes
+- `bindhub-sync` encrypts/decrypts remote snapshot bundle and file blob objects
+- `bindhub-snapshot` plans and applies safe restore/materialization
 
 The materialization crate owns only the orchestration model:
 
@@ -92,8 +92,8 @@ cursor unchanged, and does not download file blobs into the receiver cache.
 
 ## Materialization
 
-`devbox sync materialize` imports first, then delegates planning and apply to
-`devbox-snapshot` restore logic. Its internal import does not advance the cursor; materialize
+`bindhub sync materialize` imports first, then delegates planning and apply to
+`bindhub-snapshot` restore logic. Its internal import does not advance the cursor; materialize
 commits the cursor only after restore planning and the requested `--apply` behavior succeed. The
 existing restore safety rules still apply:
 
@@ -106,26 +106,26 @@ existing restore safety rules still apply:
 ## CLI Smoke Path
 
 ```text
-devbox init --db <SOURCE_DB> --device-name Desk
-devbox snapshot --db <SOURCE_DB> --cache <SOURCE_CACHE> <PROJECT_ROOT>
-devbox sync publish-snapshot --db <SOURCE_DB> --cache <SOURCE_CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
+bindhub init --db <SOURCE_DB> --device-name Desk
+bindhub snapshot --db <SOURCE_DB> --cache <SOURCE_CACHE> <PROJECT_ROOT>
+bindhub sync publish-snapshot --db <SOURCE_DB> --cache <SOURCE_CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
 
-devbox devices invite --db <SOURCE_DB>
-export DEVBOX_PAIRING_TOKEN='<printed-token>'
-devbox devices join --db <RECEIVER_DB> --token-env DEVBOX_PAIRING_TOKEN --device-name Laptop
-export DEVBOX_PAIRING_JOIN_REQUEST='<printed-join-request>'
-devbox devices approve-join --db <SOURCE_DB> --token-env DEVBOX_PAIRING_TOKEN --join-request-env DEVBOX_PAIRING_JOIN_REQUEST --device-name Laptop
-export DEVBOX_PAIRING_COMPLETION='<printed-completion>'
-devbox devices complete --db <RECEIVER_DB> --completion-env DEVBOX_PAIRING_COMPLETION
+bindhub devices invite --db <SOURCE_DB>
+export BINDHUB_PAIRING_TOKEN='<printed-token>'
+bindhub devices join --db <RECEIVER_DB> --token-env BINDHUB_PAIRING_TOKEN --device-name Laptop
+export BINDHUB_PAIRING_JOIN_REQUEST='<printed-join-request>'
+bindhub devices approve-join --db <SOURCE_DB> --token-env BINDHUB_PAIRING_TOKEN --join-request-env BINDHUB_PAIRING_JOIN_REQUEST --device-name Laptop
+export BINDHUB_PAIRING_COMPLETION='<printed-completion>'
+bindhub devices complete --db <RECEIVER_DB> --completion-env BINDHUB_PAIRING_COMPLETION
 
-devbox sync import-snapshot --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
-devbox sync materialize --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> --to <TARGET> <SNAPSHOT_ID> --apply
+bindhub sync import-snapshot --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
+bindhub sync materialize --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --remote <REMOTE_DIR> --to <TARGET> <SNAPSHOT_ID> --apply
 ```
 
 The same imported snapshot can also be materialized with:
 
 ```text
-devbox snapshot restore --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --to <TARGET> <SNAPSHOT_ID> --apply
+bindhub snapshot restore --db <RECEIVER_DB> --cache <RECEIVER_CACHE> --to <TARGET> <SNAPSHOT_ID> --apply
 ```
 
 ## Hosted Metadata Opt-In
@@ -141,7 +141,7 @@ compare-and-set first under the hosted account scope and receiver device id; if 
 stale, the local cursor remains unchanged.
 
 For external hosted alpha testing, use `--metadata-mode hosted-api --metadata-api <URL>
---metadata-project <PROJECT_ID> [--metadata-session-token-env DEVBOX_SESSION_TOKEN]` instead of a
+--metadata-project <PROJECT_ID> [--metadata-session-token-env BINDHUB_SESSION_TOKEN]` instead of a
 shared `--metadata-db`. Hosted API mode derives the account from the authenticated session on the
 server, so clients do not pass `--metadata-account`; `--remote-kind hosted` also avoids local R2/S3
 keys by proxying encrypted object bytes through the metadata API.

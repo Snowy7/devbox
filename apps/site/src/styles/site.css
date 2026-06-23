@@ -1,0 +1,1355 @@
+/*
+ * Bindhub site theme — light, editorial-tech.
+ *
+ * Tokens are the packages/ui (shadcn / OKLCH neutral zinc) LIGHT set.
+ * Montserrat display + Inter body. The hero is an orbital constellation:
+ * machines, folders, and sync-status pills floating around one headline.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* --- packages/ui light tokens --- */
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.141 0.005 285.823);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.141 0.005 285.823);
+  --primary: oklch(0.21 0.006 285.885);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.967 0.001 286.375);
+  --muted: oklch(0.967 0.001 286.375);
+  --muted-foreground: oklch(0.552 0.016 285.938);
+  --accent: oklch(0.967 0.001 286.375);
+  --border: oklch(0.92 0.004 286.32);
+  --border-strong: oklch(0.872 0.006 286);
+  --ring: oklch(0.705 0.015 286.067);
+  --radius: 0.7rem;
+
+  /* --- marketing layer --- */
+  --brand: oklch(0.54 0.21 286);
+  --brand-soft: oklch(0.62 0.19 286);
+  --surface: oklch(0.985 0.002 286);
+  --surface-2: oklch(0.967 0.002 286);
+
+  /* sync state hues, shared by orbit, chips and the track */
+  --local: oklch(0.62 0.16 158);
+  --cached: oklch(0.72 0.14 70);
+  --remote: oklch(0.56 0.2 286);
+
+  --shadow-xs: 0 1px 2px oklch(0.22 0.04 286 / 7%);
+  --shadow-sm: 0 2px 6px oklch(0.22 0.04 286 / 8%);
+  --shadow-md: 0 16px 40px -18px oklch(0.22 0.06 286 / 22%);
+  --shadow-lg: 0 40px 80px -30px oklch(0.22 0.08 286 / 28%);
+  --shadow-float: 0 10px 28px -10px oklch(0.24 0.08 286 / 22%),
+    0 2px 5px oklch(0.2 0.03 286 / 8%);
+
+  --radius-md: calc(var(--radius) * 0.72);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.5);
+  --radius-2xl: calc(var(--radius) * 2.2);
+
+  --maxw: 1140px;
+  --pad: clamp(1.1rem, 4vw, 2rem);
+
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-heading: "Montserrat", var(--font-sans);
+
+  font-family: var(--font-sans);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+  color: var(--foreground);
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: clip; /* safety net against any wide child causing scroll */
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+p {
+  color: var(--muted-foreground);
+  line-height: 1.7;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--brand) 22%, transparent);
+  color: var(--foreground);
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.skip-link {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  left: 1rem;
+  padding: 0.7rem 0.9rem;
+  position: absolute;
+  top: -5rem;
+  z-index: 40;
+  border-radius: var(--radius-md);
+}
+
+.skip-link:focus {
+  top: 1rem;
+}
+
+/* ---------- Header ---------- */
+
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: transparent;
+  border-bottom: 1px solid transparent;
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease,
+    backdrop-filter 0.25s ease;
+}
+
+/* only paint a bg + hairline once the page is scrolled */
+.site-header.scrolled {
+  background: color-mix(in oklab, var(--background) 80%, transparent);
+  backdrop-filter: saturate(150%) blur(14px);
+  border-bottom-color: var(--border);
+}
+
+.nav,
+.site-footer {
+  margin: 0 auto;
+  max-width: var(--maxw);
+  padding-left: var(--pad);
+  padding-right: var(--pad);
+}
+
+.nav {
+  position: relative;
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  min-height: 66px;
+  gap: 1rem;
+}
+
+/* ---------- Logo / brand ---------- */
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.logo-mark {
+  color: var(--primary);
+  flex: none;
+}
+
+.logo-word {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+
+.brand {
+  align-items: center;
+  display: inline-flex;
+}
+
+.nav-links {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+}
+
+.nav-links a,
+.footer-links a {
+  color: var(--muted-foreground);
+  font-size: 0.92rem;
+  font-weight: 500;
+  padding: 0.45rem 0.7rem;
+  border-radius: var(--radius-md);
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.nav-links a:hover,
+.footer-links a:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.nav-links .nav-cta {
+  margin-left: 0.4rem;
+}
+
+/* ---------- Buttons ---------- */
+
+.button {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  display: inline-flex;
+  gap: 0.5rem;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 0.95rem;
+  justify-content: center;
+  min-height: 46px;
+  padding: 0.7rem 1.25rem;
+  white-space: nowrap;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.2s ease,
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.button svg {
+  width: 1.05em;
+  height: 1.05em;
+}
+
+.button.primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: var(--shadow-sm);
+}
+
+.button.primary:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.button.secondary {
+  background: var(--background);
+  color: var(--foreground);
+  border-color: var(--border-strong);
+}
+
+.button.secondary:hover {
+  background: var(--accent);
+}
+
+.button.ghost {
+  background: transparent;
+  color: var(--foreground);
+  font-weight: 600;
+  min-height: auto;
+  padding: 0.5rem 0.25rem;
+}
+
+.button.ghost:hover {
+  color: var(--brand);
+}
+
+.button.sm {
+  min-height: 38px;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.9rem;
+}
+
+/* ---------- Eyebrow / pill ---------- */
+
+.eyebrow {
+  display: inline-block;
+  color: var(--brand);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin: 0 0 1rem;
+  text-transform: uppercase;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0.9rem 0.35rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: var(--shadow-xs);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.pill .pill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--brand) 14%, transparent);
+  color: var(--brand);
+  font-weight: 700;
+  font-size: 0.74rem;
+}
+
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--brand) 22%, transparent);
+}
+
+/* ---------- Typography ---------- */
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-heading);
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+  margin: 0;
+  color: var(--foreground);
+  font-weight: 800;
+}
+
+h1 {
+  font-size: clamp(2.1rem, 7.6vw, 5rem);
+  overflow-wrap: break-word;
+}
+
+.gradient-text {
+  background: linear-gradient(
+    100deg,
+    var(--brand) 0%,
+    var(--brand-soft) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---------- Section rhythm ---------- */
+
+.section {
+  position: relative;
+  padding: clamp(4rem, 9vw, 7rem) 0;
+}
+
+.section > .container {
+  margin: 0 auto;
+  max-width: var(--maxw);
+  padding-left: var(--pad);
+  padding-right: var(--pad);
+}
+
+.section.band {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.section-head {
+  max-width: 660px;
+  margin: 0 auto clamp(2.5rem, 5vw, 3.5rem);
+  text-align: center;
+}
+
+.section-head h2 {
+  font-size: clamp(1.75rem, 4.4vw, 3.1rem);
+}
+
+.section-head .lead {
+  font-size: 1.1rem;
+  margin: 1.1rem auto 0;
+  max-width: 52ch;
+}
+
+/* ===================================================================
+   HERO — orbital constellation
+   =================================================================== */
+
+.hero {
+  position: relative;
+  /* visible (not hidden) so the big rings bleed DOWN into the showcase
+     section; html { overflow-x: clip } keeps that from causing scroll */
+  overflow: visible;
+  text-align: center;
+  padding: var(--pad);
+  display: grid;
+  place-items: center;
+  /* nearly full height so the orbit can be large; the showcase peeks in
+     at the bottom with the orbit's rings still bleeding behind it */
+  min-height: calc(100svh - 160px);
+}
+
+/* the showcase sits ABOVE the orbit (z 1 > orbit z 0) but is transparent,
+   so the orbit's rings keep showing in the gaps around its content */
+#showcase {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+/* a true square so the rings render circular at any width; sized mostly by
+   height so the circle fills the viewport, capped by width on narrow screens */
+.hero-orbit {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(94vh, 1220px, 96vw);
+  aspect-ratio: 1 / 1;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.hero-orbit .orbit-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  color: var(--border-strong);
+  overflow: visible;
+}
+
+/* sync points: a bg-coloured mask "cuts" the ring, a dot sits in the gap */
+.orbit-lines .j-mask {
+  fill: var(--background);
+}
+
+.orbit-lines .j-dot {
+  fill: var(--muted-foreground);
+  fill-opacity: 0.4;
+}
+
+/* nodes are stationary "stations" sitting ON the ring; their opaque fill
+   cuts the line, and only the inner icon floats */
+.o-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+}
+
+/* tier-2 nodes on the bigger rings: smaller + muted via colour (not opacity,
+   which would fade their ring-cut) so the inner ring stays the focus */
+.o-far .o-tile {
+  width: 46px;
+  height: 46px;
+  color: var(--muted-foreground);
+  border-color: var(--border);
+}
+
+.o-far .o-tile svg {
+  width: 21px;
+  height: 21px;
+}
+
+.o-far .o-pill {
+  font-size: 0.76rem;
+  padding: 0.32rem 0.62rem;
+  color: var(--muted-foreground);
+  border-color: var(--border);
+}
+
+.o-float {
+  animation: o-float var(--dur, 7s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+
+@keyframes o-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.o-tile {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  /* solid bg "moat" that punches a clean gap in the ring around the station */
+  outline: 7px solid var(--background);
+  color: var(--foreground);
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+
+.o-tile svg {
+  width: 26px;
+  height: 26px;
+}
+
+.o-tile.is-folder {
+  width: 66px;
+  height: 66px;
+  background: linear-gradient(145deg, var(--brand-soft), var(--brand));
+  border-color: transparent;
+  color: #fff;
+}
+
+.o-tile.is-folder svg {
+  width: 30px;
+  height: 30px;
+}
+
+.o-node:hover .o-tile {
+  border-color: color-mix(in oklab, var(--brand) 45%, var(--border-strong));
+}
+
+.o-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  outline: 7px solid var(--background);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--foreground);
+  white-space: nowrap;
+}
+
+.o-pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.o-pill svg {
+  width: 14px;
+  height: 14px;
+}
+
+.o-pill.is-good {
+  color: var(--local);
+  border-color: color-mix(in oklab, var(--local) 35%, var(--border));
+  background: color-mix(in oklab, var(--local) 8%, var(--card));
+}
+
+.dot.local {
+  background: var(--local);
+}
+.dot.cached {
+  background: var(--cached);
+}
+.dot.remote {
+  background: var(--remote);
+}
+
+/* hero content */
+.hero-inner {
+  position: relative;
+  z-index: 2;
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.hero-inner h1 {
+  margin: 1.2rem auto 0;
+  max-width: 13ch;
+}
+
+.hero-inner .lead {
+  font-size: clamp(1.02rem, 1.6vw, 1.2rem);
+  max-width: 34rem;
+  margin: 1.3rem auto 0;
+  color: var(--muted-foreground);
+}
+
+.hero-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin-top: 2rem;
+}
+
+.section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-top: 2.4rem;
+}
+
+/* the "Dedicated space" style banner line under the hero */
+.hero-tagline {
+  position: relative;
+  z-index: 2;
+  text-align: center;
+  margin: clamp(2.5rem, 6vw, 4rem) auto 0;
+  font-family: var(--font-heading);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  font-size: clamp(1.45rem, 3.6vw, 2.6rem);
+  color: var(--foreground);
+}
+
+/* ===================================================================
+   PRODUCT SHOWCASE — a clean light "folder" window
+   =================================================================== */
+
+.showcase {
+  max-width: 920px;
+  margin: clamp(2rem, 5vw, 3rem) auto 0;
+}
+
+.window {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.window-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.window-dots {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.window-dots span {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.window-title {
+  margin-left: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--muted-foreground);
+  font-weight: 500;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+}
+
+.window-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--local);
+}
+
+.window-badge .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--local);
+}
+
+.filelist {
+  padding: 0.4rem 0;
+}
+
+.filerow {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr auto auto;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.7rem clamp(1rem, 3vw, 1.5rem);
+  font-size: 0.92rem;
+}
+
+.filerow + .filerow {
+  border-top: 1px solid var(--border);
+}
+
+.filerow .ficon {
+  color: var(--muted-foreground);
+  display: grid;
+  place-items: center;
+}
+
+.filerow .ficon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.filerow .fname {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.filerow .fsize {
+  color: var(--muted-foreground);
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.fstate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.fstate .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+/* ---------- Capability strip ---------- */
+
+.capstrip {
+  padding: 1.5rem 0;
+}
+
+.capstrip .container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem 1.4rem;
+  flex-wrap: wrap;
+}
+
+.cap-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.cap-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.cap-tag svg {
+  width: 16px;
+  height: 16px;
+  color: var(--brand);
+}
+
+.cap-sep {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+/* ---------- Cards (shared 3-up) ---------- */
+
+.cards {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.card {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.7rem;
+  box-shadow: var(--shadow-xs);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.22s ease,
+    border-color 0.18s ease;
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in oklab, var(--brand) 32%, var(--border));
+  box-shadow: var(--shadow-md);
+}
+
+/* a highlighted card (e.g. the engine) — brand-tinted to draw the eye */
+.card.card-accent {
+  background:
+    radial-gradient(
+      120% 90% at 100% 0%,
+      color-mix(in oklab, var(--brand) 10%, transparent),
+      transparent 60%
+    ),
+    var(--card);
+  border-color: color-mix(in oklab, var(--brand) 28%, var(--border));
+}
+
+.card.card-accent .feature-icon {
+  background: color-mix(in oklab, var(--brand) 16%, transparent);
+  color: var(--brand);
+}
+
+.card h3 {
+  font-size: 1.13rem;
+  font-weight: 700;
+  margin-bottom: 0.55rem;
+  letter-spacing: -0.015em;
+}
+
+.card p {
+  margin: 0;
+  font-size: 0.97rem;
+}
+
+.card .num,
+.card .check,
+.feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-md);
+  margin-bottom: 1.1rem;
+}
+
+.card .num {
+  background: color-mix(in oklab, var(--brand) 12%, transparent);
+  color: var(--brand);
+  font-family: var(--font-heading);
+  font-weight: 800;
+}
+
+.card .check {
+  background: color-mix(in oklab, var(--local) 14%, transparent);
+  color: var(--local);
+}
+
+.feature-icon {
+  background: var(--accent);
+  color: var(--brand);
+}
+
+.feature-icon svg,
+.card .check svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* ---------- Bento ---------- */
+
+.bento {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 1rem;
+}
+
+.bento .cell {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.8rem;
+  box-shadow: var(--shadow-xs);
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.22s ease,
+    transform 0.18s ease;
+}
+
+.bento .cell:hover {
+  border-color: color-mix(in oklab, var(--brand) 30%, var(--border));
+  box-shadow: var(--shadow-md);
+  transform: translateY(-3px);
+}
+
+.bento .cell.lg {
+  grid-column: span 7;
+  grid-row: span 2;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(
+      120% 80% at 100% 0%,
+      color-mix(in oklab, var(--brand) 7%, transparent),
+      transparent 55%
+    ),
+    var(--card);
+}
+
+.bento .cell.sm {
+  grid-column: span 5;
+}
+
+.bento .cell h3 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-bottom: 0.6rem;
+}
+
+.bento .cell.lg h3 {
+  font-size: clamp(1.4rem, 2.4vw, 1.85rem);
+}
+
+.bento .cell p {
+  margin: 0;
+  font-size: 0.97rem;
+}
+
+.folder-mock {
+  margin-top: auto;
+  padding-top: 1.7rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.folder-mock .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.82rem;
+  color: var(--muted-foreground);
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+}
+
+.folder-mock .chip .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+/* ---------- Storage track ---------- */
+
+.track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.track::before {
+  content: "";
+  position: absolute;
+  top: 19px;
+  left: 8%;
+  right: 8%;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--remote),
+    var(--cached),
+    var(--local),
+    var(--foreground)
+  );
+  opacity: 0.55;
+}
+
+.track-node {
+  position: relative;
+  padding-top: 3rem;
+}
+
+/* a station on the track: white centre, coloured ring + soft halo */
+.track-node .node-dot {
+  position: absolute;
+  top: 9px;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--background);
+  border: 4px solid var(--c, var(--brand));
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--c, var(--brand)) 16%, transparent);
+}
+
+.track-node .state {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--foreground);
+  margin-bottom: 0.5rem;
+}
+
+.track-node p {
+  margin: 0;
+  font-size: 0.93rem;
+}
+
+/* ---------- CTA panel ---------- */
+
+.cta-panel {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-2xl);
+  background:
+    repeating-radial-gradient(
+      circle at 86% -8%,
+      transparent 0 70px,
+      color-mix(in oklab, white 6%, transparent) 70px 71px
+    ),
+    radial-gradient(
+      80% 130% at 82% -10%,
+      color-mix(in oklab, var(--brand) 80%, transparent),
+      transparent 55%
+    ),
+    var(--primary);
+  color: var(--primary-foreground);
+  padding: clamp(2rem, 5vw, 3.8rem);
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: clamp(2rem, 5vw, 3.5rem);
+  align-items: center;
+  box-shadow: var(--shadow-lg);
+}
+
+.cta-panel h2 {
+  color: var(--primary-foreground);
+  font-size: clamp(2rem, 4vw, 3rem);
+  max-width: 16ch;
+}
+
+.cta-panel .eyebrow {
+  color: color-mix(in oklab, var(--brand-soft) 70%, white);
+}
+
+.cta-panel p {
+  margin-top: 1rem;
+  font-size: 1.05rem;
+  max-width: 46ch;
+  color: color-mix(in oklab, var(--primary-foreground) 78%, transparent);
+}
+
+.contact-form {
+  display: grid;
+  gap: 0.9rem;
+  background: var(--card);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  box-shadow: var(--shadow-md);
+  color: var(--foreground);
+}
+
+.field {
+  display: grid;
+  gap: 0.4rem;
+}
+
+label {
+  color: var(--foreground);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+input,
+textarea {
+  background: var(--background);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--foreground);
+  font: inherit;
+  min-height: 44px;
+  padding: 0.7rem 0.85rem;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted-foreground);
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--brand) 20%, transparent);
+}
+
+textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.form-note {
+  font-size: 0.82rem;
+  margin: 0.2rem 0 0;
+  color: var(--muted-foreground);
+}
+
+/* ---------- Footer ---------- */
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+  padding-top: 2.5rem;
+  padding-bottom: 2.5rem;
+  flex-wrap: wrap;
+}
+
+.site-footer .footer-brand p {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+  max-width: 30ch;
+}
+
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+/* ---------- Docs ---------- */
+
+.docs-hero,
+.docs-layout {
+  margin: 0 auto;
+  max-width: var(--maxw);
+  padding-left: var(--pad);
+  padding-right: var(--pad);
+}
+
+.docs-hero {
+  padding-top: clamp(3rem, 7vw, 5rem);
+  padding-bottom: 2rem;
+}
+
+.docs-hero h1 {
+  font-size: clamp(2rem, 5vw, 3.4rem);
+}
+
+.docs-hero p:not(.eyebrow) {
+  font-size: 1.1rem;
+  max-width: 720px;
+  margin-top: 1rem;
+}
+
+.docs-layout {
+  align-items: start;
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: 240px minmax(0, 1fr);
+  padding-bottom: clamp(4rem, 8vw, 6rem);
+}
+
+.docs-nav {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.6rem;
+  position: sticky;
+  top: 90px;
+  box-shadow: var(--shadow-xs);
+}
+
+.docs-nav a {
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.7rem;
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.docs-nav a:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.docs-nav a.active {
+  background: var(--accent);
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.docs-content {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: clamp(1.4rem, 4vw, 2.4rem);
+  box-shadow: var(--shadow-xs);
+}
+
+.docs-content h2 {
+  font-size: clamp(1.6rem, 4vw, 2.3rem);
+  margin-top: 2.2rem;
+}
+
+.docs-content h2:first-child {
+  margin-top: 0;
+}
+
+.docs-content h3 {
+  font-size: 1.2rem;
+  margin-top: 1.6rem;
+}
+
+.docs-content p,
+.docs-content li {
+  font-size: 1rem;
+}
+
+.docs-content a:not(.button) {
+  color: var(--brand);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.docs-content ul,
+.docs-content ol {
+  color: var(--muted-foreground);
+  line-height: 1.75;
+  padding-left: 1.2rem;
+}
+
+.docs-content code {
+  background: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  padding: 0.1rem 0.35rem;
+  font-size: 0.9em;
+}
+
+.docs-content .callout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem;
+  margin: 1.5rem 0;
+}
+
+.docs-content .callout h3 {
+  margin-top: 0;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 900px) {
+  .cards,
+  .track {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .track::before {
+    display: none;
+  }
+
+  .bento .cell.lg,
+  .bento .cell.sm {
+    grid-column: span 12;
+    grid-row: auto;
+  }
+
+  .cta-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .docs-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .docs-nav {
+    position: static;
+  }
+}
+
+/* below the desktop range the orbit is hidden entirely for a clean,
+   never-overlapping centered hero (the orbit is a wide-screen delight) */
+@media (max-width: 820px) {
+  .hero-orbit {
+    display: none;
+  }
+  .hero {
+    min-height: auto;
+    padding-top: clamp(3rem, 11vw, 4.5rem);
+    padding-bottom: clamp(2.5rem, 8vw, 3.5rem);
+  }
+}
+
+@media (max-width: 640px) {
+  .nav {
+    min-height: 58px;
+  }
+
+  .nav-links a:not(.nav-cta) {
+    display: none;
+  }
+
+  .cards,
+  .track {
+    grid-template-columns: 1fr;
+  }
+
+  .filerow .fsize {
+    display: none;
+  }
+
+  .hero-actions .button {
+    flex: 1 1 auto;
+  }
+
+  .site-footer {
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .o-float {
+    animation: none;
+  }
+}

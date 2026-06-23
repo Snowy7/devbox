@@ -5,11 +5,11 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
-This document describes the Phase 0 local storage boundary in `devbox/crates/devbox-store`.
+This document describes the Phase 0 local storage boundary in `bindhub/crates/bindhub-store`.
 
-The store is intentionally a metadata database, not a file-content database. It gives the daemon a transactional place to record what Devbox knows about projects, snapshots, manifests, policy decisions, and restore attempts while keeping actual source bytes in a local content-addressed cache.
+The store is intentionally a metadata database, not a file-content database. It gives the daemon a transactional place to record what Bindhub knows about projects, snapshots, manifests, policy decisions, and restore attempts while keeping actual source bytes in a local content-addressed cache.
 
 ## Boundary
 
@@ -42,29 +42,29 @@ The SQLite `blobs.object_ref` column should store a stable reference to this cac
 
 Local snapshot creation now crosses three deliberately separate boundaries:
 
-1. `devbox-snapshot` walks the project root, evaluates default policy, writes included file bytes into `BlobCache`, and returns an in-memory draft manifest.
+1. `bindhub-snapshot` walks the project root, evaluates default policy, writes included file bytes into `BlobCache`, and returns an in-memory draft manifest.
 2. `BlobCache` stores file bytes under content-addressed BLAKE3 object paths. It does not open or mutate SQLite.
-3. `devbox-store` persists the draft's metadata into SQLite: project identity, snapshot identity, creation time, summary counts and bytes, manifest entries, blob ids and object refs for included files, and policy rows for excluded or deferred entries.
+3. `bindhub-store` persists the draft's metadata into SQLite: project identity, snapshot identity, creation time, summary counts and bytes, manifest entries, blob ids and object refs for included files, and policy rows for excluded or deferred entries.
 
 SQLite stores metadata and references only. It does not store raw project file bytes. Repeated writes of the same file content continue to converge on the same blob-cache object, while the snapshot row records which object ref a manifest entry used.
 
 The CLI surface for the persisted path is:
 
 ```text
-devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
-devbox snapshot list --db <DB_PATH>
-devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>
-devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --dry-run
-devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --apply
+bindhub snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
+bindhub snapshot list --db <DB_PATH>
+bindhub snapshot show --db <DB_PATH> <SNAPSHOT_ID>
+bindhub snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --dry-run
+bindhub snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --apply
 ```
 
-`devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>` remains non-persisting. Both dry-run and persisted creation reject a blob cache that sits inside the snapshot root before the cache can create directories.
+`bindhub snapshot --cache <CACHE_ROOT> --dry-run <PATH>` remains non-persisting. Both dry-run and persisted creation reject a blob cache that sits inside the snapshot root before the cache can create directories.
 
 Persisting the same stable snapshot id twice currently returns a duplicate snapshot error. The project row is upserted so the local root metadata can be refreshed without rewriting existing snapshot rows.
 
 ## Restore Read Boundary
 
-Restore uses SQLite as metadata lookup only. The CLI loads the persisted snapshot row and manifest entries through `Store::snapshot_with_entries`, then passes those records to `devbox-snapshot` with an opened local `BlobCache`.
+Restore uses SQLite as metadata lookup only. The CLI loads the persisted snapshot row and manifest entries through `Store::snapshot_with_entries`, then passes those records to `bindhub-snapshot` with an opened local `BlobCache`.
 
 The store does not materialize files, interpret path safety, or read blob bytes. It remains responsible for preserving the manifest metadata and blob object references that make restore planning possible. Missing cache objects are detected by the restore planner before apply is allowed.
 
@@ -130,7 +130,7 @@ but not source file bytes. Conflict creation is idempotent for the same project/
 tuple.
 
 The local/mock sync preflight path uses these rows with `device_project_cursors`. When the receiving
-device's cursor/base, latest local snapshot, and incoming snapshot indicate divergence, Devbox
+device's cursor/base, latest local snapshot, and incoming snapshot indicate divergence, Bindhub
 persists an idempotent conflict record and refuses import/materialization without advancing the
 cursor or downloading receiver file blobs.
 

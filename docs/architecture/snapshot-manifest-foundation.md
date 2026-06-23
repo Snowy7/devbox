@@ -8,9 +8,9 @@ shared folder and `snapshot` for the current implementation term for immutable f
 product language should say shared folder and Loom checkpoint/revision language when discussing the
 future source-control primitive.
 
-This slice introduces the Phase 0 snapshot manifest builder in `devbox/crates/devbox-snapshot`.
+This slice introduces the Phase 0 snapshot manifest builder in `bindhub/crates/bindhub-snapshot`.
 
-The builder walks a local project directory, applies the existing generated-artifact policy from `devbox-core`, writes included file bytes into the local `BlobCache`, and returns an in-memory draft snapshot manifest. The CLI can now either print that draft as a dry run or persist its metadata to SQLite.
+The builder walks a local project directory, applies the existing generated-artifact policy from `bindhub-core`, writes included file bytes into the local `BlobCache`, and returns an in-memory draft snapshot manifest. The CLI can now either print that draft as a dry run or persist its metadata to SQLite.
 
 The Phase 1 secret detection slice now applies a conservative local detector before blob-cache
 writes. Files with high-confidence secret findings are represented as blocked/deferred policy
@@ -18,7 +18,7 @@ entries with no blob id or object ref.
 
 ## Boundary
 
-`devbox-core` owns domain vocabulary:
+`bindhub-core` owns domain vocabulary:
 
 - `BlobId`
 - `SnapshotId`
@@ -26,14 +26,14 @@ entries with no blob id or object ref.
 - `PolicyDecision`
 - generated-artifact policy evaluation
 
-`devbox-store` owns local storage primitives:
+`bindhub-store` owns local storage primitives:
 
 - SQLite metadata schema and migrations
 - the content-addressed `BlobCache`
 - BLAKE3 object identity for file bytes
 - cache object references such as `blobs/b3/aa/bb/<digest>`
 
-`devbox-snapshot` owns manifest construction:
+`bindhub-snapshot` owns manifest construction:
 
 - deterministic filesystem traversal
 - included file writes to `BlobCache`
@@ -46,12 +46,12 @@ entries with no blob id or object ref.
 The CLI exposes the current surface as:
 
 ```text
-devbox snapshot --cache <CACHE_ROOT> --dry-run <PATH>
-devbox snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
-devbox snapshot list --db <DB_PATH>
-devbox snapshot show --db <DB_PATH> <SNAPSHOT_ID>
-devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --dry-run
-devbox snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --apply
+bindhub snapshot --cache <CACHE_ROOT> --dry-run <PATH>
+bindhub snapshot --db <DB_PATH> --cache <CACHE_ROOT> <PATH>
+bindhub snapshot list --db <DB_PATH>
+bindhub snapshot show --db <DB_PATH> <SNAPSHOT_ID>
+bindhub snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --dry-run
+bindhub snapshot restore --db <DB_PATH> --cache <CACHE_ROOT> --to <TARGET_DIR> <SNAPSHOT_ID> --apply
 ```
 
 Dry-run validates that the cache root is outside the snapshot root before initializing the cache, then creates local blob-cache objects for included files and prints the draft manifest summary. It intentionally does not write SQLite metadata.
@@ -73,7 +73,7 @@ Directory entries are sorted by filesystem name before recursion so repeated run
 
 Current directory exclusions come from the scanner policy and include `.git`, `node_modules`, `target`, `.venv`, build outputs, language caches, and tool caches. These exclusions apply to directories before descent, not to ordinary regular files that happen to share names such as `build` or `dist`.
 
-The blob cache root is Devbox-owned state. If the cache root is inside the snapshot root, the dry-run CLI rejects it before `BlobCache::open` can create directories. The builder keeps the same validation as defense in depth rather than trying to snapshot or explain its own object cache.
+The blob cache root is Bindhub-owned state. If the cache root is inside the snapshot root, the dry-run CLI rejects it before `BlobCache::open` can create directories. The builder keeps the same validation as defense in depth rather than trying to snapshot or explain its own object cache.
 
 Only regular files are written to `BlobCache`. Symlinks and unsupported filesystem node types are represented as requiring a future user or safety decision so restore semantics can be designed deliberately.
 
@@ -98,7 +98,7 @@ Snapshot ids are still stable draft manifest ids derived from manifest content. 
 
 ## Local Restore Foundation
 
-`devbox snapshot restore` materializes only included regular files and included directories from an already persisted snapshot. The CLI adapter loads the snapshot metadata from SQLite, opens the local `BlobCache`, and asks `devbox-snapshot` to build a restore plan. The snapshot crate does not query SQLite directly.
+`bindhub snapshot restore` materializes only included regular files and included directories from an already persisted snapshot. The CLI adapter loads the snapshot metadata from SQLite, opens the local `BlobCache`, and asks `bindhub-snapshot` to build a restore plan. The snapshot crate does not query SQLite directly.
 
 Restore defaults to dry-run unless `--apply` is provided. The dry-run output is line-oriented and includes the snapshot id, target path and target status, whether apply is allowed, files to write, directories to create, skipped entries, missing blobs, and total bytes.
 

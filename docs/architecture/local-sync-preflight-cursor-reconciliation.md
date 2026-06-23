@@ -5,7 +5,7 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice makes the local divergent-snapshot conflict model active in the local/mock
 second-device path.
@@ -14,10 +14,10 @@ second-device path.
 
 The implementation is local-first:
 
-- `devbox-materialize` owns sync preflight orchestration for local/mock import and materialize.
-- `devbox-conflict` still owns deterministic snapshot comparison.
-- `devbox-store` still owns local SQLite cursors, snapshots, conflicts, and conflict rows.
-- `devbox-cli` exposes a scriptable `devbox sync preflight` command.
+- `Bindhub-materialize` owns sync preflight orchestration for local/mock import and materialize.
+- `Bindhub-conflict` still owns deterministic snapshot comparison.
+- `Bindhub-store` still owns local SQLite cursors, snapshots, conflicts, and conflict rows.
+- `bindhub-cli` exposes a scriptable `bindhub sync preflight` command.
 
 It does not add production auth, managed R2/S3 credential provisioning, automatic merge/apply
 resolution, Loom UX, or a hosted conflict service. The Electron alpha shell can now show
@@ -50,7 +50,7 @@ the same conflict id without duplicating rows.
 
 `sync import-snapshot` decrypts the published manifest enough to learn the incoming project and
 snapshot metadata, then checks the receiver's current device/project cursor and latest local
-snapshot for that project. If preflight blocks, Devbox persists metadata needed for the conflict
+snapshot for that project. If preflight blocks, Bindhub persists metadata needed for the conflict
 record, refuses the import, does not download file blobs into the receiver cache, and does not
 advance the cursor.
 
@@ -80,7 +80,7 @@ uploadable or materialized by preflight.
 The scriptable command is:
 
 ```text
-devbox sync preflight --db <DB_PATH> --project <PROJECT_ID> --local <LOCAL_SNAPSHOT_ID> --incoming <INCOMING_SNAPSHOT_ID> [--base <BASE_SNAPSHOT_ID>]
+bindhub sync preflight --db <DB_PATH> --project <PROJECT_ID> --local <LOCAL_SNAPSHOT_ID> --incoming <INCOMING_SNAPSHOT_ID> [--base <BASE_SNAPSHOT_ID>]
 ```
 
 It prints stable plain text beginning with `Preflight: ok` or `Preflight: blocked`, followed by the
@@ -92,7 +92,7 @@ printing the preflight block. They do not attempt automatic merge or resolution.
 Open conflict records can be manually marked resolved only with:
 
 ```text
-devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply
+bindhub conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply
 ```
 
 That command records the user's manual path and does not apply workspace changes.

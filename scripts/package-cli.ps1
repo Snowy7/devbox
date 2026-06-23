@@ -11,10 +11,10 @@ if (-not $Version) {
     $Version = (git rev-parse --short HEAD).Trim()
 }
 if (-not $ApiUrl) {
-    $ApiUrl = if ($env:DEVBOX_DEFAULT_API_URL) {
-        $env:DEVBOX_DEFAULT_API_URL
+    $ApiUrl = if ($env:BINDHUB_DEFAULT_API_URL) {
+        $env:BINDHUB_DEFAULT_API_URL
     } else {
-        "https://devbox-staging.up.railway.app"
+        "https://bindhub-staging.up.railway.app"
     }
 }
 
@@ -25,7 +25,7 @@ if ($Target -ne "x86_64-pc-windows-msvc") {
     throw "Windows packaging currently supports x86_64-pc-windows-msvc only"
 }
 
-$PackageName = "devbox-$Version-$Target"
+$PackageName = "bindhub-$Version-$Target"
 $DistDir = Join-Path $RepoRoot "dist"
 $StageDir = Join-Path $DistDir $PackageName
 $Archive = Join-Path $DistDir "$PackageName.zip"
@@ -35,24 +35,24 @@ Remove-Item -Recurse -Force -Path $StageDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
-$previousApiUrl = $env:DEVBOX_DEFAULT_API_URL
+$previousApiUrl = $env:BINDHUB_DEFAULT_API_URL
 try {
-    $env:DEVBOX_DEFAULT_API_URL = $ApiUrl
+    $env:BINDHUB_DEFAULT_API_URL = $ApiUrl
     if (-not $SkipBuild) {
         rustup target add $Target
         cargo build --release --locked `
             -p loom-cli `
-            -p devbox-cli `
-            -p devbox-daemon `
-            -p devbox-metadata `
+            -p bindhub-cli `
+            -p bindhub-daemon `
+            -p bindhub-metadata `
             --target $Target
     }
 } finally {
-    $env:DEVBOX_DEFAULT_API_URL = $previousApiUrl
+    $env:BINDHUB_DEFAULT_API_URL = $previousApiUrl
 }
 
 $ReleaseDir = Join-Path $RepoRoot "target\$Target\release"
-foreach ($binary in @("loom.exe", "devbox.exe", "devbox-daemon.exe", "devbox-metadata.exe")) {
+foreach ($binary in @("loom.exe", "bindhub.exe", "bindhub-daemon.exe", "bindhub-metadata.exe")) {
     Copy-Item -Force -Path (Join-Path $ReleaseDir $binary) -Destination (Join-Path $StageDir $binary)
 }
 
@@ -60,20 +60,20 @@ Copy-Item -Force -Path (Join-Path $RepoRoot "README.md") -Destination (Join-Path
 Copy-Item -Force -Path (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $StageDir "LICENSE")
 
 @"
-# Devbox CLI local/dev overrides.
-# Packaged production builds should already know the Devbox API endpoint.
+# Bindhub CLI local/dev overrides.
+# Packaged production builds should already know the Bindhub API endpoint.
 
-# DEVBOX_API_URL=https://devbox-staging.up.railway.app
-DEVBOX_CONFIG_DIR=.devbox
+# BINDHUB_API_URL=https://bindhub-staging.up.railway.app
+BINDHUB_CONFIG_DIR=.bindhub
 "@ | Set-Content -Encoding UTF8 -Path (Join-Path $StageDir ".env.example")
 
 Copy-Item -Force -Path (Join-Path $RepoRoot ".env.example") -Destination (Join-Path $StageDir ".env.operator.example")
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "scripts") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "docs") | Out-Null
-Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\install-devbox.ps1") -Destination (Join-Path $StageDir "scripts\install-devbox.ps1")
-Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\install-devbox.sh") -Destination (Join-Path $StageDir "scripts\install-devbox.sh")
+Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\install-bindhub.ps1") -Destination (Join-Path $StageDir "scripts\install-bindhub.ps1")
+Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\install-bindhub.sh") -Destination (Join-Path $StageDir "scripts\install-bindhub.sh")
 Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\load-r2-env.sh") -Destination (Join-Path $StageDir "scripts\load-r2-env.sh")
-Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\devbox-live-sync-alpha.sh") -Destination (Join-Path $StageDir "scripts\devbox-live-sync-alpha.sh")
+Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\bindhub-live-sync-alpha.sh") -Destination (Join-Path $StageDir "scripts\bindhub-live-sync-alpha.sh")
 Copy-Item -Force -Path (Join-Path $RepoRoot "scripts\alpha-two-device-smoke.sh") -Destination (Join-Path $StageDir "scripts\alpha-two-device-smoke.sh")
 Copy-Item -Force -Path (Join-Path $RepoRoot "docs\alpha-cli-distribution.md") -Destination (Join-Path $StageDir "docs\alpha-cli-distribution.md")
 

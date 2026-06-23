@@ -5,18 +5,18 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This slice introduces the local Phase 1 bridge between filesystem events and the existing pending
 local change feed.
 
 ## Boundary
 
-`devbox-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>` watches one project tree
+`bindhub-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>` watches one project tree
 recursively, debounces filesystem event bursts, and runs the same scan orchestration used by
-`devbox changes scan`. The daemon writes only local SQLite metadata and local BLAKE3 cache blobs.
+`bindhub changes scan`. The daemon writes only local SQLite metadata and local BLAKE3 cache blobs.
 
-`devbox-daemon sync` is now the separate live-sync automation layer. `watch` itself still does not
+`bindhub-daemon sync` is now the separate live-sync automation layer. `watch` itself still does not
 upload objects, download objects, encrypt, compress, pack files, pair devices, resolve conflicts,
 manage teams, replace Git, or drive the Electron UI.
 
@@ -59,6 +59,6 @@ instead of appending duplicates.
 ## Deferred Work
 
 Cloud sync remains outside `watch`: R2/S3 object transport, hosted metadata discovery, device
-cursors, materialization, and conflict handling live in the newer `devbox-daemon sync` foundation
+cursors, materialization, and conflict handling live in the newer `bindhub-daemon sync` foundation
 and the lower-level sync/materialize crates. Garbage collection, background retries, and Electron
 IPC remain deferred.

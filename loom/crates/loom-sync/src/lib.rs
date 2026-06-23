@@ -759,13 +759,13 @@ mod tests {
     #[test]
     fn sync_request_uses_folder_vocabulary() {
         let request = SyncRequest {
-            shared_folder_id: SharedFolderId::new("folder-devbox").expect("folder id"),
+            shared_folder_id: SharedFolderId::new("folder-bindhub").expect("folder id"),
             operation: SyncOperation::Sync,
             target_revision_id: None,
         };
 
         assert_eq!(request.operation, SyncOperation::Sync);
-        assert_eq!(request.shared_folder_id.as_str(), "folder-devbox");
+        assert_eq!(request.shared_folder_id.as_str(), "folder-bindhub");
     }
 
     #[test]

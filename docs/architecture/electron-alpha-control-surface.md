@@ -5,7 +5,7 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice turns `apps/desktop` from a placeholder into a private-alpha Electron shell.
 
@@ -15,7 +15,7 @@ The desktop app is a local-first control surface. It can run without cloud crede
 login, Docker, Postgres, production hosted metadata, or external network services.
 
 The app does not directly mutate workspace files. Renderer code reads alpha state through the
-Electron preload bridge. The main process derives redacted state from `DEVBOX_*` environment
+Electron preload bridge. The main process derives redacted state from `BINDHUB_*` environment
 variables and never reads raw Cloudflare/R2/API/session values except to report whether a named env
 var is present. Future workspace mutations must go through the Rust daemon or an explicit local
 bridge command boundary.
@@ -48,9 +48,9 @@ credential material is present.
 Desktop validation is headless:
 
 ```text
-npm run typecheck
-npm run test:safety
-npm run build
+pnpm typecheck
+pnpm test:safety
+pnpm build
 ```
 
 `test:safety` scans desktop fixture and renderer source for common raw secret/token shapes.

@@ -5,14 +5,14 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
-This Phase 1 slice adds a production-shaped metadata service boundary without making Devbox a full
+This Phase 1 slice adds a production-shaped metadata service boundary without making Bindhub a full
 hosted SaaS backend yet.
 
 ## Scope
 
-`devbox/crates/devbox-metadata` owns deterministic request/response models, store semantics, and HTTP
+`bindhub/crates/bindhub-metadata` owns deterministic request/response models, store semantics, and HTTP
 handlers for:
 
 - health checks
@@ -29,10 +29,10 @@ handlers for:
 
 The service can run locally with SQLite, in CI with an in-memory store for fast unit tests, and in
 Railway-style hosted alpha deployments with Postgres selected by `DATABASE_URL` or
-`DEVBOX_METADATA_DATABASE_URL`. SQLite remains the local/dev store.
+`BINDHUB_METADATA_DATABASE_URL`. SQLite remains the local/dev store.
 
 Hosted deployments bind to `0.0.0.0:$PORT` when the platform injects `PORT`; that platform port
-takes precedence over `DEVBOX_METADATA_LISTEN`.
+takes precedence over `BINDHUB_METADATA_LISTEN`.
 
 ## Metadata Model
 
@@ -98,8 +98,8 @@ Production OAuth is intentionally not implemented in this slice.
 Handlers support explicit local-only mock headers for tests and development:
 
 ```text
-x-devbox-mock-account-id
-x-devbox-mock-device-id
+x-bindhub-mock-account-id
+x-bindhub-mock-device-id
 ```
 
 Those headers are named as mock/dev credentials and are suitable only for local tests and development
@@ -131,7 +131,7 @@ DELETE /v1/auth/session
 ```
 
 The server binary defaults to account-session auth only. Mock-dev headers are accepted only when
-`--allow-mock-auth` or `DEVBOX_ALLOW_MOCK_AUTH=true` is set. Alpha invite rows store only the invite
+`--allow-mock-auth` or `BINDHUB_ALLOW_MOCK_AUTH=true` is set. Alpha invite rows store only the invite
 code hash; login returns the raw session token once, and the session table stores only its hash.
 
 The service rejects obvious secret-bearing request material and its public CLI check prints a
@@ -143,17 +143,17 @@ precondition errors rather than raw database messages.
 
 ## CLI Boundary
 
-`devbox metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]` validates
+`bindhub metadata check --endpoint <URL> [--auth-mode mock-dev-headers|account-session]` validates
 the local metadata service configuration without making a network request.
 
-`devbox metadata alpha-invite create (--db <METADATA_DB>|--postgres-url-env <ENV>) --email
+`bindhub metadata alpha-invite create (--db <METADATA_DB>|--postgres-url-env <ENV>) --email
 <EMAIL>|--domain <DOMAIN>` creates a one-time invite in the hosted metadata store.
 `--postgres-url-env` accepts an environment variable name, not a raw database URL, so Railway
-connection strings do not land in shell history. `devbox auth hosted-login --api <URL> --email
+connection strings do not land in shell history. `bindhub auth hosted-login --api <URL> --email
 <EMAIL> --invite-code-env <ENV>` exchanges the invite for a bearer session token.
 
-`devbox metadata object-access resolve --api <URL> --session-token-env DEVBOX_SESSION_TOKEN
---project <PROJECT_ID> --lease devbox-managed` calls the hosted grant endpoint and prints only
+`bindhub metadata object-access resolve --api <URL> --session-token-env BINDHUB_SESSION_TOKEN
+--project <PROJECT_ID> --lease bindhub-managed` calls the hosted grant endpoint and prints only
 redacted object-access metadata plus the authorized shared-bucket prefix. Product users should not
 need this command.
 
@@ -179,7 +179,7 @@ The SQLite schema maps one-to-one to the Postgres migration used for the hosted 
 The Postgres implementation preserves the `MetadataStore` project-scoped API models, session hash
 lookup, lease expiration/revocation/rotation semantics, and cursor compare-and-set contract. CI runs
 a Postgres service and a SQLite/Postgres parity test; local developers can run
-`scripts/test-postgres-metadata.sh` with Docker/OrbStack or `DEVBOX_TEST_POSTGRES_URL`.
+`scripts/test-postgres-metadata.sh` with Docker/OrbStack or `BINDHUB_TEST_POSTGRES_URL`.
 
 ## Deferred
 

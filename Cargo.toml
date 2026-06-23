@@ -1,19 +1,19 @@
 [workspace]
 members = [
-    "devbox/crates/devbox-auth",
-    "devbox/crates/devbox-api",
-    "devbox/crates/devbox-cli",
-    "devbox/crates/devbox-conflict",
-    "devbox/crates/devbox-core",
-    "devbox/crates/devbox-daemon",
-    "devbox/crates/devbox-git",
-    "devbox/crates/devbox-materialize",
-    "devbox/crates/devbox-metadata",
-    "devbox/crates/devbox-platform",
-    "devbox/crates/devbox-remote",
-    "devbox/crates/devbox-snapshot",
-    "devbox/crates/devbox-store",
-    "devbox/crates/devbox-sync",
+    "bindhub/crates/bindhub-auth",
+    "bindhub/crates/bindhub-api",
+    "bindhub/crates/bindhub-cli",
+    "bindhub/crates/bindhub-conflict",
+    "bindhub/crates/bindhub-core",
+    "bindhub/crates/bindhub-daemon",
+    "bindhub/crates/bindhub-git",
+    "bindhub/crates/bindhub-materialize",
+    "bindhub/crates/bindhub-metadata",
+    "bindhub/crates/bindhub-platform",
+    "bindhub/crates/bindhub-remote",
+    "bindhub/crates/bindhub-snapshot",
+    "bindhub/crates/bindhub-store",
+    "bindhub/crates/bindhub-sync",
     "loom/crates/loom-cli",
     "loom/crates/loom-core",
     "loom/crates/loom-daemon",
@@ -30,5 +30,5 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Snowy7/devbox"
+repository = "https://github.com/Snowy7/bindhub"
 rust-version = "1.88"

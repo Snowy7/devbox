@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <style>
+    .tile { fill: #18181b; }
+    .fg { fill: #fafafa; }
+    .notch { fill: #18181b; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #fafafa; }
+      .fg { fill: #18181b; }
+      .notch { fill: #fafafa; }
+    }
+  </style>
+  <rect class="tile" x="0" y="0" width="32" height="32" rx="7" />
+  <rect class="fg" x="11" y="6" width="13.5" height="13.5" rx="4" opacity="0.34" />
+  <rect class="fg" x="6" y="11.5" width="13.5" height="13.5" rx="4" />
+  <path class="notch" d="M10.4 16.4h3.2a2.1 2.1 0 0 1 0 4.2h-3.2z" />
+</svg>

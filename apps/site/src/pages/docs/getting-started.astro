@@ -1,0 +1,65 @@
+---
+import DocsShell from "../../components/DocsShell.astro"
+---
+
+<DocsShell
+  title="Getting started"
+  description="Run the Bindhub Web alpha apps locally and understand what is wired today."
+>
+  <h2>Run the web workspace</h2>
+  <p>
+    From the repo root, install dependencies and start the app you
+    need:
+  </p>
+  <ol>
+    <li><code>pnpm install</code></li>
+    <li><code>pnpm --filter apps-site dev</code> for this public site.</li>
+    <li><code>pnpm --filter web dev</code> for the authenticated dashboard.</li>
+  </ol>
+
+  <h2>Open the right surface</h2>
+  <ul>
+    <li>The Astro public site owns landing pages and docs.</li>
+    <li>The TanStack Start dashboard owns sign-in and protected app routes.</li>
+    <li>Use <code>/auth/sign-in</code> to enter the dashboard auth flow.</li>
+  </ul>
+
+  <h2>Configure auth for dashboard work</h2>
+  <p>
+    Copy <code>.env.example</code> to <code>.env.local</code> when working on real
+    dashboard auth. WorkOS secrets stay in local environment files and should never
+    be committed.
+  </p>
+
+  <h2>Connect the CLI</h2>
+  <p>
+    Run <code>bindhub login</code> to connect this machine. The CLI opens the dashboard's
+    <code>/auth/cli</code> route, waits for browser sign-in, then stores the returned
+    Bindhub session locally. The API derives account identity from the verified browser
+    session; do not pass raw account IDs for hosted browser auth.
+  </p>
+  <p>
+    For CI or local alpha work without live WorkOS, set
+    <code>BINDHUB_LOCAL_DEV_CLI_AUTH=1</code> with a local API URL and service token.
+    That mode is local-dev only and is not production authentication. The direct local
+    session helper additionally requires
+    <code>BINDHUB_API_ENABLE_LOCAL_DEV_SESSION=1</code> on the API and loopback API
+    URLs in the CLI by default.
+  </p>
+
+  <div class="callout">
+    <h3>Alpha setup expectation</h3>
+    <p>
+      The site is static. The dashboard requires WorkOS/AuthKit for protected
+      routes and can read typed local fixtures before hosted API credentials
+      exist.
+    </p>
+  </div>
+
+  <h2>Before connecting real folders</h2>
+  <p>
+    Read the trust page. Bindhub is designed for messy developer folders, but
+    secrets, generated files, sparse cache state, and local overlays need clear
+    policy before they are treated as safe continuity.
+  </p>
+</DocsShell>

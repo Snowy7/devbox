@@ -1,0 +1,66 @@
+---
+// Bindhub mark: an "echoed box" — the same folder/box carried to a second
+// machine. Two offset rounded squares (front solid, back as a translucent
+// echo) read as continuity in a single color, so it adapts to any theme.
+interface Props {
+  class?: string
+  size?: number
+  withWordmark?: boolean
+}
+
+const { class: className, size = 28, withWordmark = false } = Astro.props
+---
+
+{
+  withWordmark ? (
+    <span class:list={["logo", className]}>
+      <svg
+        class="logo-mark"
+        width={size}
+        height={size}
+        viewBox="0 0 32 32"
+        fill="none"
+        role="img"
+        aria-label="Bindhub"
+      >
+        <rect
+          x="11"
+          y="3"
+          width="18"
+          height="18"
+          rx="5.5"
+          fill="currentColor"
+          opacity="0.32"
+        />
+        <rect x="3" y="11" width="18" height="18" rx="5.5" fill="currentColor" />
+        <path
+          d="M9.5 20.5h5a3 3 0 0 1 0 6h-5z"
+          fill="var(--background)"
+        />
+      </svg>
+      <span class="logo-word">Bindhub</span>
+    </span>
+  ) : (
+    <svg
+      class:list={["logo-mark", className]}
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      role="img"
+      aria-label="Bindhub"
+    >
+      <rect
+        x="11"
+        y="3"
+        width="18"
+        height="18"
+        rx="5.5"
+        fill="currentColor"
+        opacity="0.32"
+      />
+      <rect x="3" y="11" width="18" height="18" rx="5.5" fill="currentColor" />
+      <path d="M9.5 20.5h5a3 3 0 0 1 0 6h-5z" fill="var(--background)" />
+    </svg>
+  )
+}

@@ -6,11 +6,11 @@ usage() {
 Usage: scripts/package-desktop-alpha.sh [VERSION]
 
 Builds a runnable unsigned Electron alpha bundle for the current macOS/Linux host.
-The bundle is not a signed installer. Testers extract it, run npm ci, then run
-npm run start:built from inside the extracted package.
+The bundle is not a signed installer. Testers extract it, run pnpm install, then run
+pnpm start:built from inside the extracted package.
 
 Environment:
-  DEVBOX_DESKTOP_SKIP_NPM_CI=true  Skip npm ci before building.
+  BINDHUB_DESKTOP_SKIP_INSTALL=true  Skip pnpm install before building.
 USAGE
 }
 
@@ -21,7 +21,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="${1:-$(git -C "$repo_root" rev-parse --short HEAD)}"
-package_name="devbox-desktop-$version"
+package_name="bindhub-desktop-$version"
 dist_dir="$repo_root/dist"
 stage_dir="$dist_dir/$package_name"
 archive="$dist_dir/$package_name.tar.gz"
@@ -38,69 +38,69 @@ esac
 
 cd "$repo_root/apps/desktop"
 
-if [[ "${DEVBOX_DESKTOP_SKIP_NPM_CI:-false}" != "true" ]]; then
-  npm ci
+if [[ "${BINDHUB_DESKTOP_SKIP_INSTALL:-false}" != "true" ]]; then
+  pnpm install
 fi
 
-npm run test:safety
-npm run build
+pnpm test:safety
+pnpm build
 
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 
-cp package.json package-lock.json "$stage_dir/"
+cp package.json "$stage_dir/"
 cp -R dist "$stage_dir/dist"
 
 cat > "$stage_dir/README.md" <<'README'
-# Devbox Desktop Alpha
+# Bindhub Desktop Alpha
 
-This is an unsigned alpha Electron control surface. It reads redacted Devbox alpha state from
+This is an unsigned alpha Electron control surface. It reads redacted Bindhub alpha state from
 environment variables and shows commands/state only; it does not start live sync by itself.
 
 ## Run
 
 ```bash
-npm ci
-npm run start:built
+pnpm install
+pnpm start:built
 ```
 
 Useful env:
 
 ```text
-DEVBOX_LIVE_DB
-DEVBOX_LIVE_CACHE
-DEVBOX_LIVE_PROJECT_ROOT
-DEVBOX_REMOTE_KIND
-DEVBOX_METADATA_API
-DEVBOX_METADATA_PROJECT
-DEVBOX_SESSION_TOKEN
+BINDHUB_LIVE_DB
+BINDHUB_LIVE_CACHE
+BINDHUB_LIVE_PROJECT_ROOT
+BINDHUB_REMOTE_KIND
+BINDHUB_METADATA_API
+BINDHUB_METADATA_PROJECT
+BINDHUB_SESSION_TOKEN
 ```
 
-Source-only commands such as `npm run typecheck`, `npm run test:safety`, and `npm run build` are run
+Source-only commands such as `pnpm typecheck`, `pnpm test:safety`, and `pnpm build` are run
 before packaging and are not expected to work from this trimmed release archive.
 README
 
 cat > "$stage_dir/RUNNING.txt" <<'RUNNING'
-Devbox Desktop Alpha
+Bindhub Desktop Alpha
 
-This is an unsigned alpha Electron control surface. It reads redacted Devbox alpha
+This is an unsigned alpha Electron control surface. It reads redacted Bindhub alpha
 state from environment variables and shows commands/state only; it does not start
 live sync by itself.
 
 Run:
-  npm ci
-  npm run start:built
+  pnpm install
+  pnpm start:built
 
 Useful env:
-  DEVBOX_LIVE_DB
-  DEVBOX_LIVE_CACHE
-  DEVBOX_LIVE_PROJECT_ROOT
-  DEVBOX_REMOTE_KIND
-  DEVBOX_METADATA_API
-  DEVBOX_METADATA_PROJECT
-  DEVBOX_SESSION_TOKEN
+  BINDHUB_LIVE_DB
+  BINDHUB_LIVE_CACHE
+  BINDHUB_LIVE_PROJECT_ROOT
+  BINDHUB_REMOTE_KIND
+  BINDHUB_METADATA_API
+  BINDHUB_METADATA_PROJECT
+  BINDHUB_SESSION_TOKEN
 
-Source-only commands such as npm run typecheck, npm run test:safety, and npm run
+Source-only commands such as pnpm typecheck, pnpm test:safety, and pnpm
 build are run before packaging and are not expected to work from this trimmed
 release archive.
 RUNNING

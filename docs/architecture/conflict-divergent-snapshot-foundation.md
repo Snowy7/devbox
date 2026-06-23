@@ -5,7 +5,7 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice adds a local conflict model for comparing and persisting divergent snapshots.
 It is a compare-and-record foundation, not an automatic merge engine.
@@ -14,9 +14,9 @@ It is a compare-and-record foundation, not an automatic merge engine.
 
 The foundation is local-first and metadata-only:
 
-- `devbox-conflict` owns deterministic comparison semantics over snapshot manifest metadata.
-- `devbox-store` owns SQLite conflict records and comparison rows.
-- `devbox-cli` exposes manual/scriptable conflict commands and guarded manual resolution records.
+- `Bindhub-conflict` owns deterministic comparison semantics over snapshot manifest metadata.
+- `Bindhub-store` owns SQLite conflict records and comparison rows.
+- `bindhub-cli` exposes manual/scriptable conflict commands and guarded manual resolution records.
 
 It does not implement production auth, hosted conflict metadata, server-side cursors, R2/S3,
 automatic merge, Loom UX, or materialization into non-empty targets. The private-alpha
@@ -74,16 +74,16 @@ existing record and does not duplicate rows.
 
 Status transitions are intentionally small: `open`, `resolved`, and `dismissed`. Marking a conflict
 resolved requires a manual-resolution mode plus an explicit `--confirm-no-auto-apply` acknowledgement.
-Devbox does not merge or apply file bytes as part of that status transition.
+Bindhub does not merge or apply file bytes as part of that status transition.
 
 ## CLI Surface
 
 ```text
-devbox conflicts compare --db <DB_PATH> --local <LOCAL_SNAPSHOT_ID> --incoming <INCOMING_SNAPSHOT_ID> [--base <BASE_SNAPSHOT_ID>]
-devbox conflicts list --db <DB_PATH> [--project <PROJECT_ID>]
-devbox conflicts show --db <DB_PATH> <CONFLICT_ID>
-devbox conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply
-devbox conflicts dismiss --db <DB_PATH> <CONFLICT_ID>
+bindhub conflicts compare --db <DB_PATH> --local <LOCAL_SNAPSHOT_ID> --incoming <INCOMING_SNAPSHOT_ID> [--base <BASE_SNAPSHOT_ID>]
+bindhub conflicts list --db <DB_PATH> [--project <PROJECT_ID>]
+bindhub conflicts show --db <DB_PATH> <CONFLICT_ID>
+bindhub conflicts resolve --db <DB_PATH> <CONFLICT_ID> --manual-resolution keep-local|keep-incoming|keep-both|exported --confirm-no-auto-apply
+bindhub conflicts dismiss --db <DB_PATH> <CONFLICT_ID>
 ```
 
 The output is plain text and tabular so future daemon/sync code can call the same model before
@@ -99,7 +99,7 @@ Manual resolution options are records of what the user did outside automatic app
 Normal output prints snapshot ids, paths, row counts, and redacted policy reasons only. It does not
 print source file contents or secret material.
 
-`devbox sync preflight` and the local/mock import/materialize path now call this model when the
+`bindhub sync preflight` and the local/mock import/materialize path now call this model when the
 receiving device cursor and local snapshot diverge from an incoming snapshot. Blocked preflight
 persists the same idempotent conflict record, prints the conflict id and summary counts, refuses the
 sync operation, and leaves the cursor unchanged.

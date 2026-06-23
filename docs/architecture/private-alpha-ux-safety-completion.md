@@ -5,14 +5,14 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This PR completes the private-alpha MVP control/safety surface over the foundations that already
 exist in the Rust crates.
 
 ## Completed For Alpha
 
-- Electron desktop shell with redacted `DEVBOX_*` alpha state and safe placeholder fallback.
+- Electron desktop shell with redacted `BINDHUB_*` alpha state and safe placeholder fallback.
 - Tray/status affordance for ready/needs-config/command-only/blocked style states.
 - Local DB/cache/project/receiver path visibility without workspace mutation from renderer code.
 - Hosted API/session/shared-folder scope visibility; object leases, buckets, prefixes, and remote

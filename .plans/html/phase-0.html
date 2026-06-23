@@ -23,7 +23,7 @@
         <div>
           <div class="eyebrow">4 to 6 weeks</div>
           <h1>Make local snapshots boringly safe.</h1>
-          <p class="lead">Before cloud sync, prove Devbox can analyze developer folders, classify files, snapshot WIP, restore safely, detect local changes, and avoid corrupting Git repos.</p>
+          <p class="lead">Before cloud sync, prove Bindhub can analyze developer folders, classify files, snapshot WIP, restore safely, detect local changes, and avoid corrupting Git repos.</p>
         </div>
         <div class="callout green">
           <strong>Exit gate:</strong> snapshot and restore 20 representative repos with no Git corruption, uncommitted work preserved, and generated directories suppressed by policy.
@@ -55,7 +55,7 @@
           <li>SQLite schema for folder scopes, snapshots, manifests, chunks, operations, policies, and restore attempts.</li>
           <li>Default dev policy for `node_modules`, `.next`, `dist`, `target`, `.venv`, `.cache`, and common build outputs.</li>
           <li>Git detector that records repo root, HEAD, dirty state, ignored state, remotes, submodules, and worktree shape.</li>
-          <li>CLI commands: `devbox scan`, `devbox snapshot`, `devbox status`, `devbox restore`, `devbox explain`.</li>
+          <li>CLI commands: `bindhub scan`, `bindhub snapshot`, `bindhub status`, `bindhub restore`, `bindhub explain`.</li>
           <li>Local change feed: compare the current workspace with the latest snapshot and persist pending file operations without cloud upload.</li>
           <li>Destructive test matrix for restore, interrupted writes, symlinks, permissions, case conflicts, and Git status.</li>
         </ul>

@@ -1,6 +1,6 @@
 # Loom Storage Consistency
 
-This page documents the guarantees Devbox can claim today for Loom-backed folder continuity. It is
+This page documents the guarantees Bindhub can claim today for Loom-backed folder continuity. It is
 intended to be testable against local commands and the MVP smoke harness, not a promise about the
 future sparse filesystem or remote protocol.
 
@@ -10,7 +10,7 @@ future sparse filesystem or remote protocol.
 
 - File versions are captured as content-addressed object references plus path metadata.
 - Folder revisions are coherent trees assembled from file versions at stable boundaries: `loom track`,
-  `loom status`, `loom sync`, `loom restore`, `devbox share`, `devbox resume`, and daemon sync cycles.
+  `loom status`, `loom sync`, `loom restore`, `bindhub share`, `bindhub resume`, and daemon sync cycles.
 - A checkpoint labels an existing folder revision and creates a retention pin for that revision.
 - Local history keeps working without a remote. The smoke proves this with `loom track`, `loom
   checkpoint`, and `loom status`.
@@ -23,7 +23,7 @@ future sparse filesystem or remote protocol.
 - If the remote cursor changed or points to a revision that is not an ancestor of the local latest
   revision, sync refuses instead of overwriting remote state.
 - Local-fs remotes use a lock file plus current-value recheck for cursor compare-and-set. Hosted
-  Devbox remotes use server-side metadata compare-and-set and return conflict on stale expectations.
+  Bindhub remotes use server-side metadata compare-and-set and return conflict on stale expectations.
 
 ### Metadata/Object Split
 
@@ -99,9 +99,9 @@ future sparse filesystem or remote protocol.
   cache mode; diagnostic output may show presets through `loom cache policy show`.
 - Conflict refusal does not resolve conflicts. Users still need a manual recovery path after divergent
   folder state.
-- Hosted local-dev sessions and `devbox://` engine URLs are test/dev plumbing. They are not the final
+- Hosted local-dev sessions and `bindhub://` engine URLs are test/dev plumbing. They are not the final
   product share-token UX.
-- The local-fs remote and local `devbox-api` smoke path do not prove live R2, Postgres, multiregion
+- The local-fs remote and local `bindhub-api` smoke path do not prove live R2, Postgres, multiregion
   durability, compression, signed packs, or automatic object repair.
 
 ## Adapter And Backend Boundary
@@ -113,7 +113,7 @@ Loom remains folder/revision-first:
 - A mount layer may present remote-only files as placeholders later, but it is an adapter that calls
   Loom hydrate/evict/cache primitives.
 - Backend implementations are pluggable behind the remote trait. The current boundaries are
-  `local-fs` and Devbox hosted storage. S3, R2, MinIO, or self-hosted object/metadata services are
+  `local-fs` and Bindhub hosted storage. S3, R2, MinIO, or self-hosted object/metadata services are
   backend choices, not changes to the Loom storage model.
 - Cache metadata is separate from mounted paths. A cache entry records local byte availability for an
   object; a future virtual filesystem must keep that metadata consistent instead of inventing a
@@ -138,13 +138,13 @@ The smoke writes redacted logs under the printed evidence directory and proves:
 - local-only Loom history and checkpoints
 - local-fs eager sync and clone
 - local-fs sparse clone, hydrate, evict, pin, and cache status
-- Devbox hosted eager share/clone through local `devbox-api`
+- Bindhub hosted eager share/clone through local `bindhub-api`
 - hosted metadata/object split and object hash mismatch rejection
 - Git metadata protection, generated dependency suppression, secret blocking, and conflict refusal
 
-The script starts the local `devbox-api` with `DEVBOX_API_METADATA_MODE=memory`, so this evidence
+The script starts the local `bindhub-api` with `BINDHUB_API_METADATA_MODE=memory`, so this evidence
 path does not require live Postgres or R2. Production-shaped API runs still use Postgres metadata by
 leaving that variable unset.
 
 Focused unit coverage for the same contract lives in `loom-sync`, `loom-store`, `loom-pack`,
-`devbox-api`, and `devbox-remote` tests.
+`bindhub-api`, and `bindhub-remote` tests.

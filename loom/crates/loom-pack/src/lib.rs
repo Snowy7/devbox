@@ -737,8 +737,8 @@ mod tests {
     #[test]
     fn pack_manifest_counts_objects() {
         let manifest = PackManifest {
-            shared_folder_id: SharedFolderId::new("folder-devbox").expect("folder id"),
-            display_name: "devbox".to_string(),
+            shared_folder_id: SharedFolderId::new("folder-bindhub").expect("folder id"),
+            display_name: "bindhub".to_string(),
             latest_revision_id: FolderRevisionId::new("revision-1").expect("revision id"),
             objects: vec![PackObject {
                 object_id: object_id(),
@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn uncompressed_pack_round_trips_folder_state() {
-        let shared_folder_id = SharedFolderId::new("folder-devbox").expect("folder id");
+        let shared_folder_id = SharedFolderId::new("folder-bindhub").expect("folder id");
         let object_id = object_id();
         let version = FileVersion::new(
             FileVersionId::new("file-version-1").expect("file version id"),
@@ -776,7 +776,7 @@ mod tests {
         let expected_object_id = object_id.to_string();
         let pack = LoomPack::new(
             shared_folder_id,
-            "devbox",
+            "bindhub",
             revision.id().clone(),
             vec![version],
             vec![revision],
@@ -817,12 +817,12 @@ mod tests {
 
     #[test]
     fn metadata_only_pack_round_trips_object_manifest() {
-        let shared_folder_id = SharedFolderId::new("folder-devbox").expect("folder id");
+        let shared_folder_id = SharedFolderId::new("folder-bindhub").expect("folder id");
         let object_id = object_id();
         let revision_id = FolderRevisionId::new("revision-1").expect("revision id");
         let pack = LoomPack::new(
             shared_folder_id,
-            "devbox",
+            "bindhub",
             revision_id,
             Vec::new(),
             Vec::new(),
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn legacy_inline_object_rows_still_decode() {
         let encoded = format!(
-            "loom-pack-v1\nshared\tfolder-devbox\tdevbox\nlatest\trevision-1\nobject\t{}\t12\tnone\t{}\n",
+            "loom-pack-v1\nshared\tfolder-bindhub\tbindhub\nlatest\trevision-1\nobject\t{}\t12\tnone\t{}\n",
             object_id(),
             hex_encode(b"hello world!")
         );

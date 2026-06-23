@@ -5,10 +5,10 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice adds a production-shaped encrypted object remote for the existing sync pipeline.
-`devbox-sync` can now target S3-compatible object storage such as Cloudflare R2, AWS S3, or MinIO
+`bindhub-sync` can now target S3-compatible object storage such as Cloudflare R2, AWS S3, or MinIO
 behind the same `RemoteBlobProvider` boundary used by the local filesystem provider.
 
 ## Boundary
@@ -38,7 +38,7 @@ The S3-compatible provider implements the existing remote blob contract:
 - collision refusal for different bytes at an existing key
 
 Objects are addressed with the same safe relative `ObjectKey` model used by local sync. An optional
-remote prefix namespaces Devbox objects inside a bucket. Prefixes and object keys reject parent
+remote prefix namespaces Bindhub objects inside a bucket. Prefixes and object keys reject parent
 traversal, absolute paths, empty path segments, Windows separators, and accidental double slashes.
 
 The provider uses path-style URLs:
@@ -55,9 +55,9 @@ shape.
 The CLI accepts credential environment variable names, not raw secret values:
 
 ```text
---s3-access-key-env DEVBOX_R2_ACCESS_KEY_ID
---s3-secret-key-env DEVBOX_R2_SECRET_ACCESS_KEY
---s3-session-token-env DEVBOX_R2_SESSION_TOKEN
+--s3-access-key-env BINDHUB_R2_ACCESS_KEY_ID
+--s3-secret-key-env BINDHUB_R2_SECRET_ACCESS_KEY
+--s3-session-token-env BINDHUB_R2_SESSION_TOKEN
 ```
 
 If explicit env names are omitted, the provider uses the standard AWS-compatible environment names:
@@ -85,26 +85,26 @@ the immutable-object collision.
 Local filesystem remotes remain the default and keep the existing shape:
 
 ```text
-devbox sync publish-snapshot --db <DB> --cache <CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
+bindhub sync publish-snapshot --db <DB> --cache <CACHE> --remote <REMOTE_DIR> <SNAPSHOT_ID>
 ```
 
 S3-compatible remotes opt in with `--remote-kind s3`:
 
 ```text
-devbox sync publish-snapshot \
+bindhub sync publish-snapshot \
   --db <DB> \
   --cache <CACHE> \
   --remote-kind s3 \
   --s3-endpoint https://<account>.r2.cloudflarestorage.com \
-  --s3-bucket devbox-alpha \
+  --s3-bucket bindhub-alpha \
   --s3-region auto \
   --s3-prefix accounts/<account-id>/projects \
-  --s3-access-key-env DEVBOX_R2_ACCESS_KEY_ID \
-  --s3-secret-key-env DEVBOX_R2_SECRET_ACCESS_KEY \
+  --s3-access-key-env BINDHUB_R2_ACCESS_KEY_ID \
+  --s3-secret-key-env BINDHUB_R2_SECRET_ACCESS_KEY \
   <SNAPSHOT_ID>
 ```
 
-`devbox sync remote check --validate-only` validates and prints redacted configuration without a
+`bindhub sync remote check --validate-only` validates and prints redacted configuration without a
 network request. Without `--validate-only`, it loads credentials and performs a lightweight `head`
 probe against the remote.
 
@@ -114,7 +114,7 @@ and import/materialize discover the manifest object key through metadata before 
 configured local or S3-compatible object provider.
 
 For a multi-user shared bucket, the production-shaped authorization path is
-`devbox metadata object-access resolve`, which returns the allowed
+`bindhub metadata object-access resolve`, which returns the allowed
 `accounts/<account-id>/projects/<project-id>` prefix through a server-mediated broker boundary.
 Supplying `--s3-access-key-env` and `--s3-secret-key-env` directly remains a trusted-operator smoke
 path, not the external-tester permission boundary.

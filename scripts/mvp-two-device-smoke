@@ -9,8 +9,8 @@ Runs a deterministic local MVP smoke test that proves:
   - Loom local-only capture/checkpoint works
   - Loom local remote sync/clone works
   - Loom sparse clone, hydrate, evict, pin, and cache status work
-  - Devbox hosted share/clone works through a local devbox-api
-  - Devbox hosted metadata/object split rejects object hash mismatches
+  - Bindhub hosted share/clone works through a local bindhub-api
+  - Bindhub hosted metadata/object split rejects object hash mismatches
   - Git metadata and generated dependencies are not materialized
   - Plain and nested folders materialize
   - Divergent sync refuses safely
@@ -18,10 +18,10 @@ Runs a deterministic local MVP smoke test that proves:
 
 Environment:
   LOOM_BIN                 Optional path to a built loom binary.
-  DEVBOX_BIN               Optional path to a built devbox binary.
-  DEVBOX_API_BIN           Optional path to a built devbox-api binary.
-  DEVBOX_MVP_SMOKE_DIR     Optional working directory to reuse.
-  DEVBOX_CLEAN_SMOKE_DIR   Set true to remove the generated temp directory after a pass.
+  BINDHUB_BIN               Optional path to a built Bindhub binary.
+  BINDHUB_API_BIN           Optional path to a built bindhub-api binary.
+  BINDHUB_MVP_SMOKE_DIR     Optional working directory to reuse.
+  BINDHUB_CLEAN_SMOKE_DIR   Set true to remove the generated temp directory after a pass.
 USAGE
 }
 
@@ -32,16 +32,16 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [[ -n "${DEVBOX_MVP_SMOKE_DIR:-}" ]]; then
-  workdir="$DEVBOX_MVP_SMOKE_DIR"
+if [[ -n "${BINDHUB_MVP_SMOKE_DIR:-}" ]]; then
+  workdir="$BINDHUB_MVP_SMOKE_DIR"
   mkdir -p "$workdir"
   cleanup=false
 else
-  workdir="$(mktemp -d "${TMPDIR:-/tmp}/devbox-mvp-smoke.XXXXXX")"
+  workdir="$(mktemp -d "${TMPDIR:-/tmp}/Bindhub-mvp-smoke.XXXXXX")"
   cleanup=false
 fi
 
-if [[ "${DEVBOX_CLEAN_SMOKE_DIR:-false}" == "true" ]]; then
+if [[ "${BINDHUB_CLEAN_SMOKE_DIR:-false}" == "true" ]]; then
   cleanup=true
 fi
 
@@ -72,8 +72,8 @@ fail() {
 
 redact_log() {
   sed -E \
-    -e "s/devbox-local-session-[A-Za-z0-9]+/devbox-local-session-<redacted>/g" \
-    -e "s/devbox:\/\/[^[:space:]]+/devbox:\/\/<redacted>/g" \
+    -e "s/Bindhub-local-session-[A-Za-z0-9]+/Bindhub-local-session-<redacted>/g" \
+    -e "s/Bindhub:\/\/[^[:space:]]+/Bindhub:\/\/<redacted>/g" \
     -e "s/sk-[A-Za-z0-9_.-]+/sk-<redacted>/g" \
     -e "s/github_pat_[A-Za-z0-9_]+/github_pat_<redacted>/g" \
     -e "s/ghp_[A-Za-z0-9_]+/ghp_<redacted>/g"
@@ -176,7 +176,7 @@ hosted_object_hash_mismatch_probe() {
   status="$(curl -sS -o "$body_file" -w '%{http_code}' \
     -X PUT "$api_url/v1/loom/shared-folders/$folder_id/objects/$object_id" \
     -H "authorization: Bearer $session_token" \
-    -H "x-devbox-device-id: $device_id" \
+    -H "x-bindhub-device-id: $device_id" \
     -H "content-type: application/octet-stream" \
     --data-binary 'wrong hosted smoke bytes')"
   echo "http_status=$status"
@@ -206,10 +206,10 @@ path_for_bin() {
 }
 
 loom_bin="$(path_for_bin "${LOOM_BIN:-}" loom-cli loom)"
-devbox_bin="$(path_for_bin "${DEVBOX_BIN:-}" devbox-cli devbox)"
-devbox_api_bin="$(path_for_bin "${DEVBOX_API_BIN:-}" devbox-api devbox-api)"
+bindhub_bin="$(path_for_bin "${BINDHUB_BIN:-}" bindhub-cli Bindhub)"
+bindhub_api_bin="$(path_for_bin "${BINDHUB_API_BIN:-}" bindhub-api bindhub-api)"
 
-echo "Devbox MVP two-device smoke"
+echo "Bindhub MVP two-device smoke"
 echo "workdir=$workdir"
 echo "evidence=$evidence_dir"
 
@@ -312,14 +312,14 @@ record_expect_failure "16-conflict-sync-refusal" "$loom_bin" sync "$conflict_sou
 expect_contains "$evidence_dir/16-conflict-sync-refusal.stderr.log" "diverged"
 
 api_root="$workdir/api-root"
-api_log="$evidence_dir/17-devbox-api.log"
-DEVBOX_API_METADATA_MODE=memory "$devbox_api_bin" --root "$api_root" --bind 127.0.0.1:0 >"$api_log.raw" 2>&1 &
+api_log="$evidence_dir/17-bindhub-api.log"
+BINDHUB_API_METADATA_MODE=memory "$bindhub_api_bin" --root "$api_root" --bind 127.0.0.1:0 >"$api_log.raw" 2>&1 &
 api_pid=$!
 api_url=""
 for _ in $(seq 1 100); do
   if ! kill -0 "$api_pid" 2>/dev/null; then
     redact_log <"$api_log.raw" >"$api_log"
-    fail "devbox-api exited before it was ready"
+    fail "bindhub-api exited before it was ready"
   fi
   api_url="$(grep -Eo 'http://127\.0\.0\.1:[0-9]+' "$api_log.raw" | head -n 1 || true)"
   if [[ -n "$api_url" ]]; then
@@ -328,8 +328,8 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 redact_log <"$api_log.raw" >"$api_log"
-[[ -n "$api_url" ]] || fail "could not parse devbox-api URL"
-echo "[PASS] 17-devbox-api-start"
+[[ -n "$api_url" ]] || fail "could not parse bindhub-api URL"
+echo "[PASS] 17-bindhub-api-start"
 
 product_source="$workdir/product-source"
 product_target="$workdir/product-target"
@@ -341,10 +341,10 @@ printf 'nested product file\n' > "$product_source/app/main.txt"
 printf '[core]\nrepositoryformatversion = 0\n' > "$product_source/.git/config"
 printf 'generated\n' > "$product_source/node_modules/pkg/index.js"
 
-record "18-devbox-source-login" env DEVBOX_CONFIG_DIR="$source_config" "$devbox_bin" login --api "$api_url" --account mvp --device-name "MVP desktop"
-record "19-devbox-source-share" env DEVBOX_CONFIG_DIR="$source_config" "$devbox_bin" share "$product_source" --no-background-sync
-record "20-devbox-target-login" env DEVBOX_CONFIG_DIR="$target_config" "$devbox_bin" login --api "$api_url" --account mvp --device-name "MVP laptop"
-record "21-devbox-target-clone" env DEVBOX_CONFIG_DIR="$target_config" "$devbox_bin" clone product-source "$product_target" --no-background-sync
+record "18-Bindhub-source-login" env BINDHUB_CONFIG_DIR="$source_config" "$bindhub_bin" login --api "$api_url" --account mvp --device-name "MVP desktop"
+record "19-Bindhub-source-share" env BINDHUB_CONFIG_DIR="$source_config" "$bindhub_bin" share "$product_source" --no-background-sync
+record "20-Bindhub-target-login" env BINDHUB_CONFIG_DIR="$target_config" "$bindhub_bin" login --api "$api_url" --account mvp --device-name "MVP laptop"
+record "21-Bindhub-target-clone" env BINDHUB_CONFIG_DIR="$target_config" "$bindhub_bin" clone product-source "$product_target" --no-background-sync
 expect_file_text "$product_target/README.md" "product source"
 expect_file_text "$product_target/app/main.txt" "nested product file"
 expect_absent "$product_target/.git"
@@ -357,18 +357,18 @@ product_device_id="$(sed -nE 's/.*"device_id": "([^"]+)".*/\1/p' "$source_config
 [[ -n "$product_object_id" ]] || fail "could not read hosted object id"
 [[ -n "$product_session_token" ]] || fail "could not read hosted session token"
 [[ -n "$product_device_id" ]] || fail "could not read hosted device id"
-record_expected_http_refusal "21a-devbox-hosted-object-hash-mismatch" hosted_object_hash_mismatch_probe "$api_url" "$product_folder_id" "$product_object_id" "$product_session_token" "$product_device_id"
-expect_contains "$evidence_dir/21a-devbox-hosted-object-hash-mismatch.stdout.log" "http_status=400"
-expect_contains "$evidence_dir/21a-devbox-hosted-object-hash-mismatch.stdout.log" "object bytes do not match object id"
+record_expected_http_refusal "21a-Bindhub-hosted-object-hash-mismatch" hosted_object_hash_mismatch_probe "$api_url" "$product_folder_id" "$product_object_id" "$product_session_token" "$product_device_id"
+expect_contains "$evidence_dir/21a-Bindhub-hosted-object-hash-mismatch.stdout.log" "http_status=400"
+expect_contains "$evidence_dir/21a-Bindhub-hosted-object-hash-mismatch.stdout.log" "object bytes do not match object id"
 
 printf 'product source after edit\n' > "$product_source/README.md"
-record "22-devbox-source-push-edit" env DEVBOX_CONFIG_DIR="$source_config" "$devbox_bin" resume "$product_source" --no-background-sync
-record "23-devbox-target-sync-edit" env DEVBOX_CONFIG_DIR="$target_config" "$devbox_bin" sync run-loop "$product_target" --max-cycles 1
+record "22-Bindhub-source-push-edit" env BINDHUB_CONFIG_DIR="$source_config" "$bindhub_bin" resume "$product_source" --no-background-sync
+record "23-Bindhub-target-sync-edit" env BINDHUB_CONFIG_DIR="$target_config" "$bindhub_bin" sync run-loop "$product_target" --max-cycles 1
 expect_file_text "$product_target/README.md" "product source after edit"
 
-record "24-devbox-status" env DEVBOX_CONFIG_DIR="$target_config" "$devbox_bin" status
-expect_contains "$evidence_dir/24-devbox-status.stdout.log" "Logged in: yes"
-expect_contains "$evidence_dir/24-devbox-status.stdout.log" "Shared folders:"
+record "24-Bindhub-status" env BINDHUB_CONFIG_DIR="$target_config" "$bindhub_bin" status
+expect_contains "$evidence_dir/24-Bindhub-status.stdout.log" "Logged in: yes"
+expect_contains "$evidence_dir/24-Bindhub-status.stdout.log" "Shared folders:"
 
 if grep -R -F "$raw_secret" "$evidence_dir" >/dev/null 2>&1; then
   fail "evidence logs contain an unredacted secret fixture"
@@ -377,7 +377,7 @@ fi
 find "$engine_clone" "$plain_clone" "$product_target" -maxdepth 4 -type f | sort > "$evidence_dir/materialized-files.txt"
 
 cat > "$evidence_dir/SUMMARY.txt" <<SUMMARY
-Devbox MVP two-device smoke passed.
+Bindhub MVP two-device smoke passed.
 
 Workdir: $workdir
 API: $api_url
@@ -386,8 +386,8 @@ Proofs:
 - Loom local-only capture/checkpoint/status works.
 - Loom local filesystem remote sync and eager clone work.
 - Loom sparse clone, hydrate, evict, pin, and cache status work through a local filesystem remote.
-- Devbox hosted login/share/clone works eagerly through local devbox-api.
-- Devbox hosted metadata/object split stores metadata packs separately from object bytes and rejects mismatched object bytes.
+- Bindhub hosted login/share/clone works eagerly through local bindhub-api.
+- Bindhub hosted metadata/object split stores metadata packs separately from object bytes and rejects mismatched object bytes.
 - Editing the source shared folder propagates to the target through sync.
 - Git metadata is preserved locally and not materialized into clones.
 - Generated dependency/build output directories are suppressed.
@@ -395,7 +395,7 @@ Proofs:
 - Divergent remote cursor state refuses safely.
 - Secret-looking files are blocked before sync and raw secret bytes are absent from remote/object cache/evidence.
 
-Evidence logs are in this directory. Session tokens and devbox URLs are redacted.
+Evidence logs are in this directory. Session tokens and Bindhub URLs are redacted.
 SUMMARY
 
 echo "mvp smoke passed"

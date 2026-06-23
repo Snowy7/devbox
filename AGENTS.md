@@ -1,19 +1,19 @@
-# Devbox Agent Brief
+# Bindhub Agent Brief
 
-Devbox is about one feeling: I open another machine and my code folder is already there.
+Bindhub is about one feeling: I open another machine and my code folder is already there.
 
 Keep the product centered on folders, machines, and trust. A shared folder might contain many repos,
-one repo, no repo, nested apps, secrets, dependencies, or agent work. Devbox should handle that
+one repo, no repo, nested apps, secrets, dependencies, or agent work. Bindhub should handle that
 developer mess calmly instead of making the user manage it.
 
-Loom is the codename for the deeper source-control idea underneath Devbox. Devbox is the product;
-Loom is the engine direction. Git matters because people use it today, but Devbox is not built
+Loom is the codename for the deeper source-control idea underneath Bindhub. Bindhub is the product;
+Loom is the engine direction. Git matters because people use it today, but Bindhub is not built
 around Git.
 
 Vocabulary:
 
 - Shared folder: the folder the user wants to keep continuous.
-- Loom: the source-control/sync engine underneath Devbox.
+- Loom: the source-control/sync engine underneath Bindhub.
 - Object: content-addressed bytes.
 - Chunk: content-addressed byte range vocabulary for future sparse/lazy transfer; PR 1 only adds
   primitives and metadata, not chunk transport.

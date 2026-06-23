@@ -4,9 +4,9 @@
 
 
 Historical terminology note: this architecture slice uses `project` for detected developer folders.
-New product language should say shared folder or detected folder. Devbox is not built around
+New product language should say shared folder or detected folder. Bindhub is not built around
 projects; it analyzes whatever folder the user shares. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This slice adds a read-only scanner that classifies local project directories and explains default generated-artifact exclusions. It does not create snapshots, hash content, write metadata, sync files, or call language package managers.
 
@@ -23,7 +23,7 @@ The scanner walks a local directory tree and records projects when it finds thes
 The CLI exposes this as:
 
 ```text
-devbox scan <path>
+bindhub scan <path>
 ```
 
 The command prints the canonical scan root, detected projects, project signals, rehydration hints, and policy exclusions.
@@ -47,7 +47,7 @@ The scanner excludes generated or tool-owned directories before descending into 
 - `.cache`
 - `coverage`
 
-Each exclusion keeps an explanation string so later UI and `explain` surfaces can show why Devbox skipped a path.
+Each exclusion keeps an explanation string so later UI and `explain` surfaces can show why Bindhub skipped a path.
 
 ## Deferred
 

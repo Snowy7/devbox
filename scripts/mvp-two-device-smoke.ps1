@@ -12,8 +12,8 @@ Runs a deterministic local MVP smoke test that proves:
   - Loom local-only capture/checkpoint works
   - Loom local remote sync/clone works
   - Loom sparse clone, hydrate, evict, pin, and cache status work
-  - Devbox hosted share/clone works through a local devbox-api
-  - Devbox hosted metadata/object split rejects object hash mismatches
+  - Bindhub hosted share/clone works through a local bindhub-api
+  - Bindhub hosted metadata/object split rejects object hash mismatches
   - Git metadata and generated dependencies are not materialized
   - Plain and nested folders materialize
   - Divergent sync refuses safely
@@ -21,27 +21,27 @@ Runs a deterministic local MVP smoke test that proves:
 
 Environment:
   LOOM_BIN                 Optional path to a built loom binary.
-  DEVBOX_BIN               Optional path to a built devbox binary.
-  DEVBOX_API_BIN           Optional path to a built devbox-api binary.
-  DEVBOX_MVP_SMOKE_DIR     Optional working directory to reuse.
-  DEVBOX_CLEAN_SMOKE_DIR   Set true to remove the generated temp directory after a pass.
+  BINDHUB_BIN               Optional path to a built Bindhub binary.
+  BINDHUB_API_BIN           Optional path to a built bindhub-api binary.
+  BINDHUB_MVP_SMOKE_DIR     Optional working directory to reuse.
+  BINDHUB_CLEAN_SMOKE_DIR   Set true to remove the generated temp directory after a pass.
 "@
     exit 0
 }
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
-if ($env:DEVBOX_MVP_SMOKE_DIR) {
-    $WorkDir = $env:DEVBOX_MVP_SMOKE_DIR
+if ($env:BINDHUB_MVP_SMOKE_DIR) {
+    $WorkDir = $env:BINDHUB_MVP_SMOKE_DIR
     New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
     $Cleanup = $false
 } else {
-    $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("devbox-mvp-smoke." + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("Bindhub-mvp-smoke." + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
     $Cleanup = $false
 }
 
-if ($env:DEVBOX_CLEAN_SMOKE_DIR -eq "true") {
+if ($env:BINDHUB_CLEAN_SMOKE_DIR -eq "true") {
     $Cleanup = $true
 }
 
@@ -56,8 +56,8 @@ function Fail($Message) {
 }
 
 function Redact-Text($Text) {
-    $Text = $Text -replace "devbox-local-session-[A-Za-z0-9]+", "devbox-local-session-<redacted>"
-    $Text = $Text -replace "devbox://\S+", "devbox://<redacted>"
+    $Text = $Text -replace "Bindhub-local-session-[A-Za-z0-9]+", "Bindhub-local-session-<redacted>"
+    $Text = $Text -replace "bindhub://\S+", "bindhub://<redacted>"
     $Text = $Text -replace "sk-[A-Za-z0-9_.-]+", "sk-<redacted>"
     $Text = $Text -replace "github_pat_[A-Za-z0-9_]+", "github_pat_<redacted>"
     $Text = $Text -replace "ghp_[A-Za-z0-9_]+", "ghp_<redacted>"
@@ -247,7 +247,7 @@ function Invoke-HostedObjectHashMismatchProbe($ApiUrl, $FolderId, $ObjectId, $Se
     $request.Method = "PUT"
     $request.ContentType = "application/octet-stream"
     $request.Headers.Add("authorization", "Bearer $SessionToken")
-    $request.Headers.Add("x-devbox-device-id", $DeviceId)
+    $request.Headers.Add("x-bindhub-device-id", $DeviceId)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes("wrong hosted smoke bytes")
     $request.ContentLength = $bytes.Length
     $stream = $request.GetRequestStream()
@@ -297,10 +297,10 @@ function Invoke-HostedObjectHashMismatchProbe($ApiUrl, $FolderId, $ObjectId, $Se
 
 try {
     $LoomBin = Get-BinaryPath $env:LOOM_BIN "loom-cli" "loom"
-    $DevboxBin = Get-BinaryPath $env:DEVBOX_BIN "devbox-cli" "devbox"
-    $DevboxApiBin = Get-BinaryPath $env:DEVBOX_API_BIN "devbox-api" "devbox-api"
+    $BindhubBin = Get-BinaryPath $env:BINDHUB_BIN "bindhub-cli" "Bindhub"
+    $BindhubApiBin = Get-BinaryPath $env:BINDHUB_API_BIN "bindhub-api" "bindhub-api"
 
-    Write-Host "Devbox MVP two-device smoke"
+    Write-Host "Bindhub MVP two-device smoke"
     Write-Host "workdir=$WorkDir"
     Write-Host "evidence=$EvidenceDir"
 
@@ -392,21 +392,21 @@ try {
     Expect-Contains (Join-Path $EvidenceDir "16-conflict-sync-refusal.stderr.log") "diverged"
 
     $ApiRoot = Join-Path $WorkDir "api-root"
-    $ApiStdoutRaw = Join-Path $EvidenceDir "17-devbox-api.stdout.log.raw"
-    $ApiStderrRaw = Join-Path $EvidenceDir "17-devbox-api.stderr.log.raw"
-    $OldApiMetadataMode = [Environment]::GetEnvironmentVariable("DEVBOX_API_METADATA_MODE", "Process")
-    [Environment]::SetEnvironmentVariable("DEVBOX_API_METADATA_MODE", "memory", "Process")
+    $ApiStdoutRaw = Join-Path $EvidenceDir "17-bindhub-api.stdout.log.raw"
+    $ApiStderrRaw = Join-Path $EvidenceDir "17-bindhub-api.stderr.log.raw"
+    $OldApiMetadataMode = [Environment]::GetEnvironmentVariable("BINDHUB_API_METADATA_MODE", "Process")
+    [Environment]::SetEnvironmentVariable("BINDHUB_API_METADATA_MODE", "memory", "Process")
     try {
-        $ApiProcess = Start-Process -FilePath $DevboxApiBin -ArgumentList @("--root", $ApiRoot, "--bind", "127.0.0.1:0") -RedirectStandardOutput $ApiStdoutRaw -RedirectStandardError $ApiStderrRaw -PassThru -WindowStyle Hidden
+        $ApiProcess = Start-Process -FilePath $BindhubApiBin -ArgumentList @("--root", $ApiRoot, "--bind", "127.0.0.1:0") -RedirectStandardOutput $ApiStdoutRaw -RedirectStandardError $ApiStderrRaw -PassThru -WindowStyle Hidden
     } finally {
-        [Environment]::SetEnvironmentVariable("DEVBOX_API_METADATA_MODE", $OldApiMetadataMode, "Process")
+        [Environment]::SetEnvironmentVariable("BINDHUB_API_METADATA_MODE", $OldApiMetadataMode, "Process")
     }
     $ApiUrl = ""
     for ($i = 0; $i -lt 100; $i++) {
         if ($ApiProcess.HasExited) {
-            Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "17-devbox-api.stdout.log")
-            Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "17-devbox-api.stderr.log")
-            Fail "devbox-api exited before it was ready"
+            Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "17-bindhub-api.stdout.log")
+            Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "17-bindhub-api.stderr.log")
+            Fail "bindhub-api exited before it was ready"
         }
         if (Test-Path $ApiStdoutRaw) {
             $apiLog = Get-Content -Raw -Path $ApiStdoutRaw
@@ -421,12 +421,12 @@ try {
         }
         Start-Sleep -Milliseconds 50
     }
-    Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "17-devbox-api.stdout.log")
-    Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "17-devbox-api.stderr.log")
+    Redact-FileCopy $ApiStdoutRaw (Join-Path $EvidenceDir "17-bindhub-api.stdout.log")
+    Redact-FileCopy $ApiStderrRaw (Join-Path $EvidenceDir "17-bindhub-api.stderr.log")
     if (-not $ApiUrl) {
-        Fail "could not parse devbox-api URL"
+        Fail "could not parse bindhub-api URL"
     }
-    Write-Host "[PASS] 17-devbox-api-start"
+    Write-Host "[PASS] 17-bindhub-api-start"
 
     $ProductSource = Join-Path $WorkDir "product-source"
     $ProductTarget = Join-Path $WorkDir "product-target"
@@ -437,10 +437,10 @@ try {
     New-TextFile (Join-Path $ProductSource ".git\config") "[core]`nrepositoryformatversion = 0"
     New-TextFile (Join-Path $ProductSource "node_modules\pkg\index.js") "generated"
 
-    Invoke-Logged -Name "18-devbox-source-login" -Exe $DevboxBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "mvp", "--device-name", "MVP-desktop") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig }
-    Invoke-Logged -Name "19-devbox-source-share" -Exe $DevboxBin -CommandArgs @("share", $ProductSource, "--no-background-sync") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig }
-    Invoke-Logged -Name "20-devbox-target-login" -Exe $DevboxBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "mvp", "--device-name", "MVP-laptop") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
-    Invoke-Logged -Name "21-devbox-target-clone" -Exe $DevboxBin -CommandArgs @("clone", "product-source", $ProductTarget, "--no-background-sync") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "18-Bindhub-source-login" -Exe $BindhubBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "mvp", "--device-name", "MVP-desktop") -Env @{ BINDHUB_CONFIG_DIR = $SourceConfig }
+    Invoke-Logged -Name "19-Bindhub-source-share" -Exe $BindhubBin -CommandArgs @("share", $ProductSource, "--no-background-sync") -Env @{ BINDHUB_CONFIG_DIR = $SourceConfig }
+    Invoke-Logged -Name "20-Bindhub-target-login" -Exe $BindhubBin -CommandArgs @("login", "--api", $ApiUrl, "--account", "mvp", "--device-name", "MVP-laptop") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "21-Bindhub-target-clone" -Exe $BindhubBin -CommandArgs @("clone", "product-source", $ProductTarget, "--no-background-sync") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-FileText (Join-Path $ProductTarget "README.md") "product source"
     Expect-FileText (Join-Path $ProductTarget "app\main.txt") "nested product file"
     Expect-Absent (Join-Path $ProductTarget ".git")
@@ -459,20 +459,20 @@ try {
     if (-not $ProductObjectId) { Fail "could not read hosted object id" }
     if (-not $SourceProductConfig.session_token) { Fail "could not read hosted session token" }
     if (-not $SourceProductConfig.device_id) { Fail "could not read hosted device id" }
-    Invoke-LoggedHttpRefusal -Name "21a-devbox-hosted-object-hash-mismatch" -ScriptBlock {
+    Invoke-LoggedHttpRefusal -Name "21a-Bindhub-hosted-object-hash-mismatch" -ScriptBlock {
         Invoke-HostedObjectHashMismatchProbe $ApiUrl $ProductFolderId $ProductObjectId $SourceProductConfig.session_token $SourceProductConfig.device_id
     }
-    Expect-Contains (Join-Path $EvidenceDir "21a-devbox-hosted-object-hash-mismatch.stdout.log") "http_status=400"
-    Expect-Contains (Join-Path $EvidenceDir "21a-devbox-hosted-object-hash-mismatch.stdout.log") "object bytes do not match object id"
+    Expect-Contains (Join-Path $EvidenceDir "21a-Bindhub-hosted-object-hash-mismatch.stdout.log") "http_status=400"
+    Expect-Contains (Join-Path $EvidenceDir "21a-Bindhub-hosted-object-hash-mismatch.stdout.log") "object bytes do not match object id"
 
     New-TextFile (Join-Path $ProductSource "README.md") "product source after edit"
-    Invoke-Logged -Name "22-devbox-source-push-edit" -Exe $DevboxBin -CommandArgs @("resume", $ProductSource, "--no-background-sync") -Env @{ DEVBOX_CONFIG_DIR = $SourceConfig }
-    Invoke-Logged -Name "23-devbox-target-sync-edit" -Exe $DevboxBin -CommandArgs @("sync", "run-loop", $ProductTarget, "--max-cycles", "1") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
+    Invoke-Logged -Name "22-Bindhub-source-push-edit" -Exe $BindhubBin -CommandArgs @("resume", $ProductSource, "--no-background-sync") -Env @{ BINDHUB_CONFIG_DIR = $SourceConfig }
+    Invoke-Logged -Name "23-Bindhub-target-sync-edit" -Exe $BindhubBin -CommandArgs @("sync", "run-loop", $ProductTarget, "--max-cycles", "1") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
     Expect-FileText (Join-Path $ProductTarget "README.md") "product source after edit"
 
-    Invoke-Logged -Name "24-devbox-status" -Exe $DevboxBin -CommandArgs @("status") -Env @{ DEVBOX_CONFIG_DIR = $TargetConfig }
-    Expect-Contains (Join-Path $EvidenceDir "24-devbox-status.stdout.log") "Logged in: yes"
-    Expect-Contains (Join-Path $EvidenceDir "24-devbox-status.stdout.log") "Shared folders:"
+    Invoke-Logged -Name "24-Bindhub-status" -Exe $BindhubBin -CommandArgs @("status") -Env @{ BINDHUB_CONFIG_DIR = $TargetConfig }
+    Expect-Contains (Join-Path $EvidenceDir "24-Bindhub-status.stdout.log") "Logged in: yes"
+    Expect-Contains (Join-Path $EvidenceDir "24-Bindhub-status.stdout.log") "Shared folders:"
 
     if (Tree-Contains $EvidenceDir $RawSecret) {
         Fail "evidence logs contain an unredacted secret fixture"
@@ -484,7 +484,7 @@ try {
         Set-Content -Path (Join-Path $EvidenceDir "materialized-files.txt")
 
     @"
-Devbox MVP two-device smoke passed.
+Bindhub MVP two-device smoke passed.
 
 Workdir: $WorkDir
 API: $ApiUrl
@@ -493,8 +493,8 @@ Proofs:
 - Loom local-only capture/checkpoint/status works.
 - Loom local filesystem remote sync and eager clone work.
 - Loom sparse clone, hydrate, evict, pin, and cache status work through a local filesystem remote.
-- Devbox hosted login/share/clone works eagerly through local devbox-api.
-- Devbox hosted metadata/object split stores metadata packs separately from object bytes and rejects mismatched object bytes.
+- Bindhub hosted login/share/clone works eagerly through local bindhub-api.
+- Bindhub hosted metadata/object split stores metadata packs separately from object bytes and rejects mismatched object bytes.
 - Editing the source shared folder propagates to the target through sync.
 - Git metadata is preserved locally and not materialized into clones.
 - Generated dependency/build output directories are suppressed.
@@ -502,7 +502,7 @@ Proofs:
 - Divergent remote cursor state refuses safely.
 - Secret-looking files are blocked before sync and raw secret bytes are absent from remote/object cache/evidence.
 
-Evidence logs are in this directory. Session tokens and devbox URLs are redacted.
+Evidence logs are in this directory. Session tokens and Bindhub URLs are redacted.
 "@ | Set-Content -Path (Join-Path $EvidenceDir "SUMMARY.txt")
 
     Write-Host "mvp smoke passed"

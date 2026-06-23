@@ -37,8 +37,8 @@ mod tests {
     #[test]
     fn git_reports_keep_metadata_protected() {
         let report = GitCompatibilityReport::no_repository(
-            SharedFolderId::new("folder-devbox").expect("folder id"),
-            "/workspace/devbox",
+            SharedFolderId::new("folder-bindhub").expect("folder id"),
+            "/workspace/bindhub",
         );
 
         assert!(report.git_metadata_protected);

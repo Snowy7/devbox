@@ -1,0 +1,74 @@
+[area]
+name = "bindhub"
+status = "active-home"
+description = "Hosted product platform for Loom-powered shared folders."
+
+[[crate]]
+name = "bindhub-auth"
+path = "crates/bindhub-auth"
+owns = ["accounts", "sessions", "device trust", "tokens"]
+
+[[crate]]
+name = "bindhub-platform"
+path = "crates/bindhub-platform"
+owns = ["machines", "shared-folder membership", "hosted discovery"]
+
+[[crate]]
+name = "bindhub-remote"
+path = "crates/bindhub-remote"
+owns = ["Bindhub-hosted Loom remote implementation", "Bindhub remote clone URLs"]
+
+[[crate]]
+name = "bindhub-api"
+path = "crates/bindhub-api"
+owns = ["hosted API boundary", "auth routes", "device routes", "shared-folder routes", "Loom remote API facade"]
+
+[[crate]]
+name = "bindhub-cli"
+path = "crates/bindhub-cli"
+owns = ["product CLI", "login", "share", "clone", "machine management"]
+
+[[compatibility_crate]]
+name = "bindhub-core"
+path = "crates/bindhub-core"
+compatibility_note = "Legacy alpha project/snapshot domain types kept compileable while Loom absorbs folder-state concepts."
+
+[[compatibility_crate]]
+name = "bindhub-store"
+path = "crates/bindhub-store"
+compatibility_note = "Legacy alpha SQLite local store."
+
+[[compatibility_crate]]
+name = "bindhub-snapshot"
+path = "crates/bindhub-snapshot"
+compatibility_note = "Legacy alpha snapshot builder."
+
+[[compatibility_crate]]
+name = "bindhub-sync"
+path = "crates/bindhub-sync"
+compatibility_note = "Legacy encrypted object transfer and hosted object-transfer provider."
+
+[[compatibility_crate]]
+name = "bindhub-materialize"
+path = "crates/bindhub-materialize"
+compatibility_note = "Legacy alpha import/materialization composition."
+
+[[compatibility_crate]]
+name = "bindhub-conflict"
+path = "crates/bindhub-conflict"
+compatibility_note = "Legacy alpha divergent snapshot comparison."
+
+[[compatibility_crate]]
+name = "bindhub-daemon"
+path = "crates/bindhub-daemon"
+compatibility_note = "Legacy alpha daemon binary retained for alpha scripts."
+
+[[compatibility_crate]]
+name = "bindhub-git"
+path = "crates/bindhub-git"
+compatibility_note = "Legacy Git metadata safety report."
+
+[[compatibility_crate]]
+name = "bindhub-metadata"
+path = "crates/bindhub-metadata"
+compatibility_note = "Deployable hosted metadata alpha API; future work should fold product API pieces into the main Bindhub platform."

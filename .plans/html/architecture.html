@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Devbox MVP Architecture</title>
+    <title>Bindhub MVP Architecture</title>
     <link rel="stylesheet" href="style.css">
   </head>
   <body>
@@ -26,7 +26,7 @@
           <p class="lead">The daemon owns correctness. The desktop app owns product experience. The backend coordinates metadata. R2 stores encrypted immutable blob packs.</p>
         </div>
         <div class="callout green">
-          <strong>Boundary rule:</strong> Electron never directly mutates workspace state. It talks to the daemon, and the daemon is the only local writer for Devbox metadata.
+          <strong>Boundary rule:</strong> Electron never directly mutates workspace state. It talks to the daemon, and the daemon is the only local writer for bindhub metadata.
         </div>
       </section>
 
@@ -63,11 +63,11 @@ Release evidence
           </thead>
           <tbody>
             <tr><td><code>apps/desktop</code></td><td>Electron + React + TypeScript desktop app.</td></tr>
-            <tr><td><code>crates/devbox-daemon</code></td><td>Long-running local daemon for watch, debounce, live snapshot publish, latest-remote pull, and safe materialization orchestration.</td></tr>
-            <tr><td><code>crates/devbox-cli</code></td><td>Command-line interface using clap.</td></tr>
-            <tr><td><code>crates/devbox-metadata</code></td><td>Hosted metadata API foundation with explicit mock-dev auth, account-session auth, SQLite dev/test storage, published manifest discovery, and compare-and-set cursors.</td></tr>
-            <tr><td><code>crates/devbox-core</code></td><td>Shared snapshot, policy, manifest, and storage types.</td></tr>
-            <tr><td><code>crates/devbox-git</code></td><td>Git detection, verification, and adapter logic.</td></tr>
+            <tr><td><code>crates/bindhub-daemon</code></td><td>Long-running local daemon for watch, debounce, live snapshot publish, latest-remote pull, and safe materialization orchestration.</td></tr>
+            <tr><td><code>crates/bindhub-cli</code></td><td>Command-line interface using clap.</td></tr>
+            <tr><td><code>crates/bindhub-metadata</code></td><td>Hosted metadata API foundation with explicit mock-dev auth, account-session auth, SQLite dev/test storage, published manifest discovery, and compare-and-set cursors.</td></tr>
+            <tr><td><code>crates/bindhub-core</code></td><td>Shared snapshot, policy, manifest, and storage types.</td></tr>
+            <tr><td><code>crates/bindhub-git</code></td><td>Git detection, verification, and adapter logic.</td></tr>
             <tr><td><code>services/api</code></td><td>Rust backend API, likely axum.</td></tr>
             <tr><td><code>infra/local</code></td><td>Docker Compose for Postgres, MinIO, and local services.</td></tr>
             <tr><td><code>tests/fixtures</code></td><td>Representative repos and destructive restore fixtures.</td></tr>
@@ -128,7 +128,7 @@ Release evidence
           <li>Local high-confidence secret blocking prevents detected files from becoming uploadable snapshot blobs.</li>
           <li>Local conflict records compare and persist divergent snapshot rows without source bytes.</li>
           <li>Local sync preflight reconciles receiver cursors with local and incoming snapshots, refusing divergent local/mock import/materialization with conflict records and no cursor advance.</li>
-          <li>The private-alpha Electron shell reads redacted `DEVBOX_*` setup state for local paths, hosted session/project config, object-access lease, shared bucket prefix, pairing, live sync command state, and safety records.</li>
+          <li>The private-alpha Electron shell reads redacted `BINDHUB_*` setup state for local paths, hosted session/project config, object-access lease, shared bucket prefix, pairing, live sync command state, and safety records.</li>
           <li>Alpha release scripts package CLI/daemon/metadata tools and an unsigned desktop bundle; the deterministic smoke harness proves two-device pairing, fail-closed pending receivers, live publish, latest pull, and materialization.</li>
           <li>OAuth/OIDC login, live recovery UX, signed installers, live Cloudflare/AWS object credential provisioning, automatic merge/apply resolution, paid/team/agent/Loom work, and multi-region/observability hardening remain deferred.</li>
           <li>The alpha path starts with two devices, but the account/device model supports many approved devices over time.</li>

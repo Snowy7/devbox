@@ -19,5 +19,5 @@ source "$env_file"
 set +a
 
 echo "loaded R2 env from $env_file"
-echo "endpoint: ${DEVBOX_R2_ENDPOINT:-}"
-echo "bucket: ${DEVBOX_R2_BUCKET:-}"
+echo "endpoint: ${BINDHUB_R2_ENDPOINT:-}"
+echo "bucket: ${BINDHUB_R2_BUCKET:-}"

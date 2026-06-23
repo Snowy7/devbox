@@ -1,9 +1,9 @@
 # Loom Area
 
-Loom is the source-control and sync engine underneath Devbox.
+Loom is the source-control and sync engine underneath Bindhub.
 
 This directory is the home for Loom-owned work. New engine code should land under
-[`crates/`](crates/), and it should keep Devbox product/platform concerns out of the core engine.
+[`crates/`](crates/), and it should keep Bindhub product/platform concerns out of the core engine.
 
 Loom owns:
 
@@ -17,6 +17,6 @@ Loom owns:
 - pack format and remote sync semantics
 - Git compatibility analysis
 
-Loom does not own hosted Devbox accounts, billing, product onboarding, or device membership.
+Loom does not own hosted Bindhub accounts, billing, product onboarding, or device membership.
 
 See [manifest.toml](manifest.toml) for the current crate map.

@@ -1,15 +1,15 @@
 {
-  "name": "@devbox/desktop",
+  "name": "@bindhub/desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Devbox private-alpha Electron control surface.",
+  "description": "Bindhub private-alpha Electron control surface.",
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "start": "npm run build && electron .",
+    "start": "pnpm build && electron .",
     "start:built": "electron .",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
-    "build": "npm run typecheck && vite build && tsc -p tsconfig.main.json",
+    "build": "pnpm typecheck && vite build && tsc -p tsconfig.main.json",
     "test:safety": "node scripts/safety-scan.mjs"
   },
   "dependencies": {

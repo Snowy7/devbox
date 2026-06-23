@@ -5,16 +5,16 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
-This foundation moves Devbox from persisted manual snapshots toward a local answer to "what
+This foundation moves Bindhub from persisted manual snapshots toward a local answer to "what
 changed?" The daemon watcher now calls the same shared scan orchestration after debounced filesystem
 events; the persisted feed remains local-only.
 
 ## Boundary
 
-The change feed is local-only. `devbox changes scan --db <DB_PATH> --cache <CACHE_ROOT>
-<PROJECT_ROOT>` and `devbox-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>` both
+The change feed is local-only. `bindhub changes scan --db <DB_PATH> --cache <CACHE_ROOT>
+<PROJECT_ROOT>` and `bindhub-daemon watch --db <DB_PATH> --cache <CACHE_ROOT> <PROJECT_ROOT>` both
 build the current snapshot draft with the existing scanner, policy, manifest, BLAKE3 blob cache, and
 SQLite store foundations. They then compare included regular files against the latest persisted
 snapshot for the same local project id and replace that project's pending change rows in SQLite.

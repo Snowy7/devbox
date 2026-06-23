@@ -1,4 +1,4 @@
-# Devbox MVP Plans
+# Bindhub MVP Plans
 
 Open [html/index.html](html/index.html) to browse the MVP plan.
 
@@ -13,7 +13,7 @@ This folder turns the product strategy into implementation phases:
 The MVP rule is simple: earn trust before exposing teams, agents, or Loom as source control.
 
 Language note: older alpha planning docs often say "project" for a scoped folder. New product
-language should say shared folder. The source-control primitive underneath Devbox is codenamed Loom;
+language should say shared folder. The source-control primitive underneath Bindhub is codenamed Loom;
 Git remains a compatibility surface, not the product center.
 
 Current Phase 1 foundation status: snapshot/restore, manual change-feed scanning, the local watcher,
@@ -42,7 +42,7 @@ prefixes, expiration, revocation, rotation generation, hosted CLI resolution, an
 mock/dev CLI smoke commands. Hosted object transfer now proxies encrypted object put/get/head/list
 through the metadata API so external tester clients use account-session auth without local R2/S3
 bucket keys. The hosted metadata backend now has a Railway-shaped Postgres store selected by
-`DATABASE_URL`/`DEVBOX_METADATA_DATABASE_URL`, with SQLite retained for local/dev tests. Local pairing now includes no-network recovery grant references,
+`DATABASE_URL`/`BINDHUB_METADATA_DATABASE_URL`, with SQLite retained for local/dev tests. Local pairing now includes no-network recovery grant references,
 receiver-generated join/complete handoff, revocation, device rotation intents, and key-envelope
 rotation generation. Paired receivers can now materialize with their own local key state instead of
 opening the publisher DB. The final private-alpha surface now adds an env-backed redacted Electron

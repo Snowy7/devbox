@@ -18,7 +18,7 @@ export function App() {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
 
   const refreshState = () => {
-    void window.devbox?.getAlphaState().then(setState);
+    void window.bindhub?.getAlphaState().then(setState);
   };
 
   useEffect(() => {
@@ -41,12 +41,12 @@ export function App() {
         <div className="brand">
           <div className="brand-mark">D</div>
           <div>
-            <h1>Devbox</h1>
+            <h1>Bindhub</h1>
             <p>Private alpha</p>
           </div>
         </div>
         <div className={`status-pill ${state.status}`}>{state.status}</div>
-        <nav className="tabs" aria-label="Devbox sections">
+        <nav className="tabs" aria-label="Bindhub sections">
           {tabs.map((tab) => (
             <button
               key={tab.id}

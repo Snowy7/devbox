@@ -5,10 +5,10 @@
 
 Historical terminology note: this architecture slice uses `project` as an early implementation term
 for a scoped shared folder. New product language should say shared folder. Loom is the codename for
-the deeper source-control primitive underneath Devbox; `devbox-git` is compatibility support for
+the deeper source-control primitive underneath Bindhub; `bindhub-git` is compatibility support for
 existing Git folders, not the product foundation.
 
-This document records the first PR-sized technical skeleton for Devbox. It is intentionally kept as
+This document records the first PR-sized technical skeleton for Bindhub. It is intentionally kept as
 historical architecture context: the goal was to establish crate boundaries, local domain vocabulary,
 and future app layout before snapshot, restore, sync, and policy execution landed.
 
@@ -19,13 +19,13 @@ focused crates for auth, CLI, conflict metadata, core scanning/policy, daemon li
 boundaries, materialization, hosted metadata, snapshot/restore, local store, and encrypted sync.
 The original skeleton boundaries were:
 
-- `devbox/crates/devbox-core`: shared domain types for projects, snapshots, blobs, manifests, policy decisions, and read-only project scanning.
-- `devbox/crates/devbox-daemon`: daemon binary that now owns watch/debounce and live sync orchestration.
-- `devbox/crates/devbox-cli`: `devbox` CLI binary that now exposes local snapshots, auth/session,
+- `bindhub/crates/bindhub-core`: shared domain types for projects, snapshots, blobs, manifests, policy decisions, and read-only project scanning.
+- `bindhub/crates/bindhub-daemon`: daemon binary that now owns watch/debounce and live sync orchestration.
+- `bindhub/crates/bindhub-cli`: `Bindhub` CLI binary that now exposes local snapshots, auth/session,
   pairing, hosted metadata, sync, conflict, and secret-policy commands.
-- `devbox/crates/devbox-git`: Git adapter boundary. Git repositories must be inspected and reconstructed
+- `bindhub/crates/bindhub-git`: Git adapter boundary. Git repositories must be inspected and reconstructed
   through a dedicated adapter rather than by syncing `.git` as ordinary files.
-- `devbox/crates/devbox-store`: SQLite local metadata boundary with idempotent migrations, foreign-key
+- `bindhub/crates/bindhub-store`: SQLite local metadata boundary with idempotent migrations, foreign-key
   enforcement, schema summary reporting, project/snapshot metadata, local identity, pairing state,
   cursors, conflicts, and secret policies.
 
@@ -50,14 +50,14 @@ This keeps the riskiest behavior in a testable Rust core and prevents UI state f
 
 ## Local Metadata and Storage Direction
 
-SQLite is used for local metadata through the `devbox-store` crate. The initial schema records projects, snapshots, manifest entries, blob and chunk references, operations, policies, policy evaluations, and restore attempts. SQLite stores identifiers, paths, sizes, policy decisions, operation state, and object references. It does not store file contents as database BLOBs.
+SQLite is used for local metadata through the `bindhub-store` crate. The initial schema records projects, snapshots, manifest entries, blob and chunk references, operations, policies, policy evaluations, and restore attempts. SQLite stores identifiers, paths, sizes, policy decisions, operation state, and object references. It does not store file contents as database BLOBs.
 
 Blob content will be addressed by BLAKE3 hashes and stored in a future local content-addressed cache on disk. SQLite rows point at that cache through object references so metadata transactions stay small and content storage can evolve separately. Remote object storage will later sit behind an S3-compatible interface so Cloudflare R2 is an implementation choice, not a domain dependency.
 
 The early CLI could conservatively inspect a local metadata database with:
 
 ```text
-devbox status --db <PATH>
+bindhub status --db <PATH>
 ```
 
 That command opens the SQLite store, applies migrations idempotently, and prints the schema version plus table counts. It does not create snapshots, hash files, restore files, or start the daemon.

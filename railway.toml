@@ -1,6 +1,6 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "infra/hosted/devbox-api.Dockerfile"
+dockerfilePath = "infra/hosted/bindhub-api.Dockerfile"
 
 [deploy]
 healthcheckPath = "/ready"

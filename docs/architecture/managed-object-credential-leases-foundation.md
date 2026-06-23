@@ -5,15 +5,15 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
-This Phase 1 slice adds a production-shaped metadata foundation for Devbox-managed object-storage
+This Phase 1 slice adds a production-shaped metadata foundation for bindhub-managed object-storage
 credential leases and account-session-scoped object-access grants without making live Cloudflare R2,
 AWS S3, or MinIO provisioning calls.
 
 ## Scope
 
-`devbox/crates/devbox-metadata` now models account/session-scoped managed object credential leases for
+`bindhub/crates/bindhub-metadata` now models account/session-scoped managed object credential leases for
 future encrypted blob sync:
 
 - provider kind: Cloudflare R2, AWS S3, or MinIO-compatible
@@ -64,11 +64,11 @@ provider configuration, redacted references, lifecycle metadata, and capability 
 The CLI adds no-network mock/dev commands:
 
 ```text
-devbox metadata credential-lease mock-create ...
-devbox metadata credential-lease check ...
-devbox metadata credential-lease rotate ...
-devbox metadata credential-lease revoke ...
-devbox metadata object-access resolve ...
+bindhub metadata credential-lease mock-create ...
+bindhub metadata credential-lease check ...
+bindhub metadata credential-lease rotate ...
+bindhub metadata credential-lease revoke ...
+bindhub metadata object-access resolve ...
 ```
 
 `mock-create` bootstraps a dev verified account/session in the metadata DB when needed, upserts the
@@ -84,20 +84,20 @@ generation, expiry/revocation state, and redacted credential references. It does
 session tokens, object credentials, provider API tokens, fingerprints, or hashes.
 
 `object-access resolve` calls the hosted API with `Authorization: Bearer <session-token>` loaded
-from `DEVBOX_SESSION_TOKEN` by default. In the normal hosted path the API derives the object grant
+from `BINDHUB_SESSION_TOKEN` by default. In the normal hosted path the API derives the object grant
 from server-side object storage config, so testers do not configure buckets, prefixes, or leases. It
 prints the authorized shared-bucket prefix for debugging and states that client object credentials
 are not returned. External testers use `--remote-kind hosted` to transfer encrypted bytes through
 the server-mediated API; direct S3-compatible CLI flags remain suitable only for trusted operator
 smoke tests with locally supplied env credentials.
 
-`devbox-daemon sync --remote-kind s3` now consumes the same object-access grant as a live alpha
+`bindhub-daemon sync --remote-kind s3` now consumes the same object-access grant as a live alpha
 preflight. The daemon refuses shared-bucket live sync unless the hosted API/lease/session-token-env
 are configured and the returned grant matches the requested bucket, region, account/project scope,
 and prefix. The grant still does not return client credentials; the direct S3 provider loads only
 environment variable names for the current transport.
 
-`devbox-daemon sync --remote-kind hosted` consumes the same grant for encrypted object transfer. The
+`bindhub-daemon sync --remote-kind hosted` consumes the same grant for encrypted object transfer. The
 metadata API opens server-side object storage, applies the account/project prefix, and enforces
 read/write/head/list capabilities on each object operation. Explicit lease expiration, revocation,
 and rotation generation still apply when an admin/debug lease row is present.

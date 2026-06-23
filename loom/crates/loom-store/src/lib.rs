@@ -9,7 +9,7 @@
 //! - `.loom/metadata/revisions.tsv` is an append-only folder-revision index.
 //! - `.loom/metadata/revisions/<revision>.tsv` stores revision entries.
 //!
-//! The old `devbox-store` crate is still compiled for alpha compatibility while
+//! The old `bindhub-store` crate is still compiled for alpha compatibility while
 //! these responsibilities migrate into Loom-owned crates.
 
 use loom_core::{

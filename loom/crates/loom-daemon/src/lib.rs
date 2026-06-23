@@ -4,7 +4,7 @@
 //! whole shared folder through `loom-worktree`, coalesces at debounce
 //! boundaries, then reconciles with the configured Loom remote cursor.
 
-use devbox_remote::{DevboxHostedRemote, DevboxHostedRemoteConfig, DEVBOX_HOSTED_REMOTE_KIND};
+use bindhub_remote::{BindhubHostedRemote, BindhubHostedRemoteConfig, BINDHUB_HOSTED_REMOTE_KIND};
 use loom_core::{FolderRevision, FolderRevisionId, RevisionBoundary};
 use loom_store::{path_to_store_string, LocalStore, RemoteConfig, StoreError};
 use loom_sync::{
@@ -583,9 +583,9 @@ pub fn configured_remote(store: &LocalStore) -> DaemonResult<RemoteConfig> {
 pub fn remote_from_config(config: &RemoteConfig) -> DaemonResult<Box<dyn LoomRemote>> {
     match config.kind() {
         LOCAL_FILESYSTEM_REMOTE_KIND => Ok(Box::new(LocalFilesystemRemote::new(config.location()))),
-        DEVBOX_HOSTED_REMOTE_KIND => {
-            let config = DevboxHostedRemoteConfig::from_clone_url(config.location())?;
-            Ok(Box::new(DevboxHostedRemote::new(config)))
+        BINDHUB_HOSTED_REMOTE_KIND => {
+            let config = BindhubHostedRemoteConfig::from_clone_url(config.location())?;
+            Ok(Box::new(BindhubHostedRemote::new(config)))
         }
         kind => Err(DaemonError::UnsupportedRemote {
             name: config.name().to_string(),

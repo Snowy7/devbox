@@ -5,18 +5,18 @@
 
 Historical terminology note: this architecture slice may use `project` for an implementation-scoped
 shared folder. New product language should say shared folder. Loom is the codename for the deeper
-source-control primitive underneath Devbox.
+source-control primitive underneath Bindhub.
 
 This Phase 1 slice adds a production-shaped account ownership proof and account session boundary
 without wiring a live OAuth/OIDC provider or browser login flow.
 
 ## Scope
 
-`devbox/crates/devbox-auth` now owns provider-agnostic proof and session semantics:
+`bindhub/crates/bindhub-auth` now owns provider-agnostic proof and session semantics:
 
 - external provider kind, issuer, and subject
 - verified email and/or verified domain
-- Devbox account id
+- Bindhub account id
 - session id
 - session token hash
 - proof/session expiration
@@ -51,7 +51,7 @@ The local store supports:
 
 ## Hosted Metadata Boundary
 
-`devbox/crates/devbox-metadata` now has matching SQLite and in-memory store primitives for:
+`bindhub/crates/bindhub-metadata` now has matching SQLite and in-memory store primitives for:
 
 - verified account proof upsert
 - provider-subject account lookup
@@ -66,8 +66,8 @@ Hosted metadata HTTP handlers now support two explicit modes. Local tests/dev ca
 local-only mock-dev headers:
 
 ```text
-x-devbox-mock-account-id
-x-devbox-mock-device-id
+x-bindhub-mock-account-id
+x-bindhub-mock-device-id
 ```
 
 Those headers remain available for tests and local development. The account-session resolver is the
@@ -95,13 +95,13 @@ requested project, and do not return raw object credentials to the client.
 The CLI surface is intentionally no-network and dev/bootstrap-only:
 
 ```text
-devbox auth mock-verified-bootstrap \
+bindhub auth mock-verified-bootstrap \
   --db <DB_PATH> \
   --verified-email <EMAIL> \
   --session-token <TOKEN>
 
-devbox auth proof-check --db <DB_PATH> --session-token <TOKEN>
-devbox auth revoke-session --db <DB_PATH> <SESSION_ID>
+bindhub auth proof-check --db <DB_PATH> --session-token <TOKEN>
+bindhub auth revoke-session --db <DB_PATH> <SESSION_ID>
 ```
 
 Output prints account/session ids and proof metadata, but it does not print raw session tokens,

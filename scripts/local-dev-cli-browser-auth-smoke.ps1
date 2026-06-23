@@ -8,22 +8,22 @@ $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
 $target = Join-Path $repo "target\debug"
-$apiExe = Join-Path $target "devbox-api.exe"
-$cliExe = Join-Path $target "devbox.exe"
+$apiExe = Join-Path $target "bindhub-api.exe"
+$cliExe = Join-Path $target "bindhub.exe"
 
 Push-Location $repo
 try {
-    cargo build -p devbox-api -p devbox-cli
+    cargo build -p bindhub-api -p bindhub-cli
 
-    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("devbox-api-smoke-" + [System.Guid]::NewGuid())
-    $config = Join-Path ([System.IO.Path]::GetTempPath()) ("devbox-cli-smoke-" + [System.Guid]::NewGuid())
-    $folder = Join-Path ([System.IO.Path]::GetTempPath()) ("devbox-folder-smoke-" + [System.Guid]::NewGuid())
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("bindhub-api-smoke-" + [System.Guid]::NewGuid())
+    $config = Join-Path ([System.IO.Path]::GetTempPath()) ("bindhub-cli-smoke-" + [System.Guid]::NewGuid())
+    $folder = Join-Path ([System.IO.Path]::GetTempPath()) ("Bindhub-folder-smoke-" + [System.Guid]::NewGuid())
     New-Item -ItemType Directory -Force $root, $config, $folder | Out-Null
     Set-Content -Path (Join-Path $folder "README.md") -Value "smoke"
 
-    $env:DEVBOX_API_METADATA_MODE = "memory"
-    $env:DEVBOX_API_SERVICE_TOKEN = $ServiceToken
-    $env:DEVBOX_CONFIG_DIR = $config
+    $env:BINDHUB_API_METADATA_MODE = "memory"
+    $env:BINDHUB_API_SERVICE_TOKEN = $ServiceToken
+    $env:BINDHUB_CONFIG_DIR = $config
     $api = Start-Process -FilePath $apiExe -ArgumentList @("--root", $root, "--bind", $ApiBind) -PassThru -WindowStyle Hidden
     $apiUrl = "http://$ApiBind"
 
@@ -66,7 +66,7 @@ try {
     } else {
         Write-Host "No -WebBaseUrl supplied; using explicit local-dev API approval simulation."
         Invoke-RestMethod -Uri "$apiUrl/v1/auth/cli-device-flow/$code/approve" -Method Post -Headers @{
-            "x-devbox-api-service-token" = $ServiceToken
+            "x-bindhub-api-service-token" = $ServiceToken
         } -ContentType "application/json" -Body (@{
             user_id = "local-dev-smoke"
             session_id = "local-dev-cli-smoke-$code"
@@ -75,17 +75,17 @@ try {
     }
 
     if (-not $login.WaitForExit(15000)) {
-        throw "devbox login timed out. stdout: $(Get-Content $loginOut -Raw) stderr: $(Get-Content $loginErr -Raw)"
+        throw "bindhub login timed out. stdout: $(Get-Content $loginOut -Raw) stderr: $(Get-Content $loginErr -Raw)"
     }
     $login.Refresh()
     $loginStdout = Get-Content $loginOut -Raw
-    if (-not $loginStdout.Contains("Logged in to Devbox")) {
-        throw "devbox login failed. stdout: $(Get-Content $loginOut -Raw) stderr: $(Get-Content $loginErr -Raw)"
+    if (-not $loginStdout.Contains("Logged in to Bindhub")) {
+        throw "bindhub login failed. stdout: $(Get-Content $loginOut -Raw) stderr: $(Get-Content $loginErr -Raw)"
     }
 
     & $cliExe share $folder --no-background-sync
     if ($LASTEXITCODE -ne 0) {
-        throw "devbox share failed"
+        throw "bindhub share failed"
     }
 
     Write-Host "CLI browser auth smoke passed"
