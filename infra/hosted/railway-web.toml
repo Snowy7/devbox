@@ -1,0 +1,19 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "infra/hosted/web.Dockerfile"
+watchPatterns = [
+  "apps/web/**",
+  "packages/**",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "turbo.json",
+  "infra/hosted/web.Dockerfile",
+  "infra/hosted/railway-web.toml",
+]
+
+[deploy]
+healthcheckPath = "/auth/sign-in"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

@@ -176,6 +176,16 @@ Deploy the three services separately:
 - `apps/web`: dashboard server.
 - `bindhub-api`: Rust API service.
 
+Railway services must point at the correct service config file. Do not rely on a root
+`railway.toml` for this monorepo; Railway applies root config broadly unless each service overrides
+the config file path.
+
+```text
+API service config:       /infra/hosted/railway-api.toml
+Dashboard service config: /infra/hosted/railway-web.toml
+Site service config:      /infra/hosted/railway-site.toml
+```
+
 Each service has a Docker path:
 
 ```sh

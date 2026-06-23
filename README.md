@@ -98,10 +98,11 @@ crates without silently deleting the alpha behavior.
   shell now provides an Electron control surface for local DB/cache/folder paths, hosted
   API/session/folder config, R2/shared-bucket prefix state, pairing, live sync command state,
   conflicts, devices, secret policy, and settings. It reads redacted `BINDHUB_*` setup state and
-  does not start sync or mutate files directly. The default Railway deploy now builds the MVP
-  `bindhub-api` product service for `bindhub login/share/clone`; product API metadata uses Railway
-  Postgres and Loom pack bytes use server-owned R2, while the legacy hosted metadata server remains
-  available for compatibility/operator smoke paths. OAuth, live
+  does not start sync or mutate files directly. Hosted Railway deploys now use explicit per-service
+  config files for the API, dashboard, and public site; the API service runs the MVP `bindhub-api`
+  product service for `bindhub login/share/clone`; product API metadata uses Railway Postgres and
+  Loom pack bytes use server-owned R2, while the legacy hosted metadata server remains available
+  for compatibility/operator smoke paths. OAuth, live
   Cloudflare/AWS credential provisioning, signed installers, multi-region/observability hardening,
   automatic conflict resolution, and paid/team/agent/Git-replacement work remain deferred.
 
@@ -276,9 +277,10 @@ transfers encrypted object bytes and resolves metadata through the metadata API 
 tester's session token on the client; hosted API mode rejects tester-supplied `--metadata-account`
 and uses the authenticated server session account. Trusted operators can still use
 `--remote-kind s3` for direct S3/R2 smoke tests with local bucket env keys.
-Railway deployment is wired to the MVP `bindhub-api` product service by default. The hosted metadata
-backend remains available for compatibility/operator smoke paths; OAuth, UI onboarding, and
-multi-region/observability hardening remain deferred.
+Railway deployments are split by explicit service config files under `infra/hosted`: API,
+dashboard, and public site. The API config is wired to the MVP `bindhub-api` product service. The
+hosted metadata backend remains available for compatibility/operator smoke paths; multi-region and
+observability hardening remain deferred.
 
 `changes scan` compares the current included regular files against the latest persisted snapshot
 for the shared folder root. Created, modified, and deleted files become pending local operations in

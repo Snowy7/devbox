@@ -1,6 +1,14 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "infra/hosted/bindhub-api.Dockerfile"
+watchPatterns = [
+  "bindhub/**",
+  "loom/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "infra/hosted/bindhub-api.Dockerfile",
+  "infra/hosted/railway-api.toml",
+]
 
 [deploy]
 healthcheckPath = "/ready"

@@ -8,8 +8,19 @@ Current container entrypoints:
 - `web.Dockerfile`: TanStack Start dashboard server. Runtime env is read from container env.
 - `site.Dockerfile`: Astro static site/docs server. No secrets required today.
 
-The default Railway deploy in [railway.toml](../../railway.toml) now builds `bindhub-api`, which is
-the MVP product API used by:
+Railway services must use explicit service config files. Do not put a root `railway.toml` back in
+the repo unless the repo goes back to one Railway service; Railway will auto-apply a root config to
+services that do not override it.
+
+Use these Railway config file paths:
+
+```text
+API:       /infra/hosted/railway-api.toml
+Dashboard: /infra/hosted/railway-web.toml
+Site:      /infra/hosted/railway-site.toml
+```
+
+The API config builds `bindhub-api`, which is the MVP product API used by:
 
 ```text
 bindhub login
@@ -47,14 +58,16 @@ it is not the durable product metadata store.
 
 Railway setup:
 
-1. Deploy with the root [railway.toml](../../railway.toml).
-2. Attach Railway Postgres and set `DATABASE_URL` on the `bindhub-api` service. You can also use
+1. Create a Railway service for the API.
+2. In the API service settings, set the Railway config file path to
+   `/infra/hosted/railway-api.toml`.
+3. Attach Railway Postgres and set `DATABASE_URL` on the `bindhub-api` service. You can also use
    `BINDHUB_API_DATABASE_URL`; `DATABASE_URL` is the normal Railway path.
-3. Configure server-side R2 pack storage when staging should use Cloudflare object storage:
+4. Configure server-side R2 pack storage when staging should use Cloudflare object storage:
    `BINDHUB_R2_ENDPOINT`, `BINDHUB_R2_BUCKET`, `BINDHUB_R2_ACCESS_KEY_ID`,
    `BINDHUB_R2_SECRET_ACCESS_KEY`, optional `BINDHUB_R2_REGION=auto`, optional
    `BINDHUB_R2_PREFIX`, and optional `BINDHUB_R2_SESSION_TOKEN`.
-4. Deploy and confirm `/ready` returns `service: "bindhub-api"`, `metadata: "postgres"`, and
+5. Deploy and confirm `/ready` returns `service: "bindhub-api"`, `metadata: "postgres"`, and
    `storage: "r2-packs"` when R2 is active.
 
 Do not attach a Railway Volume for the product API. Durable API metadata lives in Postgres, and pack
@@ -118,6 +131,12 @@ VITE_BINDHUB_DOCS_URL=https://staging.bindhub.com/docs
 BINDHUB_HOSTED_API_URL=https://api-staging.bindhub.com
 ```
 
+Railway setup:
+
+1. Create a Railway service for the dashboard.
+2. Set the Railway config file path to `/infra/hosted/railway-web.toml`.
+3. Set the WorkOS and hosted API env vars on this dashboard service.
+
 ## Site Container
 
 Build:
@@ -131,6 +150,12 @@ Run locally:
 ```bash
 docker run --rm -p 3002:3002 -e PORT=3002 bindhub-site:staging
 ```
+
+Railway setup:
+
+1. Create a Railway service for the public site/docs.
+2. Set the Railway config file path to `/infra/hosted/railway-site.toml`.
+3. Set `PUBLIC_BINDHUB_DASHBOARD_URL` when the dashboard lives on a separate domain.
 
 ## Legacy Metadata API
 
@@ -168,7 +193,7 @@ The metadata image also intentionally avoids Docker `VOLUME`. For local SQLite s
 `-e BINDHUB_METADATA_DB=/data/bindhub-metadata.sqlite3` and mount `/data` explicitly with Docker or
 Railway.
 
-To deploy the legacy metadata API on Railway instead of the product API, point `railway.toml` at
-`infra/hosted/metadata.Dockerfile`, attach Railway Postgres, set `DATABASE_URL`, and set server-side
-object storage env vars. These values stay on the server; users should never configure R2 endpoints,
-bucket names, prefixes, or object-access lease ids.
+To deploy the legacy metadata API on Railway instead of the product API, create a separate Railway
+service and configure it to use `infra/hosted/metadata.Dockerfile`, attach Railway Postgres, set
+`DATABASE_URL`, and set server-side object storage env vars. These values stay on the server; users
+should never configure R2 endpoints, bucket names, prefixes, or object-access lease ids.
