@@ -57,6 +57,18 @@ type DeviceWire = {
   display_name: string
 }
 
+type DevboxSessionWire = {
+  account_id: string
+  session_id: string
+  session_token: string
+  device_id: string
+}
+
+type DevboxApiSession = {
+  sessionToken: string
+  deviceId: string
+}
+
 export async function loadDashboardData(
   auth: UserInfo
 ): Promise<DashboardData> {
@@ -64,8 +76,11 @@ export async function loadDashboardData(
   const source = readDashboardDataSource(process.env)
 
   if (source.mode === "hosted-workos") {
+    const session = await exchangeWorkOsSession(source, auth)
+
     return dataFromApi(identity, source, {
-      Authorization: `Bearer ${auth.accessToken}`,
+      Authorization: `Bearer ${session.sessionToken}`,
+      "x-devbox-device-id": session.deviceId,
     })
   }
 
@@ -109,6 +124,45 @@ export function readDashboardDataSource(
     mode: "local-dev-fixtures",
     label: "Local dev typed fixtures",
     baseUrl: null,
+  }
+}
+
+async function exchangeWorkOsSession(
+  source: DashboardDataSource,
+  auth: UserInfo
+): Promise<DevboxApiSession> {
+  const baseUrl = source.baseUrl
+  const serviceToken = requiredEnv("DEVBOX_HOSTED_API_SERVICE_TOKEN")
+
+  if (!baseUrl) {
+    throw new Error("dashboard API base URL is not configured")
+  }
+
+  const response = await fetch(`${baseUrl}/v1/auth/workos-session`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "x-devbox-api-service-token": serviceToken,
+    },
+    body: JSON.stringify({
+      user_id: auth.user.id,
+      session_id: auth.sessionId,
+      organization_id: auth.organizationId ?? null,
+      device_id: `web-${auth.sessionId}`,
+      device_display_name: "Devbox web session",
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Devbox API session exchange failed: ${response.status}`)
+  }
+
+  const session = (await response.json()) as DevboxSessionWire
+
+  return {
+    sessionToken: session.session_token,
+    deviceId: session.device_id,
   }
 }
 
