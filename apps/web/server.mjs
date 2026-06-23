@@ -31,6 +31,7 @@ function isStaticPath(pathname) {
   return (
     pathname.startsWith("/assets/") ||
     pathname === "/favicon.ico" ||
+    pathname === "/favicon.svg" ||
     pathname === "/manifest.json" ||
     pathname === "/robots.txt"
   )
@@ -85,9 +86,23 @@ function requestFromNode(req) {
 
 async function sendWebResponse(res, response) {
   res.statusCode = response.status
+  const setCookies =
+    typeof response.headers.getSetCookie === "function"
+      ? response.headers.getSetCookie()
+      : []
+
   response.headers.forEach((value, key) => {
+    if (key.toLowerCase() === "set-cookie") return
     res.setHeader(key, value)
   })
+  if (setCookies.length > 0) {
+    res.setHeader("Set-Cookie", setCookies)
+  } else {
+    const setCookie = response.headers.get("set-cookie")
+    if (setCookie) {
+      res.setHeader("Set-Cookie", setCookie)
+    }
+  }
 
   if (!response.body) {
     res.end()

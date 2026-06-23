@@ -1,5 +1,6 @@
 import { WorkOS } from "@workos-inc/node"
 import { getAuthkit } from "@workos/authkit-tanstack-react-start"
+import { createHmac, timingSafeEqual } from "node:crypto"
 
 import {
   readWorkOsAuthEnv,
@@ -9,6 +10,20 @@ import { readServerRuntimeEnv } from "@/lib/server-env"
 
 const oauthStateCookie = "Bindhub-oauth-state"
 const oauthReturnCookie = "Bindhub-oauth-return"
+const oauthStatePrefix = "bindhub_auth_"
+const oauthStateMaxAgeSeconds = 600
+
+type OAuthStatePayload = {
+  issuedAt: number
+  nonce: string
+  returnPathname: string
+}
+
+type ConfiguredWorkOsAuthEnv = ReturnType<typeof readWorkOsAuthEnv> & {
+  apiKey: string
+  clientId: string
+  cookiePassword: string
+}
 
 type AuthResult =
   | { ok: true; response: Response }
@@ -64,7 +79,7 @@ type WorkOsAuthError = Error & {
   }
 }
 
-function readEnv() {
+function readEnv(): ConfiguredWorkOsAuthEnv {
   const env = readWorkOsAuthEnv(readServerRuntimeEnv())
 
   if (!env.clientId || !env.apiKey || !env.cookiePassword) {
@@ -73,7 +88,7 @@ function readEnv() {
     )
   }
 
-  return env
+  return env as ConfiguredWorkOsAuthEnv
 }
 
 function workosClient() {
@@ -173,7 +188,7 @@ export async function checkEmailForSso({
     }
 
     const url = new URL(request.url)
-    const state = `bindhub_auth_${crypto.randomUUID()}`
+    const state = createOAuthState(returnPathname, env.cookiePassword)
     const callbackUrl = env.redirectUri ?? new URL("/auth/callback", url).href
     const authorizationUrl = workos.userManagement.getAuthorizationUrl({
       connectionId: activeConnection.id,
@@ -184,11 +199,11 @@ export async function checkEmailForSso({
     const response = redirectResponse(authorizationUrl, 307)
     response.headers.append(
       "Set-Cookie",
-      serializeCookie(oauthStateCookie, state, 600)
+      serializeCookie(oauthStateCookie, state, oauthStateMaxAgeSeconds)
     )
     response.headers.append(
       "Set-Cookie",
-      serializeCookie(oauthReturnCookie, returnPathname, 600)
+      serializeCookie(oauthReturnCookie, returnPathname, oauthStateMaxAgeSeconds)
     )
 
     return { method: "sso", response }
@@ -394,7 +409,7 @@ export async function startGoogleOAuth(request: Request) {
 
   try {
     const { env, workos } = workosClient()
-    const state = `bindhub_auth_${crypto.randomUUID()}`
+    const state = createOAuthState(returnPathname, env.cookiePassword)
     const callbackUrl = env.redirectUri ?? new URL("/auth/callback", url).href
     const authorizationUrl = workos.userManagement.getAuthorizationUrl({
       provider: "GoogleOAuth",
@@ -406,11 +421,11 @@ export async function startGoogleOAuth(request: Request) {
     const response = redirectResponse(authorizationUrl, 307)
     response.headers.append(
       "Set-Cookie",
-      serializeCookie(oauthStateCookie, state, 600)
+      serializeCookie(oauthStateCookie, state, oauthStateMaxAgeSeconds)
     )
     response.headers.append(
       "Set-Cookie",
-      serializeCookie(oauthReturnCookie, returnPathname, 600)
+      serializeCookie(oauthReturnCookie, returnPathname, oauthStateMaxAgeSeconds)
     )
 
     return response
@@ -429,7 +444,7 @@ export async function startAuthkitInitiate(request: Request) {
   try {
     const { env, workos } = workosClient()
     const url = new URL(request.url)
-    const state = `bindhub_auth_${crypto.randomUUID()}`
+    const state = createOAuthState("/", env.cookiePassword)
     const callbackUrl = env.redirectUri ?? new URL("/auth/callback", url).href
     const authorizationUrl = workos.userManagement.getAuthorizationUrl({
       provider: "authkit",
@@ -440,9 +455,12 @@ export async function startAuthkitInitiate(request: Request) {
     const response = redirectResponse(authorizationUrl, 307)
     response.headers.append(
       "Set-Cookie",
-      serializeCookie(oauthStateCookie, state, 600)
+      serializeCookie(oauthStateCookie, state, oauthStateMaxAgeSeconds)
     )
-    response.headers.append("Set-Cookie", serializeCookie(oauthReturnCookie, "/", 600))
+    response.headers.append(
+      "Set-Cookie",
+      serializeCookie(oauthReturnCookie, "/", oauthStateMaxAgeSeconds)
+    )
 
     return response
   } catch (error) {
@@ -456,16 +474,20 @@ export async function maybeHandleCustomOAuthCallback(request: Request) {
   const code = url.searchParams.get("code")
   const state = url.searchParams.get("state")
 
-  if (!code || !state?.startsWith("bindhub_auth_")) {
+  if (!code || !state?.startsWith(oauthStatePrefix)) {
     return undefined
   }
 
+  const { env, workos } = workosClient()
   const cookies = parseCookies(request.headers.get("cookie"))
   const expectedState = cookies.get(oauthStateCookie)
+  const verifiedState = verifyOAuthState(state, env.cookiePassword)
   const returnPathname =
-    safeReturnPathname(cookies.get(oauthReturnCookie) ?? null) ?? "/"
+    verifiedState?.returnPathname ??
+    safeReturnPathname(cookies.get(oauthReturnCookie) ?? null) ??
+    "/"
 
-  if (state !== expectedState) {
+  if (!verifiedState && state !== expectedState) {
     const target = new URL("/auth/sign-in", request.url)
     target.searchParams.set("error", "oauth_state")
     target.searchParams.set("returnPathname", returnPathname)
@@ -473,7 +495,6 @@ export async function maybeHandleCustomOAuthCallback(request: Request) {
   }
 
   try {
-    const { env, workos } = workosClient()
     const result = await workos.userManagement.authenticateWithCode({
       clientId: env.clientId,
       code,
@@ -565,7 +586,7 @@ function ssoRequiredFromError(
   try {
     const { env, workos } = workosClient()
     const url = new URL(request.url)
-    const state = `bindhub_auth_${crypto.randomUUID()}`
+    const state = createOAuthState(returnPathname, env.cookiePassword)
     const callbackUrl = env.redirectUri ?? new URL("/auth/callback", url).href
     const authorizationUrl = workos.userManagement.getAuthorizationUrl({
       connectionId,
@@ -576,11 +597,11 @@ function ssoRequiredFromError(
     const response = redirectResponse(authorizationUrl, 307)
     response.headers.append(
       "Set-Cookie",
-      serializeCookie(oauthStateCookie, state, 600)
+      serializeCookie(oauthStateCookie, state, oauthStateMaxAgeSeconds)
     )
     response.headers.append(
       "Set-Cookie",
-      serializeCookie(oauthReturnCookie, returnPathname, 600)
+      serializeCookie(oauthReturnCookie, returnPathname, oauthStateMaxAgeSeconds)
     )
     return response
   } catch (redirectError) {
@@ -596,6 +617,82 @@ function redirectResponse(target: string | URL, status = 303) {
       Location: target.toString(),
     },
   })
+}
+
+function createOAuthState(returnPathname: string, secret: string) {
+  const payload: OAuthStatePayload = {
+    issuedAt: Date.now(),
+    nonce: crypto.randomUUID(),
+    returnPathname,
+  }
+  const encoded = base64UrlEncode(JSON.stringify(payload))
+  return `${oauthStatePrefix}${encoded}.${signOAuthState(encoded, secret)}`
+}
+
+function verifyOAuthState(
+  value: string,
+  secret: string
+): OAuthStatePayload | undefined {
+  if (!value.startsWith(oauthStatePrefix)) {
+    return undefined
+  }
+
+  const rest = value.slice(oauthStatePrefix.length)
+  const [encoded, signature] = rest.split(".")
+  if (!encoded || !signature) {
+    return undefined
+  }
+
+  const expected = signOAuthState(encoded, secret)
+  if (!timingSafeBase64UrlEqual(signature, expected)) {
+    return undefined
+  }
+
+  try {
+    const parsed = JSON.parse(base64UrlDecode(encoded)) as Partial<OAuthStatePayload>
+    const returnPathname = safeReturnPathname(parsed.returnPathname ?? null)
+    if (
+      typeof parsed.issuedAt !== "number" ||
+      typeof parsed.nonce !== "string" ||
+      !returnPathname
+    ) {
+      return undefined
+    }
+
+    const ageMs = Date.now() - parsed.issuedAt
+    if (ageMs < -60_000 || ageMs > oauthStateMaxAgeSeconds * 1000) {
+      return undefined
+    }
+
+    return {
+      issuedAt: parsed.issuedAt,
+      nonce: parsed.nonce,
+      returnPathname,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function signOAuthState(value: string, secret: string) {
+  return createHmac("sha256", secret).update(value).digest("base64url")
+}
+
+function timingSafeBase64UrlEqual(actual: string, expected: string) {
+  const actualBuffer = Buffer.from(actual)
+  const expectedBuffer = Buffer.from(expected)
+  return (
+    actualBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(actualBuffer, expectedBuffer)
+  )
+}
+
+function base64UrlEncode(value: string) {
+  return Buffer.from(value, "utf8").toString("base64url")
+}
+
+function base64UrlDecode(value: string) {
+  return Buffer.from(value, "base64url").toString("utf8")
 }
 
 function serializeCookie(name: string, value: string, maxAge: number) {

@@ -22,12 +22,7 @@ export const Route = createRootRoute({
         title: "Bindhub",
       },
     ],
-    links: [
-      {
-        rel: "stylesheet",
-        href: appCss,
-      },
-    ],
+    links: [],
   }),
   notFoundComponent: () => (
     <main className="container mx-auto p-4 pt-16">
@@ -64,6 +59,10 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             `,
           }}
         />
+        <link rel="stylesheet" href={appCss} />
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+        <link rel="manifest" href="/manifest.json" />
         <HeadContent />
       </head>
       <body className="min-h-svh bg-background text-foreground">
