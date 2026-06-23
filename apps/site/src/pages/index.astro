@@ -1,6 +1,9 @@
 ---
 import SiteShell from "../components/SiteShell.astro"
 import HeroOrbit from "../components/HeroOrbit.astro"
+
+const dashboardBaseUrl = (import.meta.env.PUBLIC_BINDHUB_DASHBOARD_URL ?? "").replace(/\/$/, "")
+const dashboardUrl = dashboardBaseUrl || "/"
 ---
 
 <SiteShell
@@ -18,7 +21,7 @@ import HeroOrbit from "../components/HeroOrbit.astro"
         context, machine state, and the bytes to keep moving.
       </p>
       <div class="hero-actions">
-        <a class="button primary" href="/auth/sign-in">
+        <a class="button primary" href={dashboardUrl}>
           Open dashboard
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path
@@ -306,7 +309,7 @@ import HeroOrbit from "../components/HeroOrbit.astro"
       </div>
 
       <div class="section-actions" style="justify-content: center">
-        <a class="button primary" href="/dashboard">View app route</a>
+        <a class="button primary" href={dashboardUrl}>View app route</a>
         <a class="button secondary" href="/docs/getting-started/">Alpha setup</a>
       </div>
     </div>

@@ -23,6 +23,19 @@ pnpm --filter apps-site format
 
 Local dev serves the public site and docs at `http://localhost:3002`.
 
+## Environment
+
+The site is static, so it only accepts public build-time variables:
+
+```sh
+PUBLIC_BINDHUB_DASHBOARD_URL=http://localhost:3000
+```
+
+In staging, set this to the dashboard origin, for example
+`https://app-staging.bindhub.com`. The "Open dashboard" and "Sign in" links use
+that value. If it is unset, links fall back to same-origin paths for local proxy
+setups.
+
 ## Content Boundaries
 
 The public site should stay centered on folders, machines, trust, and developer

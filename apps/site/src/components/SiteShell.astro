@@ -12,6 +12,9 @@ const { title, description, canonicalPath = Astro.url.pathname } = Astro.props
 const pageTitle = title === "Bindhub" ? "Bindhub" : `${title} | Bindhub`
 const canonicalUrl = new URL(canonicalPath, Astro.url.origin)
 const ogImageUrl = new URL("/bindhub-folder-continuity.png", Astro.url.origin)
+const dashboardBaseUrl = (import.meta.env.PUBLIC_BINDHUB_DASHBOARD_URL ?? "").replace(/\/$/, "")
+const dashboardUrl = dashboardBaseUrl || "/"
+const dashboardSignInUrl = dashboardBaseUrl ? `${dashboardBaseUrl}/auth/sign-in` : "/auth/sign-in"
 ---
 
 <!doctype html>
@@ -54,8 +57,8 @@ const ogImageUrl = new URL("/bindhub-folder-continuity.png", Astro.url.origin)
           <a href="/#machines">Machines</a>
           <a href="/#storage">Storage</a>
           <a href="/docs/">Docs</a>
-          <a href="/auth/sign-in">Sign in</a>
-          <a class="button primary sm nav-cta" href="/auth/sign-in">
+          <a href={dashboardSignInUrl}>Sign in</a>
+          <a class="button primary sm nav-cta" href={dashboardUrl}>
             Open dashboard
           </a>
         </div>
@@ -72,8 +75,8 @@ const ogImageUrl = new URL("/bindhub-folder-continuity.png", Astro.url.origin)
       <div class="footer-links">
         <a href="/docs/">Docs</a>
         <a href="/docs/security/">Security</a>
-        <a href="/dashboard">Dashboard</a>
-        <a href="/auth/sign-in">Sign in</a>
+        <a href={dashboardUrl}>Dashboard</a>
+        <a href={dashboardSignInUrl}>Sign in</a>
       </div>
     </footer>
     <script is:inline>

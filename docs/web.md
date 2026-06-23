@@ -222,7 +222,14 @@ BINDHUB_R2_ACCESS_KEY_ID=<optional blob key id>
 BINDHUB_R2_SECRET_ACCESS_KEY=<optional blob secret>
 ```
 
-Site hosted env: none required today.
+Site hosted env:
+
+```sh
+PUBLIC_BINDHUB_DASHBOARD_URL=https://app-staging.bindhub.com
+```
+
+This is public and build-time only. It drives the static site's dashboard/sign-in
+links when the landing/docs site and dashboard are separate services.
 
 Before calling the deployment alpha-ready:
 
