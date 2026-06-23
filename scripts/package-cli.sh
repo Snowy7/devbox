@@ -27,7 +27,7 @@ cd "$repo_root"
 
 version="${1:-$(git rev-parse --short HEAD)}"
 target="${BINDHUB_RELEASE_TARGET:-}"
-export BINDHUB_DEFAULT_API_URL="${BINDHUB_DEFAULT_API_URL:-https://bindhub-staging.up.railway.app}"
+export BINDHUB_DEFAULT_API_URL="${BINDHUB_DEFAULT_API_URL:-https://staging-api.bindhub.dev/}"
 
 if [[ -z "$target" ]]; then
   os="$(uname -s)"
@@ -86,7 +86,7 @@ cat > "$stage_dir/.env.example" <<'ENV'
 # Bindhub CLI local/dev overrides.
 # Packaged production builds should already know the Bindhub API endpoint.
 
-# BINDHUB_API_URL=https://bindhub-staging.up.railway.app
+# BINDHUB_API_URL=https://staging-api.bindhub.dev/
 BINDHUB_CONFIG_DIR=.bindhub
 ENV
 cp "$repo_root/.env.example" "$stage_dir/.env.operator.example"

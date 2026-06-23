@@ -293,7 +293,7 @@ On Windows:
 .\scripts\package-cli.ps1 -Version v0.1.0-alpha.1
 ```
 
-Packages bake in `https://bindhub-staging.up.railway.app` as the default Bindhub API unless
+Packages bake in `https://staging-api.bindhub.dev/` as the default Bindhub API unless
 `BINDHUB_DEFAULT_API_URL` or `-ApiUrl` is supplied at package time.
 
 ## Local Desktop Package
@@ -359,27 +359,45 @@ gh run watch <RUN_ID> --exit-status
 
 ## Install Or Update
 
+Installed alpha CLIs can show the exact updater command:
+
+```bash
+bindhub update
+```
+
+To run the installer from the CLI:
+
+```bash
+bindhub update --yes
+```
+
+For a specific release:
+
+```bash
+bindhub update --version v0.1.0-alpha.1
+```
+
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Snowy7/bindhub/main/scripts/install-bindhub.ps1 | iex
+irm https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-bindhub.ps1 | iex
 ```
 
 macOS/Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Snowy7/bindhub/main/scripts/install-bindhub.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-bindhub.sh | sh
 ```
 
 Rerun the same command to update. To install a specific version:
 
 ```powershell
-irm https://raw.githubusercontent.com/Snowy7/bindhub/main/scripts/install-bindhub.ps1 -OutFile install-bindhub.ps1
+irm https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-bindhub.ps1 -OutFile install-bindhub.ps1
 .\install-bindhub.ps1 -Version v0.1.0-alpha.1
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Snowy7/bindhub/main/scripts/install-bindhub.sh | sh -s -- v0.1.0-alpha.1
+curl -fsSL https://raw.githubusercontent.com/Snowy7/devbox/main/scripts/install-bindhub.sh | sh -s -- v0.1.0-alpha.1
 ```
 
 ## Tester Install Notes

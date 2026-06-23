@@ -3166,7 +3166,10 @@ mod tests {
             "authorization".to_string(),
             format!("Bearer {}", approved_session.session_token),
         );
-        bindhub_headers.insert("x-bindhub-device-id".to_string(), approved_session.device_id);
+        bindhub_headers.insert(
+            "x-bindhub-device-id".to_string(),
+            approved_session.device_id,
+        );
         let devices_response = route_request(
             &api,
             HttpRequest {

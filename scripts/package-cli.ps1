@@ -14,7 +14,7 @@ if (-not $ApiUrl) {
     $ApiUrl = if ($env:BINDHUB_DEFAULT_API_URL) {
         $env:BINDHUB_DEFAULT_API_URL
     } else {
-        "https://bindhub-staging.up.railway.app"
+        "https://staging-api.bindhub.dev/"
     }
 }
 
@@ -63,7 +63,7 @@ Copy-Item -Force -Path (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $
 # Bindhub CLI local/dev overrides.
 # Packaged production builds should already know the Bindhub API endpoint.
 
-# BINDHUB_API_URL=https://bindhub-staging.up.railway.app
+# BINDHUB_API_URL=https://staging-api.bindhub.dev/
 BINDHUB_CONFIG_DIR=.bindhub
 "@ | Set-Content -Encoding UTF8 -Path (Join-Path $StageDir ".env.example")
 

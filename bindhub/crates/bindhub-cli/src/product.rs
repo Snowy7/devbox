@@ -19,7 +19,7 @@ use std::fs;
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 use ureq::Error as UreqError;
 
@@ -28,6 +28,8 @@ const API_URL_ENV: &str = "BINDHUB_API_URL";
 const WEB_URL_ENV: &str = "BINDHUB_WEB_URL";
 const LOCAL_DEV_API_URL: &str = "http://127.0.0.1:8787";
 const LOCAL_DEV_WEB_URL: &str = "http://localhost:3000";
+const DEFAULT_UPDATE_REPO: &str = "Snowy7/devbox";
+const UPDATE_INSTALLER_BRANCH: &str = "main";
 const CONFIG_FILE: &str = "config.json";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -152,6 +154,13 @@ struct DaemonEntryArgs {
     max_cycles: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+struct UpdateArgs {
+    version: String,
+    repo: String,
+    yes: bool,
+}
+
 pub fn run_command(command: &str, args: &[String]) -> ExitCode {
     if args
         .first()
@@ -173,6 +182,7 @@ pub fn run_command(command: &str, args: &[String]) -> ExitCode {
         "keep" => result_to_exit(parse_keep_args(args).and_then(run_keep)),
         "free-space" => result_to_exit(parse_free_space_args(args).and_then(run_free_space)),
         "doctor" => result_to_exit(run_doctor(args)),
+        "update" => result_to_exit(parse_update_args(args).and_then(run_update)),
         "manage" => {
             println!("bindhub manage: shared-folder management will move here after the MVP CLI.");
             println!("For now, use bindhub status, warm, hydrate, keep, free-space, pause, resume, or unlink.");
@@ -229,6 +239,7 @@ pub fn print_product_command_help(command: &str) {
         "hydrate" => "bindhub hydrate <PATH|FOLDER>",
         "keep" => "bindhub keep <PATH|FOLDER>",
         "free-space" => "bindhub free-space <PATH|FOLDER> [--max-bytes <BYTES>]",
+        "update" => "bindhub update [--yes] [--version <TAG>] [--repo <OWNER/REPO>]",
         _ => "bindhub <COMMAND>",
     };
 
@@ -237,6 +248,63 @@ pub fn print_product_command_help(command: &str) {
     println!("Usage: {usage}");
     println!();
     println!("bindhub keeps folders continuous across machines.");
+}
+
+fn run_update(args: UpdateArgs) -> Result<(), String> {
+    let command = update_install_command(&args);
+    println!("Bindhub updater");
+    println!("Current version: {}", env!("CARGO_PKG_VERSION"));
+    println!("Release source: {}", args.repo);
+    println!("Requested version: {}", args.version);
+
+    if !args.yes {
+        println!("Installer command:");
+        println!("{command}");
+        println!("Run bindhub update --yes to execute it.");
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'; $script = Join-Path $env:TEMP 'bindhub-install-{}.ps1'; Invoke-RestMethod -Uri '{}' -OutFile $script; & $script -Version '{}' -Repo '{}'",
+            std::process::id(),
+            update_installer_url(&args.repo, "install-bindhub.ps1"),
+            powershell_single_quote(&args.version),
+            powershell_single_quote(&args.repo)
+        );
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
+            .spawn()
+            .map_err(|error| format!("could not start updater: {error}"))?;
+        println!("Updater started in the background. Open a new terminal after it finishes.");
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let script = format!(
+            "BINDHUB_REPO={} curl -fsSL {} | sh -s -- {}",
+            sh_single_quote(&args.repo),
+            sh_single_quote(&update_installer_url(&args.repo, "install-bindhub.sh")),
+            sh_single_quote(&args.version)
+        );
+        let status = Command::new("sh")
+            .args(["-c", &script])
+            .status()
+            .map_err(|error| format!("could not start updater: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("updater exited with status {status}"))
+        }
+    }
 }
 
 fn run_doctor(args: &[String]) -> Result<(), String> {
@@ -1637,6 +1705,59 @@ fn parse_free_space_args(args: &[String]) -> Result<FreeSpaceArgs, String> {
     })
 }
 
+fn parse_update_args(args: &[String]) -> Result<UpdateArgs, String> {
+    let mut version = "latest".to_string();
+    let mut repo = std::env::var("BINDHUB_UPDATE_REPO")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_UPDATE_REPO.to_string());
+    let mut yes = false;
+    let mut positional_version = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--yes" | "-y" => yes = true,
+            "--version" => {
+                index += 1;
+                version = required_value(args, index, "--version")?;
+            }
+            "--repo" => {
+                index += 1;
+                repo = required_value(args, index, "--repo")?;
+            }
+            value if value.starts_with("--version=") => {
+                version = value
+                    .split_once('=')
+                    .expect("--version= has a delimiter")
+                    .1
+                    .to_string();
+            }
+            value if value.starts_with("--repo=") => {
+                repo = value
+                    .split_once('=')
+                    .expect("--repo= has a delimiter")
+                    .1
+                    .to_string();
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("update unknown option '{value}'"));
+            }
+            value => {
+                if positional_version.replace(value.to_string()).is_some() {
+                    return Err("update accepts at most one version tag".to_string());
+                }
+            }
+        }
+        index += 1;
+    }
+    if let Some(value) = positional_version {
+        version = value;
+    }
+    validate_update_repo(&repo)?;
+    validate_update_version(&version)?;
+    Ok(UpdateArgs { version, repo, yes })
+}
+
 fn parse_resume_args(args: &[String]) -> Result<ResumeArgs, String> {
     let mut target = None;
     let mut start_background_sync = true;
@@ -2032,6 +2153,67 @@ fn default_api_url() -> String {
 
 fn default_web_url() -> String {
     std::env::var(WEB_URL_ENV).unwrap_or_else(|_| LOCAL_DEV_WEB_URL.to_string())
+}
+
+fn update_installer_url(repo: &str, installer: &str) -> String {
+    format!(
+        "https://raw.githubusercontent.com/{repo}/{UPDATE_INSTALLER_BRANCH}/scripts/{installer}"
+    )
+}
+
+fn update_install_command(args: &UpdateArgs) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        format!(
+            "irm {} -OutFile install-bindhub.ps1; .\\install-bindhub.ps1 -Version {} -Repo {}",
+            update_installer_url(&args.repo, "install-bindhub.ps1"),
+            args.version,
+            args.repo
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!(
+            "BINDHUB_REPO={} curl -fsSL {} | sh -s -- {}",
+            sh_single_quote(&args.repo),
+            sh_single_quote(&update_installer_url(&args.repo, "install-bindhub.sh")),
+            sh_single_quote(&args.version)
+        )
+    }
+}
+
+fn validate_update_repo(repo: &str) -> Result<(), String> {
+    let parts = repo.split('/').collect::<Vec<_>>();
+    if parts.len() != 2
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(is_safe_update_token_char))
+    {
+        return Err("--repo must look like OWNER/REPO".to_string());
+    }
+    Ok(())
+}
+
+fn validate_update_version(version: &str) -> Result<(), String> {
+    if version.is_empty() || !version.chars().all(is_safe_update_token_char) {
+        return Err("--version must be a release tag such as latest or v0.1.0-alpha.1".to_string());
+    }
+    Ok(())
+}
+
+fn is_safe_update_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn cli_verification_url(web_url: &str, user_code: &str) -> Option<String> {

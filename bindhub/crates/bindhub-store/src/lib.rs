@@ -4256,8 +4256,8 @@ mod tests {
                 device_name: Some("Current machine"),
             })
             .expect("identity initializes");
-        let valid =
-            bindhub_auth::create_account_ownership_proof(bindhub_auth::AccountOwnershipProofInput {
+        let valid = bindhub_auth::create_account_ownership_proof(
+            bindhub_auth::AccountOwnershipProofInput {
                 account_id: &identity.account_id,
                 provider_kind: "oidc-dev",
                 provider_issuer: "https://issuer.bindhub.local",
@@ -4266,8 +4266,9 @@ mod tests {
                 verified_domain: None,
                 proof_issued_at: "2026-06-18T10:00:00Z",
                 proof_expires_at_unix: now_unix_seconds() + 600,
-            })
-            .expect("proof creates");
+            },
+        )
+        .expect("proof creates");
 
         let mut secret_like = valid.clone();
         secret_like.provider_subject = "provider-secret-should-not-persist".to_string();
@@ -4304,8 +4305,8 @@ mod tests {
             .expect("identity initializes");
         let raw_token = format!("raw-token-{}", "x".repeat(54));
         assert_eq!(raw_token.len(), 64);
-        let proof =
-            bindhub_auth::create_account_ownership_proof(bindhub_auth::AccountOwnershipProofInput {
+        let proof = bindhub_auth::create_account_ownership_proof(
+            bindhub_auth::AccountOwnershipProofInput {
                 account_id: &identity.account_id,
                 provider_kind: "oidc-dev",
                 provider_issuer: "https://issuer.bindhub.local",
@@ -4314,8 +4315,9 @@ mod tests {
                 verified_domain: None,
                 proof_issued_at: "2026-06-18T10:00:00Z",
                 proof_expires_at_unix: now_unix_seconds() + 600,
-            })
-            .expect("proof creates");
+            },
+        )
+        .expect("proof creates");
         store
             .upsert_account_ownership_proof(&proof)
             .expect("proof persists");
@@ -4351,8 +4353,8 @@ mod tests {
             })
             .expect("identity initializes");
         let raw_token = "raw-dev-session-token";
-        let proof =
-            bindhub_auth::create_account_ownership_proof(bindhub_auth::AccountOwnershipProofInput {
+        let proof = bindhub_auth::create_account_ownership_proof(
+            bindhub_auth::AccountOwnershipProofInput {
                 account_id: &identity.account_id,
                 provider_kind: "oidc-dev",
                 provider_issuer: "https://issuer.bindhub.local",
@@ -4361,8 +4363,9 @@ mod tests {
                 verified_domain: None,
                 proof_issued_at: "2026-06-18T10:00:00Z",
                 proof_expires_at_unix: now_unix_seconds() + 600,
-            })
-            .expect("proof creates");
+            },
+        )
+        .expect("proof creates");
         store
             .upsert_account_ownership_proof(&proof)
             .expect("proof persists");
@@ -4574,8 +4577,9 @@ mod tests {
             })
             .expect("identity initializes");
         let view = local_identity_view(&identity);
-        let draft = bindhub_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
-            .expect("invitation creates");
+        let draft =
+            bindhub_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
+                .expect("invitation creates");
         store
             .insert_pairing_invitation(&draft.invitation)
             .expect("invitation persists");
@@ -5789,8 +5793,9 @@ mod tests {
         name: &str,
     ) -> PairingApproval {
         let view = local_identity_view(identity);
-        let draft = bindhub_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
-            .expect("invitation creates");
+        let draft =
+            bindhub_auth::create_pairing_invitation(&view, "2026-06-18T10:00:00Z", 100, 600)
+                .expect("invitation creates");
         store
             .insert_pairing_invitation(&draft.invitation)
             .expect("invitation persists");

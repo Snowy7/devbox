@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="${BINDHUB_REPO:-Snowy7/bindhub}"
+repo="${BINDHUB_REPO:-Snowy7/devbox}"
 version="${BINDHUB_VERSION:-${1:-latest}}"
 install_dir="${BINDHUB_INSTALL_DIR:-$HOME/.local/bin}"
 

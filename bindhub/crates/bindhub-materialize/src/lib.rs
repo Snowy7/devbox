@@ -1657,7 +1657,9 @@ fn policy_from_wire(decision: &str, reason: Option<String>) -> MaterializeResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bindhub_metadata::{app_with_config, HostedApiConfig, InMemoryMetadataStore, MetadataStore};
+    use bindhub_metadata::{
+        app_with_config, HostedApiConfig, InMemoryMetadataStore, MetadataStore,
+    };
     use bindhub_snapshot::{RestoreTargetStatus, SnapshotManifestBuilder};
     use bindhub_store::{
         local_project_id, BlobCache, EnsureLocalIdentityOptions, NewProject, NewSnapshot,
@@ -2868,8 +2870,8 @@ mod tests {
     }
 
     fn seed_account_session(store: &mut InMemoryMetadataStore, account_id: &str, raw_token: &str) {
-        let proof =
-            bindhub_auth::create_account_ownership_proof(bindhub_auth::AccountOwnershipProofInput {
+        let proof = bindhub_auth::create_account_ownership_proof(
+            bindhub_auth::AccountOwnershipProofInput {
                 account_id,
                 provider_kind: "alpha-invite",
                 provider_issuer: "bindhub-alpha",
@@ -2878,8 +2880,9 @@ mod tests {
                 verified_domain: None,
                 proof_issued_at: "2026-06-19T09:00:00Z",
                 proof_expires_at_unix: 4_000_000_000,
-            })
-            .expect("proof creates");
+            },
+        )
+        .expect("proof creates");
         store
             .upsert_account_ownership_proof(proof.clone())
             .expect("proof upserts");

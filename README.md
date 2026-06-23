@@ -145,6 +145,7 @@ bindhub keep <path>
 bindhub free-space <path>
 bindhub status
 bindhub doctor
+bindhub update
 bindhub pause|resume|unlink [name]
 ```
 
@@ -250,6 +251,7 @@ Alpha helper scripts:
 - `scripts/bindhub-live-sync-alpha.sh` maps `.env` values into a live daemon command for local, hosted object-transfer, or trusted direct-S3 remotes.
 - `scripts/package-cli.sh <VERSION>` builds macOS/Linux alpha tool archives with Loom, bindhub CLI, daemon, metadata server, docs, separate user/operator env templates, and helper scripts.
 - `scripts/package-cli.ps1 -Version <VERSION>` builds the Windows alpha zip from a Windows machine.
+- `bindhub update` prints or runs the latest-release installer for the current platform.
 - `scripts/install-bindhub.sh` and `scripts/install-bindhub.ps1` install or update the latest release globally for the current user.
 - `scripts/package-desktop-alpha.sh <VERSION>` builds an unsigned Electron alpha control-surface bundle for macOS/Linux.
 

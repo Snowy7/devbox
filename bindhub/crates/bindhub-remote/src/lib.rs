@@ -553,8 +553,8 @@ mod tests {
     #[test]
     fn bindhub_hosted_remote_moves_pack_and_cursor_through_api() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let api =
-            bindhub_api::spawn_local_test_server(dir.path().join("api")).expect("api server starts");
+        let api = bindhub_api::spawn_local_test_server(dir.path().join("api"))
+            .expect("api server starts");
         let folder = dir.path().join("source");
         fs::create_dir_all(&folder).expect("folder creates");
         let store = LocalStore::open_or_init(&folder)
@@ -636,8 +636,8 @@ mod tests {
     #[test]
     fn bindhub_hosted_remote_reports_cursor_conflict() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let api =
-            bindhub_api::spawn_local_test_server(dir.path().join("api")).expect("api server starts");
+        let api = bindhub_api::spawn_local_test_server(dir.path().join("api"))
+            .expect("api server starts");
         let folder_id = SharedFolderId::new("shared-folder-hosted").expect("folder id");
         let provisioned =
             provision_bindhub_hosted_remote(api.base_url(), &folder_id, "Hosted").expect("remote");
@@ -666,8 +666,8 @@ mod tests {
     #[test]
     fn bindhub_hosted_remote_refuses_unauthorized_pack_and_object_access() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let api =
-            bindhub_api::spawn_local_test_server(dir.path().join("api")).expect("api server starts");
+        let api = bindhub_api::spawn_local_test_server(dir.path().join("api"))
+            .expect("api server starts");
         let folder = dir.path().join("source");
         fs::create_dir_all(&folder).expect("folder creates");
         let store = LocalStore::open_or_init(&folder)

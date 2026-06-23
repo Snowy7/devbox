@@ -3,10 +3,10 @@
 mod hosted;
 mod s3;
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use bindhub_core::BlobId;
 use bindhub_store::{BlobCache, BlobCacheError};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};

@@ -12,6 +12,7 @@ fn help_separates_product_commands_from_alpha_compatibility() {
     assert!(help_stdout.contains("  login"));
     assert!(help_stdout.contains("  share"));
     assert!(help_stdout.contains("  doctor"));
+    assert!(help_stdout.contains("  update"));
     assert!(help_stdout.contains("Advanced compatibility commands:"));
     assert!(help_stdout.contains("  snapshot"));
     assert_product_output_is_clean(&help_stdout);
@@ -20,6 +21,7 @@ fn help_separates_product_commands_from_alpha_compatibility() {
         ["share", "--help"],
         ["clone", "--help"],
         ["doctor", "--help"],
+        ["update", "--help"],
     ] {
         let output = run_bindhub_with_env([], args);
         assert_success(&output);
@@ -81,7 +83,8 @@ fn product_login_share_clone_status_pause_resume_and_unlink_flow() {
     assert_product_output_is_clean(&clone_stdout);
 
     fixture.write_source("README.md", "two\n");
-    let push_source = fixture.bindhub(["resume", path_str(&fixture.source), "--no-background-sync"]);
+    let push_source =
+        fixture.bindhub(["resume", path_str(&fixture.source), "--no-background-sync"]);
     assert_success(&push_source);
     let pull_target = fixture.bindhub([
         "sync",

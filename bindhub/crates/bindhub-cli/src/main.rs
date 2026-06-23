@@ -74,6 +74,7 @@ fn main() -> ExitCode {
         Some("hydrate") => product::run_command("hydrate", &args[1..]),
         Some("keep") => product::run_command("keep", &args[1..]),
         Some("free-space") => product::run_command("free-space", &args[1..]),
+        Some("update") => product::run_command("update", &args[1..]),
         Some("scan") => run_scan(&args[1..]),
         Some("init") => run_init(&args[1..]),
         Some("auth") => run_auth(&args[1..]),
@@ -6784,6 +6785,7 @@ fn print_help() {
     println!("  keep       Protect a path from free-space cleanup");
     println!("  free-space Safely remove backed-up local bytes");
     println!("  doctor     Check this machine and point to folder diagnostics");
+    println!("  update     Install the latest released CLI tools");
     println!("  pause      Pause sync for a shared folder");
     println!("  resume     Resume sync for a shared folder");
     println!("  unlink     Remove this machine's link to a shared folder");

@@ -128,7 +128,7 @@ For staging, point the redirect and API values at the deployed domains:
 WORKOS_REDIRECT_URI=https://app-staging.bindhub.com/auth/callback
 WORKOS_SIGN_OUT_REDIRECT_URI=https://app-staging.bindhub.com/
 VITE_BINDHUB_DOCS_URL=https://staging.bindhub.com/docs
-BINDHUB_HOSTED_API_URL=https://api-staging.bindhub.com
+BINDHUB_HOSTED_API_URL=https://staging-api.bindhub.dev/
 ```
 
 Railway setup:

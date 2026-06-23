@@ -1,6 +1,6 @@
 param(
     [string]$Version = "latest",
-    [string]$Repo = "Snowy7/bindhub",
+    [string]$Repo = "Snowy7/devbox",
     [string]$InstallDir = "$env:LOCALAPPDATA\bindhub\bin",
     [switch]$NoPath
 )

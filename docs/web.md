@@ -144,7 +144,7 @@ Hosted WorkOS/API:
 
 ```sh
 BINDHUB_DASHBOARD_DATA_MODE=hosted-workos
-BINDHUB_HOSTED_API_URL=https://api.example.com
+BINDHUB_HOSTED_API_URL=https://staging-api.bindhub.dev/
 BINDHUB_HOSTED_API_SERVICE_TOKEN=<server-to-server token>
 ```
 
@@ -217,7 +217,7 @@ WORKOS_REDIRECT_URI=https://dashboard.example.com/auth/callback
 WORKOS_SIGN_OUT_REDIRECT_URI=https://dashboard.example.com/
 VITE_BINDHUB_DOCS_URL=https://www.example.com/docs
 BINDHUB_DASHBOARD_DATA_MODE=hosted-workos
-BINDHUB_HOSTED_API_URL=https://api.example.com
+BINDHUB_HOSTED_API_URL=https://staging-api.bindhub.dev/
 BINDHUB_HOSTED_API_SERVICE_TOKEN=<same value as API service token>
 ```
 
