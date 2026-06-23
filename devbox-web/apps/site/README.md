@@ -1,43 +1,40 @@
-# Astro Starter Kit: Minimal
+# Devbox Site
+
+This Astro app owns the public Devbox site and lightweight docs.
+
+## Structure
+
+- `src/pages/index.astro` is the first public landing page.
+- `src/pages/docs/` contains the docs shell and alpha pages.
+- `src/components/` contains shared Astro layout components.
+- `src/styles/site.css` contains the local site styles.
+- `public/` contains favicons and static social or product images.
+
+## Commands
+
+Run from `devbox-web`:
 
 ```sh
-pnpm create astro@latest -- --template minimal
+pnpm --filter apps-site dev
+pnpm --filter apps-site build
+pnpm --filter apps-site preview
+pnpm --filter apps-site format
 ```
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## Content Boundaries
 
-## 🚀 Project Structure
+The public site should stay centered on folders, machines, trust, and developer
+continuity. Say "folder" in user-facing copy unless a page is explicitly
+describing external repo or package details.
 
-Inside of your Astro project, you'll see the following folders and files:
+The waitlist/contact form is UI-only in this PR. Wire it to an API, CRM, or mail
+action before collecting submissions.
 
-```text
-/
-├── public/
-├── src/
-│   └── pages/
-│       └── index.astro
-└── package.json
-```
+## Astro Notes
 
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
+Astro exposes pages from `src/pages/` by file path. Static assets in `public/`
+are served from the site root.
 
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
-
-Any static assets, like images, can be placed in the `public/` directory.
-
-## 🧞 Commands
-
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `pnpm install`             | Installs dependencies                            |
-| `pnpm dev`             | Starts local dev server at `localhost:4321`      |
-| `pnpm build`           | Build your production site to `./dist/`          |
-| `pnpm preview`         | Preview your build locally, before deploying     |
-| `pnpm astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `pnpm astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+There is no site-specific Astro typecheck task yet. The workspace
+`pnpm typecheck` command currently covers the TypeScript dashboard and shared UI
+packages.

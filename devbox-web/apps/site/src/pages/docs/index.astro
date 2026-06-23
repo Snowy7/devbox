@@ -1,0 +1,48 @@
+---
+import DocsShell from "../../components/DocsShell.astro"
+---
+
+<DocsShell
+  title="Devbox docs"
+  description="A compact guide to Devbox alpha concepts, setup, trust boundaries, and the Loom engine direction."
+>
+  <h2>What Devbox is for</h2>
+  <p>
+    Devbox is about one feeling: you open another machine and your code folder
+    is already there. The public site and docs should help alpha users
+    understand that folder continuity promise without making them learn internal
+    engine vocabulary first.
+  </p>
+
+  <div class="callout">
+    <h3>Current alpha frame</h3>
+    <p>
+      Devbox Web has a public Astro site and a separate authenticated dashboard
+      app. The dashboard uses WorkOS/AuthKit and server-owned API exchange
+      boundaries for hosted data modes.
+    </p>
+  </div>
+
+  <h2>Start here</h2>
+  <ul>
+    <li>
+      Use <a href="/docs/getting-started/">Getting started</a> for local web app commands
+      and alpha setup expectations.
+    </li>
+    <li>
+      Use <a href="/docs/concepts/">Concepts</a> for the Devbox and Loom vocabulary
+      used across the repo.
+    </li>
+    <li>
+      Use <a href="/docs/security/">Security and trust</a> before connecting real
+      folders, credentials, or generated files.
+    </li>
+  </ul>
+
+  <h2>Product boundaries</h2>
+  <p>
+    Devbox is the product surface. Loom is the source-control and sync engine
+    direction underneath it. Git matters because developers use it today, but
+    Devbox treats the shared folder as the user boundary.
+  </p>
+</DocsShell>

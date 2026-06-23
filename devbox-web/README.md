@@ -21,6 +21,14 @@ pnpm --filter web dev
 pnpm --filter apps-site dev
 ```
 
+The public site content lives in `apps/site/src/pages`. The landing page is
+`apps/site/src/pages/index.astro`; docs live under `apps/site/src/pages/docs`;
+shared Astro shells live in `apps/site/src/components`; local styling lives in
+`apps/site/src/styles/site.css`.
+
+The site waitlist/contact form is UI-only for now. Wire it to an API, CRM, or
+mail action before collecting submissions.
+
 ## Auth
 
 WorkOS environment variables:
