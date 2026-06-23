@@ -2,6 +2,7 @@ param(
     [string]$Version = "",
     [string]$Target = "x86_64-pc-windows-msvc",
     [string]$ApiUrl = "",
+    [string]$WebUrl = "",
     [switch]$SkipBuild
 )
 
@@ -15,6 +16,13 @@ if (-not $ApiUrl) {
         $env:BINDHUB_DEFAULT_API_URL
     } else {
         "https://staging-api.bindhub.dev/"
+    }
+}
+if (-not $WebUrl) {
+    $WebUrl = if ($env:BINDHUB_DEFAULT_WEB_URL) {
+        $env:BINDHUB_DEFAULT_WEB_URL
+    } else {
+        "https://app-staging.bindhub.com"
     }
 }
 
@@ -36,8 +44,10 @@ New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 $previousApiUrl = $env:BINDHUB_DEFAULT_API_URL
+$previousWebUrl = $env:BINDHUB_DEFAULT_WEB_URL
 try {
     $env:BINDHUB_DEFAULT_API_URL = $ApiUrl
+    $env:BINDHUB_DEFAULT_WEB_URL = $WebUrl
     if (-not $SkipBuild) {
         rustup target add $Target
         cargo build --release --locked `
@@ -49,6 +59,7 @@ try {
     }
 } finally {
     $env:BINDHUB_DEFAULT_API_URL = $previousApiUrl
+    $env:BINDHUB_DEFAULT_WEB_URL = $previousWebUrl
 }
 
 $ReleaseDir = Join-Path $RepoRoot "target\$Target\release"
@@ -64,6 +75,7 @@ Copy-Item -Force -Path (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $
 # Packaged production builds should already know the Bindhub API endpoint.
 
 # BINDHUB_API_URL=https://staging-api.bindhub.dev/
+# BINDHUB_WEB_URL=https://app-staging.bindhub.com
 BINDHUB_CONFIG_DIR=.bindhub
 "@ | Set-Content -Encoding UTF8 -Path (Join-Path $StageDir ".env.example")
 

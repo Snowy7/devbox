@@ -18,7 +18,8 @@ detect_target() {
 
 latest_tag() {
   curl_github "https://api.github.com/repos/$repo/releases" \
-    | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' \
+    | tr ',' '\n' \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[^"]*\)".*/\1/p' \
     | head -n 1
 }
 
@@ -42,18 +43,7 @@ curl_github_asset() {
 
 asset_url() {
   asset_name="$1"
-  curl_github "https://api.github.com/repos/$repo/releases/tags/$tag" \
-    | awk -v name="$asset_name" '
-      /"url":/ {
-        url=$0
-        sub(/^[[:space:]]*"url": "/, "", url)
-        sub(/",?$/, "", url)
-      }
-      /"name":/ && index($0, "\"" name "\"") {
-        print url
-        exit
-      }
-    '
+  printf 'https://github.com/%s/releases/download/%s/%s\n' "$repo" "$tag" "$asset_name"
 }
 
 add_path_hint() {

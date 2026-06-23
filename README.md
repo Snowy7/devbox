@@ -151,7 +151,8 @@ bindhub pause|resume|unlink [name]
 
 Packaged builds can bake in the Bindhub API endpoint. Local/dev builds default to
 `http://127.0.0.1:8787`, and operators can override that with `bindhub login --api <URL>` or
-`BINDHUB_API_URL=<URL>`.
+`BINDHUB_API_URL=<URL>`. Browser login uses the packaged dashboard URL, or `--web <URL>` /
+`BINDHUB_WEB_URL=<URL>` when overriding it locally.
 
 To remove the generated workspace after a passing run:
 

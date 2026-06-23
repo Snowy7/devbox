@@ -10,6 +10,7 @@ Builds and packages Bindhub alpha command-line tools for the current macOS/Linux
 Environment:
   BINDHUB_RELEASE_TARGET   Optional Rust target triple.
   BINDHUB_DEFAULT_API_URL  Optional default Bindhub API URL baked into the CLI.
+  BINDHUB_DEFAULT_WEB_URL  Optional default Bindhub dashboard URL baked into the CLI.
 
 Examples:
   scripts/package-cli.sh v0.1.0-alpha.1
@@ -28,6 +29,7 @@ cd "$repo_root"
 version="${1:-$(git rev-parse --short HEAD)}"
 target="${BINDHUB_RELEASE_TARGET:-}"
 export BINDHUB_DEFAULT_API_URL="${BINDHUB_DEFAULT_API_URL:-https://staging-api.bindhub.dev/}"
+export BINDHUB_DEFAULT_WEB_URL="${BINDHUB_DEFAULT_WEB_URL:-https://app-staging.bindhub.com}"
 
 if [[ -z "$target" ]]; then
   os="$(uname -s)"
@@ -87,6 +89,7 @@ cat > "$stage_dir/.env.example" <<'ENV'
 # Packaged production builds should already know the Bindhub API endpoint.
 
 # BINDHUB_API_URL=https://staging-api.bindhub.dev/
+# BINDHUB_WEB_URL=https://app-staging.bindhub.com
 BINDHUB_CONFIG_DIR=.bindhub
 ENV
 cp "$repo_root/.env.example" "$stage_dir/.env.operator.example"

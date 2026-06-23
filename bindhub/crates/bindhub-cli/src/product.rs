@@ -2152,7 +2152,10 @@ fn default_api_url() -> String {
 }
 
 fn default_web_url() -> String {
-    std::env::var(WEB_URL_ENV).unwrap_or_else(|_| LOCAL_DEV_WEB_URL.to_string())
+    std::env::var(WEB_URL_ENV)
+        .ok()
+        .or_else(|| option_env!("BINDHUB_DEFAULT_WEB_URL").map(ToString::to_string))
+        .unwrap_or_else(|| LOCAL_DEV_WEB_URL.to_string())
 }
 
 fn update_installer_url(repo: &str, installer: &str) -> String {

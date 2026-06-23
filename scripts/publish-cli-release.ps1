@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Tag,
-    [string]$ApiUrl = ""
+    [string]$ApiUrl = "",
+    [string]$WebUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +12,13 @@ if (-not $ApiUrl) {
         $env:BINDHUB_DEFAULT_API_URL
     } else {
         "https://staging-api.bindhub.dev/"
+    }
+}
+if (-not $WebUrl) {
+    $WebUrl = if ($env:BINDHUB_DEFAULT_WEB_URL) {
+        $env:BINDHUB_DEFAULT_WEB_URL
+    } else {
+        "https://app-staging.bindhub.com"
     }
 }
 
@@ -31,7 +39,7 @@ if ($LASTEXITCODE -ne 0) {
 
 git push origin $Tag
 
-& "$PSScriptRoot\package-cli.ps1" -Version $Tag -ApiUrl $ApiUrl
+& "$PSScriptRoot\package-cli.ps1" -Version $Tag -ApiUrl $ApiUrl -WebUrl $WebUrl
 
 $Assets = @(
     Join-Path $RepoRoot "dist\bindhub-$Tag-x86_64-pc-windows-msvc.zip"
@@ -60,7 +68,7 @@ if ($ReleaseExists) {
         "release", "create", $Tag
     ) + $Assets + @(
         "--title", "Bindhub CLI $Tag",
-        "--notes", "Alpha command-line tools for Loom and Bindhub. The default API is https://staging-api.bindhub.dev/. OAuth, signed installers, and production hardening are not included yet."
+        "--notes", "Alpha command-line tools for Loom and Bindhub. The default API is https://staging-api.bindhub.dev/ and browser login opens https://app-staging.bindhub.com. OAuth, signed installers, and production hardening are not included yet."
     )
     if ($Tag.Contains("-")) {
         $ghArgs += "--prerelease"
